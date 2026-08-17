@@ -1,0 +1,155 @@
+/* Follow-ups — the replied-to conversations an assignee has to decide on.
+   The thread reuses the SMS bubble styles (.sms-thread, .sms-row, .sms-bubble)
+   so the chat reads identically in both places; only the surrounding board,
+   the triage cards and the action bar are defined here. */
+
+.followups-board { position: relative; display: flex; flex-direction: column; gap: 18px; }
+
+.followups-header h1 { margin: 6px 0 0; font-size: 27px; }
+.followups-header p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+
+.followups-layout {
+  display: grid;
+  grid-template-columns: 290px 1fr;
+  gap: 18px;
+  align-items: start;
+  height: calc(100vh - 240px);
+  min-height: 480px;
+}
+
+/* -- triage list ----------------------------------------------------------- */
+.followups-list-panel {
+  display: flex; flex-direction: column; gap: 12px; height: 100%;
+  overflow: hidden;
+}
+.followups-list-head { display: flex; align-items: center; gap: 10px; }
+.followups-list-head select {
+  flex: 1; padding: 9px 11px; border: 1px solid var(--line);
+  border-radius: 9px; background: var(--white); font: inherit; font-size: 12.5px;
+}
+.followups-list { display: grid; gap: 10px; overflow-y: auto; padding-right: 2px; }
+
+.followups-list .sms-muted { padding: 10px 2px; }
+
+.followup-card {
+  display: grid; gap: 5px; width: 100%; padding: 13px 14px; text-align: left;
+  border: 1px solid var(--line); border-radius: 12px;
+  background: var(--white); cursor: pointer;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.followup-card:hover { border-color: #a9bcb5; }
+.followup-card.active {
+  border-color: var(--accent-line); background: #eef6f2;
+  box-shadow: 0 4px 14px rgba(23, 107, 91, .08);
+}
+.followup-card-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.followup-card-top strong {
+  font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.followup-card-top small { color: var(--muted); font-size: 11px; flex-shrink: 0; }
+.followup-card-meta {
+  color: var(--muted); font-size: 12px; line-height: 1.4;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* The reason line is the triage: colour carries the same order the API uses. */
+.followup-reason { font-size: 12px; font-weight: 700; color: #4a5568; }
+.followup-reason.reason-reply_needed { color: #b45309; }
+.followup-reason.reason-appointment_pending { color: #8a5a00; }
+.followup-reason.reason-appointment_booked { color: #0f5548; }
+.followup-reason.reason-no_response { color: #b42318; }
+.followup-reason.reason-opted_out { color: #b42318; }
+.followup-reason.reason-not_interested, .followup-reason.reason-in_conversation { color: #6b7280; }
+
+.followup-state-badge {
+  justify-self: start; margin-top: 2px; padding: 2px 8px; border-radius: 999px;
+  font-size: 10px; font-weight: 700; letter-spacing: .02em;
+}
+.followup-state-badge.accepted { background: #d7ece4; color: #0f5548; }
+.followup-state-badge.declined { background: #f2f3f5; color: #6b7280; }
+
+/* -- conversation panel ---------------------------------------------------- */
+.followups-panel {
+  display: flex; flex-direction: column; height: 100%; overflow: hidden;
+  border: 1px solid var(--line); border-radius: 14px; background: var(--white);
+}
+.followups-panel-header {
+  display: flex; align-items: center; gap: 13px;
+  padding: 16px 20px; border-bottom: 1px solid var(--line);
+}
+.followups-panel-header > div { flex: 1; min-width: 0; }
+.followups-panel-header h2 { margin: 0; font-size: 18px; }
+.followups-panel-header p {
+  margin: 3px 0 0; color: var(--muted); font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.followups-status select {
+  padding: 8px 11px; border: 1px solid #e6dcc4; border-radius: 9px;
+  background: #fbf3e2; color: #7c5b12; font: inherit; font-size: 12px; font-weight: 700;
+  cursor: pointer;
+}
+
+.followups-summary {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+  margin: 0; padding: 10px 20px; border-bottom: 1px solid var(--line);
+  background: var(--paper); color: var(--muted); font-size: 12px;
+}
+
+.followups-thread { flex: 1; min-height: 0; }
+
+/* The channel line above an outbound bubble: "AI · SMS", "You · SMS". */
+.followups-channel {
+  margin: 0 4px 4px; color: #8d9693;
+  font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+}
+.sms-meta.failed { color: #b42318; font-weight: 700; }
+
+/* A system note in the thread, e.g. where the assignee stepped in. */
+.followups-event {
+  align-self: center; margin: 14px 0 6px; padding: 4px 12px; border-radius: 999px;
+  background: #eceeea; color: #6b7280; font-size: 10.5px; font-weight: 700;
+}
+
+/* Reuses .sms-composer wholesale so replying reads the same in both screens. */
+.followups-composer { border-top: 1px solid var(--line); }
+.followups-composer .button { background-color: #176b5b; }
+
+.followups-actions {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+  padding: 14px 20px; border-top: 1px solid var(--line); background: var(--white);
+}
+.followups-actions .button { flex-shrink: 0; }
+/* A <button> does not inherit colour, so the secondary actions would otherwise
+   render in the browser's own button text colour rather than the page's. */
+.followups-actions .sms-button-secondary { color: var(--ink); }
+.followups-decline {
+  margin-left: auto; padding: 12px 14px; border: 0; border-radius: 8px;
+  background: transparent; color: #b42318; font: inherit; font-size: 13px; font-weight: 700;
+  cursor: pointer;
+}
+.followups-decline:hover { background: #fdeceb; }
+.followups-actions button:disabled { opacity: .55; cursor: not-allowed; }
+
+/* -- responsive ------------------------------------------------------------ */
+@media (max-width: 1120px) {
+  .followups-layout { grid-template-columns: 250px 1fr; gap: 14px; }
+}
+
+/* The two panes stack: the list scrolls to a fixed height above the thread. */
+@media (max-width: 900px) {
+  .followups-layout { grid-template-columns: 1fr; height: auto; }
+  .followups-list { max-height: 320px; }
+  .followups-panel { height: auto; min-height: 480px; }
+}
+
+@media (max-width: 560px) {
+  .followups-header h1 { font-size: 22px; }
+  .followups-panel-header { flex-wrap: wrap; gap: 10px; padding: 12px 14px; }
+  .followups-panel-header .sms-avatar.large { display: none; }
+  .followups-status { width: 100%; }
+  .followups-status select { width: 100%; }
+  .followups-summary { padding: 10px 14px; }
+  .followups-actions { padding: 12px 14px; }
+  .followups-actions > * { width: 100%; text-align: center; }
+  .followups-decline { margin-left: 0; }
+}

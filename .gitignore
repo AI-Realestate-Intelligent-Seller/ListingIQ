@@ -1,0 +1,34 @@
+cat > .gitignore << 'EOF'
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv*/
+.pytest_cache/
+.coverage
+
+# Databases
+*.db
+
+# Node
+node_modules/
+.next/
+dist/
+build/
+
+# Environment
+.env
+.env.*
+
+# Logs
+*.log
+
+# macOS/Linux
+.DS_Store
+
+# VS Code
+.vscode/
+
+# Zip backups
+*.zip
+EOF

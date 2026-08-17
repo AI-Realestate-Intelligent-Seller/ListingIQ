@@ -1,0 +1,141 @@
+/* The broker workspace runs on green, not the marketing blue. Overriding the
+   tokens here retints everything that inherits them — buttons, the brand mark,
+   the SMS panel — without touching the public site. */
+.dashboard-shell {
+  --blue: #176b5b;
+  --blue-dark: #0f5548;
+  --navy: #0d2f28;
+  --accent-soft: #e8f4ef;
+  --accent-line: #bfdcd2;
+  --accent-shadow: rgba(23, 107, 91, .18);
+  --accent-shadow-strong: rgba(23, 107, 91, .26);
+
+  min-height: 100vh; display: grid; grid-template-columns: 240px 1fr; background: #f4f6f8;
+}
+
+/* base.css hard-codes a blue glow on .button; re-cast it in green. */
+.dashboard-shell .button { box-shadow: 0 8px 24px var(--accent-shadow); }
+.dashboard-shell .button:hover { box-shadow: 0 12px 30px var(--accent-shadow-strong); }
+.dashboard-shell .button:active {
+  background: #0c4438; transform: translateY(0);
+  box-shadow: 0 4px 12px rgba(23, 107, 91, .22);
+}
+.dashboard-shell .button:focus-visible { outline: 3px solid rgba(23, 107, 91, .28); outline-offset: 2px; }
+.dashboard-shell .button:disabled { background: #8fb3ab; box-shadow: none; transform: none; cursor: not-allowed; }
+/* The wordmark sits on the dark green sidebar, so its accents go light. */
+.dashboard-shell .brand-light strong span,
+.dashboard-sidebar .brand strong span,
+.dashboard-topbar .brand strong span { color: #7fd0bd; }
+.dashboard-sidebar .brand-mark i,
+.dashboard-topbar .brand-mark i { background: #7fd0bd; }
+.dashboard-sidebar { padding: 30px 24px; display: flex; flex-direction: column; background: var(--navy); color: #fff; }
+.dashboard-sidebar .brand { margin-bottom: 52px; color: #fff; }
+.dashboard-sidebar nav { display: grid; gap: 8px; }
+.dashboard-sidebar nav a, .dashboard-sidebar nav button { width: 100%; padding: 12px 14px; border: 0; border-radius: 8px; background: transparent; color: #93aca4; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.dashboard-sidebar nav a.active, .dashboard-sidebar nav a:hover,
+.dashboard-sidebar nav button.active, .dashboard-sidebar nav button:hover { background: rgba(255,255,255,.09); color: #fff; }
+.dashboard-sidebar > button { margin-top: auto; padding: 12px; border: 1px solid rgba(255,255,255,.16); border-radius: 8px; background: transparent; color: #bccdc7; cursor: pointer; }
+.dashboard-main { padding: 48px clamp(24px,5vw,72px); }
+.dashboard-header { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.dashboard-header span, .dashboard-panel > div > span { color: var(--blue); font-size: 10px; font-weight: 700; letter-spacing: .16em; }
+.dashboard-header h1 { margin: 10px 0 6px; font-size: clamp(28px,4vw,44px); letter-spacing: -.045em; }
+.dashboard-header p { margin: 0; color: var(--muted); }
+.dashboard-avatar { width: 50px; height: 50px; display: grid; place-items: center; border-radius: 50%; background: var(--blue); color: #fff; font-size: 14px; font-weight: 700; }
+.dashboard-metrics { margin: 42px 0 28px; display: grid; grid-template-columns: repeat(3,1fr); gap: 18px; }
+.dashboard-metrics article, .dashboard-panel { border: 1px solid var(--line); border-radius: 14px; background: #fff; }
+.dashboard-metrics article { padding: 24px; display: grid; gap: 10px; }
+.dashboard-metrics span { color: var(--muted); font-size: 12px; }
+.dashboard-metrics strong { font-size: 34px; letter-spacing: -.04em; }
+.dashboard-metrics small { color: #2f8a72; }
+.dashboard-panel { padding: 28px; }
+.invite-panel { margin-bottom: 28px; }
+.invite-domain-note { margin: 7px 0 0; color: var(--muted); font-size: 12px; }
+.invite-panel form { margin-top: 22px; display: grid; grid-template-columns: 1fr 180px auto; gap: 12px; }
+.invite-panel input, .invite-panel select, .join-card input { padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.invite-result { margin-top: 18px; padding: 16px; border-radius: 8px; background: var(--accent-soft); font-size: 12px; }
+.invite-result p { margin: 6px 0; color: var(--muted); }
+.invite-result a { color: var(--blue); overflow-wrap: anywhere; }
+.invite-error { color: #b42318; font-size: 12px; }
+.invite-result strong { color: var(--blue-dark); }
+.join-card h1 { margin-bottom: 8px; }
+.join-card > p { margin-bottom: 24px; color: var(--muted); }
+.invite-summary { margin: 0 0 24px; display: grid; grid-template-columns: repeat(2,1fr); gap: 12px; }
+.invite-summary > div { padding: 14px 16px; border: 1px solid var(--line); border-radius: 8px; background: #f7f9fb; }
+.invite-summary dt { margin: 0 0 4px; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+.invite-summary dd { margin: 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.dashboard-panel h2 { margin: 8px 0 0; font-size: 22px; }
+.dashboard-empty { min-height: 310px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+.dashboard-empty > div { font-size: 36px; color: var(--blue); }
+.dashboard-empty h3 { margin: 16px 0 7px; }
+.dashboard-empty p { max-width: 430px; margin: 0 0 22px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+
+/* -- responsive ----------------------------------------------------------- */
+/* The drawer chrome only exists on small screens. */
+.dashboard-topbar, .dashboard-nav-scrim, .dashboard-nav-close { display: none; }
+
+@media (max-width: 1080px) {
+  .dashboard-shell { grid-template-columns: 200px 1fr; }
+  .dashboard-main { padding: 40px 28px; }
+  .dashboard-metrics { grid-template-columns: repeat(2, 1fr); }
+  .invite-panel form { grid-template-columns: 1fr 160px; }
+  .invite-panel form .button { grid-column: 1 / -1; }
+}
+
+/* Phone and small tablet: the sidebar slides in over the content. */
+@media (max-width: 900px) {
+  .dashboard-shell { grid-template-columns: 1fr; }
+
+  .dashboard-topbar {
+    position: sticky; top: 0; z-index: 30;
+    display: flex; align-items: center; gap: 14px;
+    padding: 12px 18px; background: var(--navy); color: #fff;
+  }
+  .dashboard-nav-toggle {
+    width: 40px; height: 40px; flex-shrink: 0; display: grid; place-items: center;
+    border: 1px solid rgba(255, 255, 255, .18); border-radius: 9px;
+    background: transparent; color: #fff; font-size: 17px; cursor: pointer;
+  }
+  .dashboard-nav-toggle:hover { background: rgba(255, 255, 255, .09); }
+  .dashboard-topbar .brand { margin: 0; color: #fff; }
+
+  .dashboard-sidebar {
+    position: fixed; z-index: 45; top: 0; left: 0; bottom: 0;
+    width: min(270px, 82vw); padding: 22px 20px;
+    transform: translateX(-102%); visibility: hidden;
+    transition: transform .24s ease, visibility .24s;
+    box-shadow: 0 20px 60px rgba(8, 17, 31, .4);
+  }
+  .dashboard-shell.nav-open .dashboard-sidebar { transform: none; visibility: visible; }
+  .dashboard-sidebar .brand { margin-bottom: 34px; }
+  .dashboard-nav-close {
+    position: absolute; top: 18px; right: 16px;
+    display: grid; place-items: center; width: 32px; height: 32px;
+    border: 1px solid rgba(255, 255, 255, .18); border-radius: 8px;
+    background: transparent; color: #fff; cursor: pointer;
+  }
+
+  .dashboard-nav-scrim {
+    display: block; position: fixed; inset: 0; z-index: 44;
+    background: rgba(8, 17, 31, .5);
+    opacity: 0; pointer-events: none; transition: opacity .24s ease;
+  }
+  .dashboard-shell.nav-open .dashboard-nav-scrim { opacity: 1; pointer-events: auto; }
+
+  .dashboard-main { padding: 28px 20px 36px; }
+  .dashboard-header h1 { font-size: clamp(22px, 6vw, 30px); }
+}
+
+@media (max-width: 620px) {
+  .dashboard-main { padding: 22px 14px 30px; }
+  .dashboard-header { gap: 14px; }
+  .dashboard-avatar { width: 42px; height: 42px; font-size: 12px; }
+  .dashboard-metrics { margin: 26px 0 20px; grid-template-columns: 1fr; gap: 12px; }
+  .dashboard-metrics article { padding: 18px; }
+  .dashboard-metrics strong { font-size: 28px; }
+  .dashboard-panel { padding: 20px 16px; }
+  .dashboard-panel h2 { font-size: 19px; }
+  .dashboard-empty { min-height: 220px; }
+  .invite-panel form { grid-template-columns: 1fr; }
+  .invite-panel form .button { grid-column: auto; }
+  .invite-summary { grid-template-columns: 1fr; }
+}

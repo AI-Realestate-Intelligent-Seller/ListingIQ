@@ -1,0 +1,53 @@
+﻿Case,Definition
+Initial Outreach Sent,"The first property-specific SMS has been delivered, no owner response exists yet, and the system must wait 24 hours before taking another action."
+No Reply After Initial Outreach,"The owner has not responded within 24 hours of the first SMS, making the lead eligible for the first follow-up."
+No Reply After Follow-Up One,"The owner has remained silent for 24 hours after the first follow-up, making the lead eligible for the second follow-up."
+No Reply After Follow-Up Two,"The owner has remained silent for 24 hours after the second follow-up, making the lead eligible for the third and final follow-up."
+No Reply After Final Follow-Up,"The owner has not responded within 24 hours of the third follow-up, so automated outreach must stop and the lead must be closed as no response."
+Ready to Sell Immediately,"The owner clearly confirms that they are prepared to begin selling now, without indicating an emergency or unusually short deadline."
+Urgent Need to Sell,"The owner states that the property must be sold as soon as possible because of a pressing deadline, financial need, relocation, or other urgent circumstance."
+Planning to Sell Within 30 Days,The owner intends to start or complete the sale within the next month but is not necessarily in an emergency.
+Planning to Sell Within 30–90 Days,The owner has a defined near-term selling window longer than one month but no later than approximately three months.
+Planning to Sell Later,The owner is open to selling but expects the decision or transaction to occur more than 90 days in the future.
+Thinking About Selling,The owner is actively considering a sale but has not yet made a firm decision or selected a timeline.
+Interested but Uncertain,"The owner expresses interest while also identifying doubt, hesitation, missing information, or a decision blocker that must be explored."
+Will Sell for the Right Price,The owner's willingness to sell is conditional primarily on receiving a price or net proceeds they consider acceptable.
+Wants an Immediate Buyer,"The owner will only engage if Bobbie can present a buyer who is ready to act now, rather than discussing a traditional listing process."
+Interested in an Off-Market Sale,The owner is open to selling privately or without publicly listing the property on the market.
+Directly Not Interested,The owner clearly rejects selling or further discussion and does not request future contact.
+Maybe Interested Later,The owner declines for now but leaves open the possibility of selling or talking at a later time.
+Property Already Sold,The owner reports that ownership has already transferred and there is no remaining sale opportunity for this property.
+Property Currently Listed,The owner confirms that the property is actively represented or marketed under a current listing agreement.
+Recipient Does Not Own the Property,The person reached is associated with the number but states that they are not the property's owner or authorized decision-maker.
+Wrong Number,The recipient states that the phone number does not belong to the intended owner or contact.
+Stop or Unsubscribe Request,"The recipient uses STOP, unsubscribe, remove me, or equivalent language requiring immediate suppression of further SMS messages."
+Do Not Call Request,"The recipient specifically requests no telephone calls or asks to be placed on a do-not-call list, whether or not they also prohibit SMS."
+Consent or Permission Concern,The recipient questions whether Bobbie had permission or legal authority to contact them but has not yet made an explicit opt-out request.
+Asks How Their Number Was Obtained,The recipient requests the source or method through which their phone number or contact information was acquired.
+Complaint or Legal Threat,"The recipient threatens legal action, reports harassment, mentions regulators or attorneys, or makes a serious formal complaint requiring human escalation."
+Asks Who Bobbie Is,"The recipient wants Bobbie's identity, role, or personal introduction before discussing the property."
+Asks Which Company Bobbie Represents,"The recipient specifically asks for the brokerage, business, or organization behind the outreach."
+Asks Whether Bobbie Is an Agent or Investor,The recipient wants clarification on whether Bobbie represents sellers as a licensed real-estate professional or buys properties as an investor.
+Asks Whether Bobbie Has a Ready Buyer,"The recipient asks whether a specific qualified buyer already exists for their property, requiring a direct and truthful answer."
+Asks Why They Were Contacted,"The recipient wants the property-specific reason they were selected for outreach, such as an expired or withdrawn listing."
+"Requests Website, License, or Credentials","The recipient asks for verifiable professional information before continuing, such as a website, brokerage profile, license details, or contact card."
+Asks for Property Valuation,The owner requests an estimate of the property's current market value or likely selling price.
+Asks About Commission,The owner asks how much Bobbie or the brokerage would charge for representation or related services.
+Asks How the Selling Process Works,"The owner wants a general explanation of the steps from consultation and preparation through marketing, offers, and closing."
+Asks How Quickly the Property Can Sell,"The owner asks for an expected sale duration, requiring a non-guaranteed answer based on property and market factors."
+Asks Whether Repairs Are Needed,"The owner wants guidance on whether improvements, staging, maintenance, or renovations should be completed before selling."
+Asks About Cash Offers,The owner specifically asks whether a cash-sale route exists or how cash offers differ from financed buyer offers.
+Asks About Marketing Strategy,The owner wants to know how Bobbie would attract buyers or position the property differently from a previous attempt.
+Asks Why the Previous Listing Did Not Sell,"The owner asks for an explanation of an unsuccessful prior listing, requiring more property and listing information before drawing conclusions."
+Agrees to a Phone Call,The owner accepts the idea of speaking with Bobbie but has not yet selected a date or time.
+Requests Available Appointment Times,The owner asks the system to provide valid calendar options for a call or meeting.
+Selects an Appointment Time,"The owner chooses one proposed slot, but the system must still verify and finalize it before claiming that it is booked."
+Appointment Successfully Booked,"The selected time has been saved in the calendar and the owner has received a confirmed date, time, timezone, and contact method."
+Requests a Different Time,"The owner rejects the offered slots or proposes another time, requiring a new availability check rather than a cancellation."
+Cancels or Reschedules Appointment,"The owner changes or removes an already confirmed appointment, requiring the existing calendar event to be updated."
+Misses the Scheduled Appointment,"The appointment time passes without successful contact or attendance, making the lead eligible for one polite re-engagement attempt."
+Gives an Unclear or Ambiguous Reply,"The owner's message cannot be confidently interpreted as interest, rejection, a question, or a scheduling response, so one clarification is needed."
+Changes the Subject,"The owner introduces an unrelated topic while the property conversation remains unresolved, requiring a brief answer or redirection."
+Sends Multiple Questions in One Message,"The owner asks two or more distinct relevant questions at once, requiring all material questions to be answered without losing the next-step objective."
+Becomes Angry or Hostile,"The owner's tone is aggressive, insulting, or highly frustrated, requiring de-escalation and no continued sales pressure."
+Asks a Question the AI Cannot Answer,"The owner requests information that is unavailable, unapproved, property-specific, legally sensitive, or beyond the AI's authority, requiring a human handoff."

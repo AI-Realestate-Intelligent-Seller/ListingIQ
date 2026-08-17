@@ -1,0 +1,84 @@
+Table,Column,Type,Key / index,Nullable,Default,Why it exists
+users,id,INTEGER,PK,no,,Surrogate key. Carried in the JWT and re-resolved to a row on every request.
+users,email,VARCHAR(255),"UNIQUE, INDEX",no,,Login identity. Also the source of the brokerage domain used to validate invitations.
+users,hashed_password,VARCHAR(255),,no,,pbkdf2_sha256. Never returned by any endpoint.
+users,full_name,VARCHAR(255),,yes,,Display name.
+users,first_name,VARCHAR(255),,yes,,Used in the dashboard greeting and in Bobbie's signature context.
+users,last_name,VARCHAR(255),,yes,,Display.
+users,brokerage_name,VARCHAR(255),,yes,,Shown under the greeting. Copied onto invitations.
+users,brokerage_id,VARCHAR(255),,yes,,"uuid STRING, not a foreign key - there is no brokerages table. Generated at registration, inherited by invited members. This is the only brokerage identity in the system."
+users,is_head_or_owner,BOOLEAN,,yes,false,Mirrors role='hob'. Kept for legacy checks.
+users,is_verified,BOOLEAN,,yes,false,Email verification flag. Not enforced at login today.
+users,is_active,BOOLEAN,,yes,true,"Checked at login AND on every token refresh, so deactivation takes effect within the refresh window."
+users,role,VARCHAR(50),,yes,'user',hob | broker | agent. Gates the invite panel (hob only) and SMS/lead access.
+users,google_refresh_token,TEXT,,yes,,Encrypted. Written only by the unused Google OAuth callback.
+users,created_at,DATETIME,,yes,utcnow,Audit.
+invitations,id,INTEGER,PK,no,,
+invitations,email,VARCHAR(255),INDEX,no,,Who was invited. Must match the inviter's brokerage domain.
+invitations,role,VARCHAR(50),,no,,broker | agent. Taken from the HOB's request but validated server-side; the accepted user inherits it.
+invitations,brokerage_id,VARCHAR(255),INDEX,no,,Copied from the inviter so the new user joins the same brokerage.
+invitations,brokerage_name,VARCHAR(255),,yes,,Shown on the /join page before acceptance.
+invitations,invited_by,INTEGER,FK -> users.id,no,,Audit trail of who issued the invite.
+invitations,token_hash,VARCHAR(255),"UNIQUE, INDEX",no,,"SHA-256 of the raw token. The raw value exists only in the emailed link, so a database leak cannot be replayed into an account."
+invitations,expires_at,DATETIME,,no,,48 hours from issue.
+invitations,status,VARCHAR(50),,no,'pending',pending | accepted | expired | cancelled. The atomic claim on acceptance filters on status='pending'.
+invitations,accepted_at,DATETIME,,yes,,Set by the same UPDATE that claims the invitation.
+invitations,created_at,DATETIME,,yes,utcnow,Also drives the 60-second resend cooldown.
+leads,id,INTEGER,PK,no,,
+leads,user_id,INTEGER,"FK -> users.id, INDEX",no,,Owner. Every lead query filters on this - there is no brokerage-level pool.
+leads,owner_name,VARCHAR(255),,yes,,Property owner from the import.
+leads,phone,VARCHAR(50),INDEX,yes,,"E.164, normalised at import. Null means the lead can never be campaigned (stage = needs_review)."
+leads,property_address,VARCHAR(500),,yes,,Required before Bobbie will text - she references it in the opener.
+leads,area,VARCHAR(120),,yes,,"City or neighbourhood, for search."
+leads,signals,VARCHAR(500),,no,'',"Comma-separated canonical keys (fsbo, expired, pre_foreclosure...). Packed rather than a join table because they are a small fixed vocabulary read on every row; this is why signal filtering runs in Python."
+leads,outreach_reason,VARCHAR(300),,yes,,The vendor's own wording for why this owner is being contacted. Bobbie opens with it verbatim instead of a generic per-signal line.
+leads,details,TEXT,,yes,,"JSON of imported property attributes (beds, baths, listing_price...). Passed into conversations.lead_context so Bobbie may cite them and nothing more."
+leads,score,INTEGER,,no,0,"0-100: sum of signal weights + 20 for a phone + 10 for an address. Advisory ordering of the review queue, not a prediction."
+leads,dnc,BOOLEAN,,no,false,Set from the linked conversation when the owner opts out. Once true the lead can never be campaigned.
+leads,conversation_id,INTEGER,"FK -> conversations.id, INDEX",yes,,Null until campaigned. Its presence is what makes the derived stage 'in_campaign'; if the thread is deleted this is cleared and the lead returns to the pool.
+leads,last_activity_at,DATETIME,,yes,,Timestamp of the newest message on the linked thread. Refreshed on every pool read.
+leads,refreshed_at,DATETIME,,yes,,Import stamp. Within 24h the derived stage reads 'new'.
+leads,created_at,DATETIME,,yes,utcnow,Import stamp.
+leads,(stage),NOT STORED,,,,"DERIVED on read, in precedence: dnc -> in_campaign -> needs_review (no phone) -> new (<24h) -> ready. Deliberately not a column so it cannot drift from the conversation it describes."
+conversations,id,INTEGER,PK,no,,
+conversations,contact,VARCHAR(50),INDEX,no,,Owner phone in E.164. The Telnyx webhook matches inbound messages on this column alone.
+conversations,user_id,INTEGER,FK -> users.id,yes,,Owning broker. Every workspace query filters on it.
+conversations,name,VARCHAR(255),,yes,,"Owner name, copied from the lead or typed manually."
+conversations,property_address,VARCHAR(500),,yes,,Duplicated from the lead so a thread reads standalone.
+conversations,ai_enabled,BOOLEAN,,no,true,Bobbie autopilot.
+conversations,recipient_ai_enabled,BOOLEAN,,no,false,"LEGACY, dormant. The simulated recipient was removed; kept so existing rows still load."
+conversations,handled_by,VARCHAR(20),,no,'bobbie',"bobbie | broker. THE handover gate - the AI pipeline returns early unless this is 'bobbie', so no UI state can produce a rogue reply."
+conversations,lead_context,TEXT,,yes,,"JSON of approved facts Bobbie is allowed to ground replies in: address, outreach reason, signals, property details. Anything not here she must decline to state."
+conversations,lead_status,VARCHAR(50),,no,'processing',"Classifier output: interested, want_more_info, not_interested, dnc..."
+conversations,queue_status,VARCHAR(50),,no,'idle',"LEGACY, dormant. The bulk lead queue was removed when the app consolidated to two ports."
+conversations,dnc_alert,BOOLEAN,,no,false,Owner opted out. Propagates to leads.dnc on the next pool read.
+conversations,meeting_booked,BOOLEAN,,no,false,Set when Bobbie books; also triggers a handover to the broker. Set again when a meeting is booked by hand from Follow-ups.
+conversations,followup_state,VARCHAR(20),,no,'pending',"pending | accepted | declined. The Follow-ups decision on a lead who replied. Deliberately separate from handled_by: accepting a lead records who owns the outcome, taking the thread over is a different action."
+conversations,processed_at,DATETIME,,yes,,Last AI pipeline run.
+conversations,created_at,DATETIME,,yes,utcnow,Ordering for the thread list and for webhook tie-breaks.
+messages,id,INTEGER,PK,no,,
+messages,conversation_id,INTEGER,FK -> conversations.id,yes,,Parent thread. NO ON DELETE CASCADE - the delete endpoint removes messages explicitly.
+messages,direction,VARCHAR(20),,yes,,inbound | outbound. Decides which side of the thread the bubble sits on.
+messages,from_number,VARCHAR(50),,yes,,Sender in E.164.
+messages,to_number,VARCHAR(50),,yes,,Recipient in E.164.
+messages,text,TEXT,,yes,,Message body.
+messages,status,VARCHAR(50),,yes,,"Carrier status: queued, sent, delivered, received."
+messages,event_type,VARCHAR(100),,yes,,Provenance: outreach.initial | ai.reply | ai.closing | broker.message | calendar.confirmation (Bobbie booked) | broker.booking (a person booked from Follow-ups) | message.received. Lets the UI label a bubble Bobbie or You without a second table.
+messages,telnyx_id,VARCHAR(128),INDEX,yes,,"Carrier message id, for reconciling delivery receipts."
+messages,created_at,DATETIME,,yes,utcnow,Thread ordering and the source of leads.last_activity_at.
+bookings,id,INTEGER,PK,no,,
+bookings,user_id,INTEGER,"FK -> users.id, INDEX",yes,,Whose calendar. Availability is computed per broker.
+bookings,phone,VARCHAR(50),,yes,,Owner who booked. Not a FK to conversations - a booking outlives its thread.
+bookings,name,VARCHAR(255),,yes,,Owner name on the invite.
+bookings,title,VARCHAR(255),,yes,,Meeting title.
+bookings,start_at,DATETIME,,yes,,Overlap-checked before insert so two owners cannot take one slot.
+bookings,end_at,DATETIME,,yes,,Slot end.
+bookings,join_token,VARCHAR(128),,yes,,Opaque token for the meeting link.
+bookings,created_at,DATETIME,,yes,utcnow,Audit.
+ai_runs,id,INTEGER,PK,no,,
+ai_runs,user_id,INTEGER,FK -> users.id,yes,,Who the run belonged to.
+ai_runs,model,VARCHAR(255),,yes,,Model id used.
+ai_runs,prompt,TEXT,,yes,,Prompt sent.
+ai_runs,result,TEXT,,yes,,Completion returned.
+ai_runs,created_at,DATETIME,,yes,utcnow,Audit.
+ai_runs,(table note),,,,,"EMPTY IN PRODUCTION. Written only by app/ai_runtime.py, which only the dead /api/v1/ai/reply route calls. Either wire it into the live Bobbie pipeline as an audit log, or drop the table."

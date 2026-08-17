@@ -1,0 +1,4 @@
+# Local Redis state; keep the directory and its config only.
+*
+!.gitignore
+!redis.conf

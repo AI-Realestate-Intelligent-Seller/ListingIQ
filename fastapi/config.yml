@@ -1,0 +1,18 @@
+telnyx:
+  mode: "simulation" # options: simulation, telnyx
+  simulation_url: "http://127.0.0.1:5051/v2/messages"
+  api_url: "https://api.telnyx.com/v2/messages"
+  from_number: "+12245798015"
+
+lancedb:
+  path: "/var/lib/lancedb"
+
+storage:
+  s3_bucket: ""
+  s3_region: ""
+
+calendar:
+  default_timezone: "America/Chicago"
+
+logging:
+  level: "INFO"

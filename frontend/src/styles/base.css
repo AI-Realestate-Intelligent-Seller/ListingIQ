@@ -1,0 +1,184 @@
+/* Design tokens, resets, and shared UI primitives. */
+
+:root {
+  --ink: #0c1424;
+  --muted: #657083;
+  --line: #dfe3e8;
+  --paper: #f7f7f4;
+  --white: #ffffff;
+  --blue: #1768e5;
+  --blue-dark: #0d4fbd;
+  --navy: #0a1528;
+  --lime: #c9ff54;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-geist-sans), Arial, sans-serif;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button, input {
+  font: inherit;
+}
+
+button, summary {
+  -webkit-tap-highlight-color: transparent;
+}
+
+main {
+  overflow: hidden;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.brand strong {
+  font-size: 21px;
+  letter-spacing: -1.2px;
+}
+
+.brand strong span {
+  color: var(--blue);
+}
+
+.brand-mark {
+  position: relative;
+  display: inline-block;
+  width: 25px;
+  height: 25px;
+  transform: rotate(-45deg);
+}
+
+.brand-mark i {
+  position: absolute;
+  display: block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--blue);
+}
+
+.brand-mark i:first-child {
+  left: 1px;
+  top: 1px;
+}
+
+.brand-mark i:nth-child(2) {
+  left: 9px;
+  top: 9px;
+}
+
+.brand-mark i:last-child {
+  right: 1px;
+  bottom: 1px;
+}
+
+.brand-mark::before, .brand-mark::after {
+  content: "";
+  position: absolute;
+  background: currentColor;
+  height: 1.5px;
+  width: 12px;
+  opacity: .35;
+}
+
+.brand-mark::before {
+  left: 4px;
+  top: 9px;
+}
+
+.brand-mark::after {
+  right: 4px;
+  bottom: 9px;
+}
+
+.brand-light {
+  color: #fff;
+}
+
+.brand-light strong span {
+  color: #80adff;
+}
+
+.brand-light .brand-mark i {
+  background: #fff;
+}
+
+.button {
+  min-height: 46px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--blue);
+  color: #fff;
+  padding: 0 20px;
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  gap: 16px;
+  font-weight: 650;
+  font-size: 14px;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(23,104,229,.18);
+  transition: transform .2s, background .2s, box-shadow .2s;
+}
+
+.button:hover {
+  background: var(--blue-dark);
+  transform: translateY(-1px);
+  box-shadow: 0 12px 30px rgba(23,104,229,.26);
+}
+
+.button-small {
+  min-height: 39px;
+  padding: 0 16px;
+  font-size: 12px;
+  border-radius: 7px;
+}
+
+.button-large {
+  min-height: 54px;
+  padding: 0 24px;
+}
+
+.arrow-icon {
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 1;
+  transition: transform .2s;
+}
+
+.button:hover .arrow-icon {
+  transform: translate(2px,-2px);
+}
+
+.check-icon {
+  width: 20px;
+  height: 20px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #73a7ff;
+  background: rgba(74,137,239,.12);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
