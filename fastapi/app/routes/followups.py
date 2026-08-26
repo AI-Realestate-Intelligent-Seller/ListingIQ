@@ -1,4 +1,4 @@
-"""Follow-ups API — the conversations an owner has actually replied to.
+"""Follow-ups API — the brokerage's primary conversation work queue.
 
 The SMS workspace is the chat module: every thread this user has, answered or
 not. Follow-ups is the working list built on top of it. Only conversations with
@@ -6,8 +6,9 @@ at least one inbound reply appear, each carrying the reason it is waiting and
 the decisions the assignee can record on it: accept the lead, decline it, or
 book the meeting.
 
-Ownership is always taken from the JWT (Conversation.user_id), so one brokerage
-can never read or act on another's threads. Taking a thread over and reading
+HOB and broker visibility is brokerage-scoped from the JWT (see app.tenancy).
+Agent visibility is narrower: only leads explicitly assigned to that agent can
+be listed or acted on. Taking a thread over and reading
 its messages stay on the SMS endpoints — this module adds no second way to do
 either.
 """
@@ -18,8 +19,11 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from ..leads import address as address_key
+from ..leads.catalog import signal_label
+from ..leads.service import split_signals
 from ..logger import get_logger
-from ..models import Conversation, Lead, Message, User
+from ..models import Campaign, Conversation, Lead, Message, User
 from ..schemas import (
     FOLLOWUP_STATES,
     FollowUpAppointmentRequest,
@@ -29,6 +33,7 @@ from ..schemas import (
     FollowUpStatusUpdate,
 )
 from ..sms import calendar_service, service
+from ..tenancy import brokerage_user_ids
 from .auth import get_current_user, get_db
 
 router = APIRouter()
@@ -46,9 +51,30 @@ def _require_access(user: User) -> None:
         raise HTTPException(status_code=403, detail='Your role does not have access to follow-ups.')
 
 
+def _visible_conversation_ids(session: Session, user: User) -> list[int]:
+    """Agent visibility follows explicit lead assignment; other roles keep tenant scope."""
+    if user.role == 'agent':
+        rows = (
+            session.query(Lead.conversation_id)
+            .filter(
+                Lead.assigned_agent_id == user.id,
+                Lead.conversation_id.isnot(None),
+            )
+            .all()
+        )
+        return [row[0] for row in rows]
+    return [
+        row[0]
+        for row in session.query(Conversation.id)
+        .filter(Conversation.user_id.in_(brokerage_user_ids(session, user)))
+        .all()
+    ]
+
+
 def _owned_conversation(session: Session, conversation_id: int, user: User) -> Conversation:
     conversation = (session.query(Conversation)
-                    .filter(Conversation.id == conversation_id, Conversation.user_id == user.id)
+                    .filter(Conversation.id == conversation_id,
+                            Conversation.id.in_(_visible_conversation_ids(session, user)))
                     .first())
     if not conversation:
         raise HTTPException(status_code=404, detail='Conversation not found')
@@ -62,7 +88,8 @@ def _replied_conversation_ids(session: Session, user: User) -> list[int]:
     """
     rows = (session.query(Message.conversation_id)
             .join(Conversation, Conversation.id == Message.conversation_id)
-            .filter(Conversation.user_id == user.id, Message.direction == 'inbound')
+            .filter(Conversation.id.in_(_visible_conversation_ids(session, user)),
+                    Message.direction == 'inbound')
             .distinct()
             .all())
     return [row[0] for row in rows if row[0] is not None]
@@ -82,14 +109,17 @@ def _messages_by_conversation(session: Session, ids: list[int]) -> dict[int, lis
     return grouped
 
 
-def _leads_by_conversation(session: Session, user: User, ids: list[int]) -> dict[int, Lead]:
-    """The pool row behind each thread, when the lead came from an import."""
+def _leads_by_conversation(session: Session, user: User, ids: list[int]) -> dict[int, list[Lead]]:
+    """All property leads behind each visible conversation."""
     if not ids:
         return {}
     rows = (session.query(Lead)
-            .filter(Lead.user_id == user.id, Lead.conversation_id.in_(ids))
+            .filter(Lead.conversation_id.in_(ids))
             .all())
-    return {lead.conversation_id: lead for lead in rows}
+    grouped: dict[int, list[Lead]] = defaultdict(list)
+    for lead in rows:
+        grouped[lead.conversation_id].append(lead)
+    return grouped
 
 
 def _days_since(value: datetime | None, now: datetime) -> int | None:
@@ -120,8 +150,16 @@ def _reason(conversation: Conversation, latest: Message | None, waiting_days: in
     return 'in_conversation', 'Conversation in progress'
 
 
-def _serialize(conversation: Conversation, messages: list[Message], lead: Lead | None,
-               now: datetime) -> dict:
+def _campaign_names(session: Session, user: User) -> dict[int, str]:
+    rows = (session.query(Campaign.id, Campaign.name)
+            .filter(Campaign.user_id.in_(brokerage_user_ids(session, user))).all())
+    return {row[0]: row[1] for row in rows}
+
+
+def _serialize(conversation: Conversation, messages: list[Message], leads: list[Lead],
+               now: datetime, campaign_names: dict[int, str] | None = None) -> dict:
+    lead = next((row for row in leads if row.property_address == conversation.property_address),
+                leads[-1] if leads else None)
     inbound = [message for message in messages if message.direction == 'inbound']
     latest = messages[-1] if messages else None
     last_reply = inbound[-1] if inbound else None
@@ -133,10 +171,26 @@ def _serialize(conversation: Conversation, messages: list[Message], lead: Lead |
 
     return {
         'id': conversation.id,
+        'lead_id': lead.id if lead else None,
+        'campaign_id': conversation.campaign_id,
+        'campaign_name': (campaign_names or {}).get(conversation.campaign_id),
         'contact': conversation.contact,
         'name': conversation.name,
         'property_address': conversation.property_address,
         'area': lead.area if lead else None,
+        'properties': [
+            {
+                'lead_id': row.id,
+                'address': row.property_address,
+                'area': row.area,
+                'campaign_id': row.campaign_id,
+                'campaign_name': (campaign_names or {}).get(row.campaign_id),
+                'signals': [signal_label(key) for key in split_signals(row)],
+            }
+            for row in sorted(leads, key=lambda item: item.id)
+        ],
+        'has_multiple_properties': len({address_key.canonical(row.property_address) for row in leads
+                                        if address_key.canonical(row.property_address)}) > 1,
         'ai_enabled': bool(conversation.ai_enabled),
         'handled_by': conversation.handled_by,
         'awaiting_broker_reply': awaiting,
@@ -163,25 +217,35 @@ def _serialize_one(session: Session, conversation: Conversation, user: User) -> 
                 .filter(Message.conversation_id == conversation.id)
                 .order_by(Message.created_at, Message.id)
                 .all())
-    lead = (session.query(Lead)
-            .filter(Lead.user_id == user.id, Lead.conversation_id == conversation.id)
-            .first())
-    return _serialize(conversation, messages, lead, datetime.utcnow())
+    leads = (session.query(Lead)
+             .filter(Lead.conversation_id == conversation.id)
+             .order_by(Lead.id).all())
+    return _serialize(conversation, messages, leads, datetime.utcnow(),
+                      _campaign_names(session, user))
 
 
 @router.get('', response_model=list[FollowUpOut])
 def list_followups(
     state: str | None = Query(None, description="Filter by decision: pending, accepted or declined"),
+    campaign_id: int | None = Query(None, description="Only replies from this campaign"),
+    scope: str = Query('replied', description="Show replied conversations or all conversations"),
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
 ):
-    """Threads the owner has replied to, most recent reply first."""
+    """Replied threads by default, or the entire inbox when scope is ``all``.
+
+    `campaign_id` narrows the list to one batch of outreach, which is how the
+    board answers "who replied to the campaign I sent on Tuesday".
+    """
     _require_access(current_user)
     if state is not None and state not in FOLLOWUP_STATES:
         raise HTTPException(status_code=400,
                             detail=f"State must be one of: {', '.join(FOLLOWUP_STATES)}.")
+    if scope not in {'replied', 'all'}:
+        raise HTTPException(status_code=400, detail="Scope must be one of: replied, all.")
 
-    ids = _replied_conversation_ids(session, current_user)
+    ids = (_replied_conversation_ids(session, current_user) if scope == 'replied' else
+           _visible_conversation_ids(session, current_user))
     if not ids:
         return []
 
@@ -190,15 +254,20 @@ def list_followups(
                      .all())
     messages = _messages_by_conversation(session, ids)
     leads = _leads_by_conversation(session, current_user, ids)
+    campaign_names = _campaign_names(session, current_user)
     now = datetime.utcnow()
 
     rows = [_serialize(conversation, messages.get(conversation.id, []),
-                       leads.get(conversation.id), now)
+                       leads.get(conversation.id, []), now, campaign_names)
             for conversation in conversations]
+    if campaign_id is not None:
+        rows = [row for row in rows if row['campaign_id'] == campaign_id]
     if state is not None:
         rows = [row for row in rows if row['followup_state'] == state]
-    # A thread with no timestamp (legacy rows) sorts last rather than crashing.
-    rows.sort(key=lambda row: (row['last_reply_at'] is not None, row['last_reply_at'] or datetime.min),
+    # In All, silent threads use their latest activity. Replied keeps its
+    # purpose-built reply ordering. Missing timestamps sort last.
+    sort_field = 'last_reply_at' if scope == 'replied' else 'latest_message_at'
+    rows.sort(key=lambda row: (row[sort_field] is not None, row[sort_field] or datetime.min),
               reverse=True)
     return rows
 

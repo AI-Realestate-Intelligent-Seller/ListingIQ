@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 import re
 from ..routes.auth import get_current_user
+from ..tenancy import brokerage_user_ids
 from ..db import SessionLocal
 from ..crud import CRUD
 from ..adapters.telnyx import send_message
@@ -33,7 +34,7 @@ def compose_message(payload: ComposeIn, current_user=Depends(get_current_user), 
 
     conv = None
     if payload.conversation_id:
-        conv = db.query(Conversation).filter(Conversation.id == payload.conversation_id, Conversation.user_id == current_user.id).first()
+        conv = db.query(Conversation).filter(Conversation.id == payload.conversation_id, Conversation.user_id.in_(brokerage_user_ids(db, current_user))).first()
         if not conv:
             raise HTTPException(status_code=404, detail='Conversation not found')
         if payload.to and payload.to != conv.contact:

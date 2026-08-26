@@ -2,7 +2,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from .routes import auth, calendar, messages, conversations
-from .routes import webhooks, team, sms, leads, followups
+from .routes import webhooks, team, sms, leads, followups, campaigns, assignments
 from .routes import ai
 from .logger import setup_logging, set_request_context
 
@@ -39,6 +39,8 @@ app.include_router(team.router, prefix="/api/v1/team", tags=["team"])
 app.include_router(sms.router, prefix="/api/v1/sms", tags=["sms"])
 app.include_router(leads.router, prefix="/api/v1/leads", tags=["leads"])
 app.include_router(followups.router, prefix="/api/v1/followups", tags=["followups"])
+app.include_router(campaigns.router, prefix="/api/v1/campaigns", tags=["campaigns"])
+app.include_router(assignments.router, prefix="/api/v1/assignments", tags=["assignments"])
 app.include_router(calendar.router, prefix="/api/v1/auth/google", tags=["calendar"])
 app.include_router(messages.router, prefix="/api/v1/messages", tags=["messages"])
 app.include_router(conversations.router, prefix="/api/v1/conversations", tags=["conversations"])
@@ -49,6 +51,8 @@ app.include_router(ai.router, prefix="/api/v1/ai", tags=["ai"])
 @app.on_event("startup")
 def startup_event():
     init_db()
+    from .sms.followup_scheduler import start_followup_scheduler
+    start_followup_scheduler()
     _warm_knowledge_base()
 
 

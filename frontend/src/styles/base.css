@@ -1,15 +1,24 @@
 /* Design tokens, resets, and shared UI primitives. */
 
 :root {
-  --ink: #0c1424;
-  --muted: #657083;
-  --line: #dfe3e8;
-  --paper: #f7f7f4;
+  --ink: #1A2420;
+  --muted: #6B756F;
+  --line: #DEDCD2;
+  --line-strong: #C7C4B6;
+  --surface: #ffffff;
+  --surface-2: #F8F7F3;
+  --paper: #F1F1EC;
   --white: #ffffff;
   --blue: #1768e5;
   --blue-dark: #0d4fbd;
   --navy: #0a1528;
   --lime: #c9ff54;
+}
+
+.view-title {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 * {
@@ -124,27 +133,26 @@ main {
 }
 
 .button {
-  min-height: 46px;
-  border: 0;
+  min-height: 38px;
+  border: 1px solid var(--blue);
   border-radius: 8px;
   background: var(--blue);
   color: #fff;
-  padding: 0 20px;
+  padding: 0 15px;
   display: inline-flex;
   justify-content: center;
   align-items: center;
-  gap: 16px;
-  font-weight: 650;
-  font-size: 14px;
+  gap: 7px;
+  font-weight: 600;
+  font-size: 13.5px;
   cursor: pointer;
-  box-shadow: 0 8px 24px rgba(23,104,229,.18);
-  transition: transform .2s, background .2s, box-shadow .2s;
+  box-shadow: 0 1px 2px rgba(20,25,22,.07);
+  transition: background .15s, border-color .15s;
 }
 
 .button:hover {
   background: var(--blue-dark);
-  transform: translateY(-1px);
-  box-shadow: 0 12px 30px rgba(23,104,229,.26);
+  box-shadow: 0 1px 2px rgba(20,25,22,.07);
 }
 
 .button-small {
@@ -181,4 +189,3 @@ main {
   font-size: 10px;
   flex-shrink: 0;
 }
-

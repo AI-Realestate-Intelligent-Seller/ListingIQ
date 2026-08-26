@@ -3,44 +3,66 @@
    so the chat reads identically in both places; only the surrounding board,
    the triage cards and the action bar are defined here. */
 
-.followups-board { position: relative; display: flex; flex-direction: column; gap: 18px; }
+.followups-board {
+  position: relative; display: flex; flex-direction: column; gap: 18px;
+  height: 100%; min-height: 0; overflow: hidden;
+}
 
-.followups-header h1 { margin: 6px 0 0; font-size: 27px; }
+.followups-header {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+}
+.followups-header .view-title { margin: 6px 0 0; }
 .followups-header p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+.followups-header .button { flex-shrink: 0; background-color: var(--blue); }
 
 .followups-layout {
   display: grid;
   grid-template-columns: 290px 1fr;
   gap: 18px;
-  align-items: start;
-  height: calc(100vh - 240px);
-  min-height: 480px;
+  align-items: stretch;
+  flex: 1; height: auto; min-height: 0;
 }
 
 /* -- triage list ----------------------------------------------------------- */
 .followups-list-panel {
   display: flex; flex-direction: column; gap: 12px; height: 100%;
-  overflow: hidden;
+  min-width: 0; min-height: 0; overflow: visible;
 }
-.followups-list-head { display: flex; align-items: center; gap: 10px; }
-.followups-list-head select {
-  flex: 1; padding: 9px 11px; border: 1px solid var(--line);
-  border-radius: 9px; background: var(--white); font: inherit; font-size: 12.5px;
+.followups-list-head {
+  position: relative; z-index: 34;
+  display: flex; align-items: flex-end; gap: 10px;
 }
-.followups-list { display: grid; gap: 10px; overflow-y: auto; padding-right: 2px; }
+.followups-list {
+  display: grid; grid-auto-rows: max-content; align-content: start;
+  min-height: 0; gap: 10px; overflow-y: auto; padding-right: 6px;
+  overscroll-behavior: contain; scrollbar-gutter: stable;
+}
 
 .followups-list .sms-muted { padding: 10px 2px; }
+.followups-search { display: block; }
+
+.followups-scope {
+  display: grid; grid-template-columns: 1fr 1fr; padding: 3px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--paper);
+}
+.followups-scope button {
+  padding: 7px 10px; border: 0; border-radius: 7px; background: transparent;
+  color: var(--muted); font: inherit; font-size: 12px; font-weight: 700; cursor: pointer;
+}
+.followups-scope button.active {
+  background: var(--white); color: #0f5548; box-shadow: 0 1px 4px rgba(20, 40, 35, .1);
+}
 
 .followup-card {
   display: grid; gap: 5px; width: 100%; padding: 13px 14px; text-align: left;
-  border: 1px solid var(--line); border-radius: 12px;
-  background: var(--white); cursor: pointer;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface); cursor: pointer;
   transition: border-color .15s ease, box-shadow .15s ease;
 }
 .followup-card:hover { border-color: #a9bcb5; }
 .followup-card.active {
-  border-color: var(--accent-line); background: #eef6f2;
-  box-shadow: 0 4px 14px rgba(23, 107, 91, .08);
+  border-color: var(--blue); background: var(--accent-soft);
+  box-shadow: 0 1px 2px rgba(20,25,22,.07);
 }
 .followup-card-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .followup-card-top strong {
@@ -59,7 +81,8 @@
 .followup-reason.reason-appointment_booked { color: #0f5548; }
 .followup-reason.reason-no_response { color: #b42318; }
 .followup-reason.reason-opted_out { color: #b42318; }
-.followup-reason.reason-not_interested, .followup-reason.reason-in_conversation { color: #6b7280; }
+.followup-reason.reason-not_interested { color: #6b7280; }
+.followup-reason.reason-in_conversation { color: var(--accent); }
 
 .followup-state-badge {
   justify-self: start; margin-top: 2px; padding: 2px 8px; border-radius: 999px;
@@ -67,12 +90,14 @@
 }
 .followup-state-badge.accepted { background: #d7ece4; color: #0f5548; }
 .followup-state-badge.declined { background: #f2f3f5; color: #6b7280; }
+.followup-multiple-signal { display: inline-flex; width: fit-content; margin-top: 5px; padding: 4px 7px; border-radius: 999px; background: #fbf3e2; color: #6f4f0d; font-size: 9px; font-weight: 750; }
 
 /* -- conversation panel ---------------------------------------------------- */
 .followups-panel {
-  display: flex; flex-direction: column; height: 100%; overflow: hidden;
-  border: 1px solid var(--line); border-radius: 14px; background: var(--white);
+  display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--surface);
 }
+.followups-layout > .sms-thread-panel { height: 100%; min-height: 0; }
 .followups-panel-header {
   display: flex; align-items: center; gap: 13px;
   padding: 16px 20px; border-bottom: 1px solid var(--line);
@@ -83,10 +108,70 @@
   margin: 3px 0 0; color: var(--muted); font-size: 12px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.followups-status select {
-  padding: 8px 11px; border: 1px solid #e6dcc4; border-radius: 9px;
-  background: #fbf3e2; color: #7c5b12; font: inherit; font-size: 12px; font-weight: 700;
-  cursor: pointer;
+.followup-multiple-properties {
+  position: relative; width: 34px; height: 34px; flex: 0 0 34px;
+  display: grid; place-items: center; padding: 0;
+  border: 1px solid #ddcfad; border-radius: 8px;
+  background: #fbf3e2; color: #6f4f0d; font: inherit; font-size: 15px; cursor: pointer;
+}
+.followup-multiple-properties:hover { border-color: #c8b47e; background: #f8ecd2; }
+.followup-multiple-properties:focus-visible { outline: 3px solid rgba(184, 134, 59, .2); outline-offset: 2px; }
+.followup-multiple-properties::after {
+  content: attr(data-tooltip); position: absolute; z-index: 90;
+  top: calc(100% + 9px); right: 0; width: min(280px, 76vw); padding: 9px 11px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: #17221f; color: #fff; box-shadow: 0 10px 28px rgba(8, 17, 31, .2);
+  font-size: 11px; font-weight: 600; line-height: 1.45; text-align: left;
+  opacity: 0; visibility: hidden; pointer-events: none;
+  transform: translateY(-3px); transition: opacity .15s ease, transform .15s ease, visibility .15s;
+}
+.followup-multiple-properties:hover::after,
+.followup-multiple-properties:focus-visible::after {
+  opacity: 1; visibility: visible; transform: translateY(0);
+}
+.followup-properties-intro { margin: 16px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.followup-property-card h4 { color: var(--blue-dark); }
+.followup-property-signals { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 6px; }
+.followups-status { position: relative; flex: 0 0 168px; }
+.followups-status-label {
+  display: block; margin: 0 0 5px 2px; color: var(--muted);
+  font-size: 9px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase;
+}
+.followups-status-trigger {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  width: 100%; min-height: 40px; padding: 9px 12px;
+  border: 1px solid #ddcfad; border-radius: 10px;
+  background: linear-gradient(180deg, #fffaf0 0%, #fbf3e2 100%);
+  color: #6f4f0d; font: inherit; font-size: 12px; font-weight: 750;
+  text-align: left; cursor: pointer; box-shadow: 0 2px 7px rgba(82, 59, 14, .07);
+}
+.followups-status-trigger:hover { border-color: #c8b47e; }
+.followups-status-trigger:focus-visible {
+  outline: none; border-color: #b8863b; box-shadow: 0 0 0 3px rgba(184, 134, 59, .16);
+}
+.followups-status-trigger:disabled { opacity: .6; cursor: not-allowed; }
+.followups-status-chevron {
+  width: 7px; height: 7px; flex: 0 0 7px;
+  border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+}
+.followups-status-menu {
+  position: absolute; z-index: 50; top: calc(100% + 6px); right: 0;
+  width: max(100%, 190px); max-height: min(310px, 55vh); overflow-y: auto;
+  padding: 6px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--white); box-shadow: 0 16px 38px rgba(20, 40, 35, .2);
+  scrollbar-gutter: stable;
+}
+.followups-status-menu button {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  width: 100%; min-height: 40px; padding: 9px 10px;
+  border: 0; border-radius: 8px; background: transparent;
+  color: var(--ink); font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+}
+.followups-status-menu button:hover,
+.followups-status-menu button:focus-visible { outline: none; background: var(--surface-2); }
+.followups-status-menu button.active {
+  background: #fbf3e2; color: #6f4f0d; font-weight: 750;
 }
 
 .followups-summary {
@@ -113,6 +198,22 @@
 /* Reuses .sms-composer wholesale so replying reads the same in both screens. */
 .followups-composer { border-top: 1px solid var(--line); }
 .followups-composer .button { background-color: #176b5b; }
+.followups-compose-field { position: relative; }
+.followups-compose-field textarea {
+  display: block; min-height: 48px; max-height: 112px;
+  padding: 12px 54px 12px 14px; resize: vertical;
+}
+.followups-compose-field .followups-send-button {
+  position: absolute; right: 6px; bottom: 6px;
+  width: 36px; height: 36px; min-width: 36px; min-height: 36px; padding: 0;
+  display: grid; place-items: center; border-radius: 50%;
+}
+.followups-send-button svg {
+  width: 18px; height: 18px; fill: currentColor; transform: translateX(1px);
+}
+.followups-send-loading {
+  font-size: 10px; letter-spacing: 1px; transform: translateY(-2px);
+}
 
 .followups-actions {
   display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
@@ -122,12 +223,8 @@
 /* A <button> does not inherit colour, so the secondary actions would otherwise
    render in the browser's own button text colour rather than the page's. */
 .followups-actions .sms-button-secondary { color: var(--ink); }
-.followups-decline {
-  margin-left: auto; padding: 12px 14px; border: 0; border-radius: 8px;
-  background: transparent; color: #b42318; font: inherit; font-size: 13px; font-weight: 700;
-  cursor: pointer;
-}
-.followups-decline:hover { background: #fdeceb; }
+.followups-actions .followups-status { margin-left: auto; }
+.followups-actions .followups-status-menu { top: auto; bottom: calc(100% + 6px); }
 .followups-actions button:disabled { opacity: .55; cursor: not-allowed; }
 
 /* -- responsive ------------------------------------------------------------ */
@@ -137,19 +234,82 @@
 
 /* The two panes stack: the list scrolls to a fixed height above the thread. */
 @media (max-width: 900px) {
-  .followups-layout { grid-template-columns: 1fr; height: auto; }
+  .followups-board { height: auto; overflow: visible; }
+  .followups-layout { grid-template-columns: 1fr; height: auto; overflow: visible; }
   .followups-list { max-height: 320px; }
   .followups-panel { height: auto; min-height: 480px; }
+  .followups-layout > .sms-thread-panel { height: auto; min-height: 480px; }
 }
 
 @media (max-width: 560px) {
-  .followups-header h1 { font-size: 22px; }
+  .followups-header { flex-wrap: wrap; }
   .followups-panel-header { flex-wrap: wrap; gap: 10px; padding: 12px 14px; }
   .followups-panel-header .sms-avatar.large { display: none; }
   .followups-status { width: 100%; }
-  .followups-status select { width: 100%; }
+  .followups-status { flex-basis: 100%; }
+  .followups-status-menu {
+    left: 0; right: 0; top: auto; bottom: calc(100% + 6px);
+    width: 100%; max-height: min(390px, 55dvh); padding: 8px;
+    border-radius: 14px; box-shadow: 0 18px 46px rgba(12, 20, 36, .26);
+  }
+  .followups-status-menu button { min-height: 48px; padding: 11px 13px; font-size: 14px; }
   .followups-summary { padding: 10px 14px; }
   .followups-actions { padding: 12px 14px; }
   .followups-actions > * { width: 100%; text-align: center; }
-  .followups-decline { margin-left: 0; }
+  .followups-actions .followups-status { margin-left: 0; }
 }
+
+/* Native select behavior is retained for keyboard and phone accessibility,
+   while the surrounding control supplies the label and custom chevron. */
+.followups-campaign-filter {
+  display: grid; flex: 1; min-width: 0; gap: 5px;
+  color: var(--muted); font-size: 10px; font-weight: 800;
+  letter-spacing: .08em; text-transform: uppercase;
+}
+.followups-campaign-select { position: relative; display: block; }
+.followups-campaign-select::after {
+  content: ""; position: absolute; right: 13px; top: 50%; width: 7px; height: 7px;
+  border-right: 2px solid #52635e; border-bottom: 2px solid #52635e;
+  transform: translateY(-70%) rotate(45deg); pointer-events: none;
+}
+.followups-campaign-box {
+  width: 100%; min-width: 0; padding: 10px 36px 10px 12px;
+  border: 1px solid #cbd5d1; border-radius: 10px;
+  background: linear-gradient(180deg, #fff 0%, #fafcfb 100%);
+  color: var(--ink); font: inherit; font-size: 13px; font-weight: 650;
+  letter-spacing: 0; text-align: left; text-transform: none; cursor: pointer;
+  box-shadow: 0 2px 7px rgba(20, 40, 35, .05);
+  transition: border-color .15s, box-shadow .15s, background .15s;
+}
+.followups-campaign-box:hover { border-color: #9fb3ac; background: var(--white); }
+.followups-campaign-box:focus {
+  outline: none; border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(23, 107, 91, .13);
+}
+.followups-campaign-menu {
+  position: absolute; z-index: 35; top: calc(100% + 6px); left: 0; width: 100%;
+  max-height: min(280px, 50vh); overflow-y: auto; padding: 5px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--white);
+  box-shadow: 0 14px 32px rgba(20, 40, 35, .18);
+  letter-spacing: 0; text-transform: none;
+}
+.followups-campaign-menu button {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  width: 100%; padding: 10px; border: 0; border-radius: 7px;
+  background: transparent; color: var(--ink); font: inherit; font-size: 13px;
+  font-weight: 500; text-align: left; cursor: pointer;
+}
+.followups-campaign-menu button:hover,
+.followups-campaign-menu button.active {
+  background: var(--accent-soft); color: var(--blue-dark);
+}
+.followups-list-head .sms-count {
+  display: grid; place-items: center; min-width: 34px; height: 38px; padding: 0 9px;
+  border: 1px solid var(--accent-line); background: var(--accent-soft);
+}
+.followups-campaign-clear {
+  flex-shrink: 0; width: 26px; height: 26px; padding: 0; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--white); color: var(--muted); font-size: 12px; line-height: 1;
+}
+.followups-campaign-clear:hover { border-color: #a9bcb5; color: var(--ink); }

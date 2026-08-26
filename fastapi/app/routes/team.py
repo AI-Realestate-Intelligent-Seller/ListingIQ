@@ -17,7 +17,8 @@ from sqlalchemy.orm import Session
 from ..auth import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token, hash_password
 from ..core.email import EmailDeliveryError, build_invitation_url, send_invitation_email
 from ..logger import get_logger
-from ..models import Invitation, User
+from ..models import Booking, Campaign, Conversation, Invitation, Lead, Message, User
+from ..tenancy import brokerage_user_ids
 from ..schemas import (
     INVITABLE_ROLES,
     InvitationAcceptRequest,
@@ -25,6 +26,7 @@ from ..schemas import (
     InvitationCreate,
     InvitationResponse,
     InvitationValidationResponse,
+    TeamDirectoryResponse,
 )
 from .auth import get_current_user, get_db
 
@@ -32,13 +34,103 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 INVITATION_TTL_HOURS = 48
-# Simple resend throttle so a HOB cannot loop the send button (or the endpoint).
-INVITATION_RESEND_COOLDOWN_SECONDS = 60
 
 ROLE_LABELS = {'broker': 'an Area Broker', 'agent': 'an Agent'}
 ROLE_DISPLAY_NAMES = {'broker': 'Area Broker', 'agent': 'Agent'}
 
 INVALID_INVITATION_MESSAGE = 'This invitation is invalid or has expired.'
+
+
+@router.get('/overview')
+def brokerage_overview(
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+):
+    """Brokerage-wide operating metrics for the HOB Overview screen."""
+    if current_user.role != 'hob':
+        raise HTTPException(status_code=403, detail='Only a Head of Brokerage can view brokerage analytics.')
+
+    user_ids = brokerage_user_ids(session, current_user)
+    month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    leads = session.query(Lead).filter(Lead.user_id.in_(user_ids)).all()
+    campaigns_sent = (session.query(Campaign)
+                      .filter(Campaign.user_id.in_(user_ids),
+                              Campaign.status == 'sent',
+                              Campaign.sent_at >= month_start)
+                      .count())
+
+    outreach = (session.query(Message)
+                .join(Conversation, Conversation.id == Message.conversation_id)
+                .filter(Conversation.user_id.in_(user_ids),
+                        Message.direction == 'outbound',
+                        Message.campaign_id.isnot(None))
+                .all())
+    outreach_conversation_ids = {message.conversation_id for message in outreach}
+    replied_ids = set()
+    if outreach_conversation_ids:
+        replied_ids = {row[0] for row in session.query(Message.conversation_id)
+                       .filter(Message.conversation_id.in_(outreach_conversation_ids),
+                               Message.direction == 'inbound').distinct().all()}
+
+    conversations = (session.query(Conversation)
+                     .filter(Conversation.user_id.in_(user_ids)).all())
+    conversation_ids = [conversation.id for conversation in conversations]
+    messages = ([] if not conversation_ids else
+                session.query(Message)
+                .filter(Message.conversation_id.in_(conversation_ids))
+                .order_by(Message.conversation_id, Message.created_at, Message.id).all())
+    grouped: dict[int, list[Message]] = {}
+    for message in messages:
+        grouped.setdefault(message.conversation_id, []).append(message)
+
+    requiring_attention = sum(
+        1 for conversation in conversations
+        if grouped.get(conversation.id)
+        and grouped[conversation.id][-1].direction == 'inbound'
+        and conversation.handled_by == 'broker'
+    )
+    response_seconds = []
+    for rows in grouped.values():
+        for index, message in enumerate(rows):
+            if message.direction != 'inbound' or not message.created_at:
+                continue
+            response = next((row for row in rows[index + 1:]
+                             if row.direction == 'outbound' and row.created_at), None)
+            if response:
+                response_seconds.append(max((response.created_at - message.created_at).total_seconds(), 0))
+
+    bookings = (session.query(Booking)
+                .filter(Booking.user_id.in_(user_ids)).all())
+    bookings_this_month = sum(1 for booking in bookings
+                              if booking.created_at and booking.created_at >= month_start)
+    lead_phones = {lead.phone for lead in leads if lead.phone}
+    booked_lead_phones = {booking.phone for booking in bookings if booking.phone in lead_phones}
+
+    members = (session.query(User)
+               .filter(User.id.in_(user_ids), User.role.in_(('broker', 'agent')), User.is_active.is_(True))
+               .order_by(User.role, User.full_name).all())
+    workload = []
+    for member in members:
+        count = ((session.query(Lead).filter(Lead.assigned_agent_id == member.id).count())
+                 if member.role == 'agent' else
+                 session.query(Lead).filter(Lead.user_id == member.id).count())
+        workload.append({'user_id': member.id, 'name': member.full_name or member.email,
+                         'role': member.role, 'lead_count': count})
+
+    total_outreach = len(outreach_conversation_ids)
+    return {
+        'total_leads': len(leads),
+        'campaigns_sent_this_month': campaigns_sent,
+        'campaign_conversations': total_outreach,
+        'campaign_replied': len(replied_ids),
+        'campaign_reply_rate': round((len(replied_ids) / total_outreach * 100) if total_outreach else 0, 1),
+        'replies_requiring_attention': requiring_attention,
+        'appointments_booked_this_month': bookings_this_month,
+        'booked_leads': len(booked_lead_phones),
+        'lead_to_appointment_rate': round((len(booked_lead_phones) / len(lead_phones) * 100) if lead_phones else 0, 1),
+        'average_response_seconds': round(sum(response_seconds) / len(response_seconds)) if response_seconds else None,
+        'workload': workload,
+    }
 
 
 def hash_token(token: str) -> str:
@@ -114,6 +206,23 @@ def create_invitation(
     if not current_user.brokerage_id:
         raise HTTPException(status_code=400, detail='Your brokerage information is incomplete. Please contact support.')
 
+    assigned_broker = None
+    if role == 'agent':
+        if invitation_in.broker_id is None:
+            raise HTTPException(status_code=400, detail='Select an Area Broker for this agent.')
+        assigned_broker = (
+            session.query(User)
+            .filter(
+                User.id == invitation_in.broker_id,
+                User.role == 'broker',
+                User.brokerage_id == current_user.brokerage_id,
+                User.is_active.is_(True),
+            )
+            .first()
+        )
+        if not assigned_broker:
+            raise HTTPException(status_code=400, detail='Select an active Area Broker from your brokerage.')
+
     email = str(invitation_in.email).strip().lower()
     brokerage_domain = get_brokerage_domain(current_user)
     if not brokerage_domain:
@@ -147,19 +256,16 @@ def create_invitation(
             Invitation.expires_at > now,
         )
         .order_by(Invitation.created_at.desc())
-        .all()
+        .first()
     )
 
-    # Re-inviting is allowed (it acts as a resend with a fresh role/expiry), but
-    # not faster than the cooldown, and previous links are always invalidated.
-    for previous in pending:
-        if previous.created_at and (now - previous.created_at).total_seconds() < INVITATION_RESEND_COOLDOWN_SECONDS:
-            raise HTTPException(
-                status_code=429,
-                detail='An invitation was just sent to this address. Please wait a minute before resending.',
-            )
-    for previous in pending:
-        previous.status = 'cancelled'
+    # Invitation resending is intentionally unsupported. The original link
+    # remains the only valid link until it is accepted or expires.
+    if pending:
+        raise HTTPException(
+            status_code=409,
+            detail='An active invitation already exists for this email address.',
+        )
 
     token = generate_token()
     expires_at = now + timedelta(hours=INVITATION_TTL_HOURS)
@@ -169,6 +275,7 @@ def create_invitation(
         brokerage_id=current_user.brokerage_id,
         brokerage_name=current_user.brokerage_name,
         invited_by=current_user.id,
+        assigned_broker_id=assigned_broker.id if assigned_broker else None,
         token_hash=hash_token(token),
         expires_at=expires_at,
         status='pending',
@@ -203,6 +310,30 @@ def create_invitation(
     session.commit()
     logger.info('invitation_created role=%s brokerage_id=%s', role, current_user.brokerage_id)
     return {'message': 'Invitation sent successfully.'}
+
+
+@router.get('/directory', response_model=TeamDirectoryResponse)
+def get_team_directory(
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+):
+    """Return active brokers and agents in the HOB's own brokerage."""
+    if current_user.role != 'hob':
+        raise HTTPException(status_code=403, detail='Only a Head of Brokerage can view the team directory.')
+    if not current_user.brokerage_id:
+        raise HTTPException(status_code=400, detail='Your brokerage information is incomplete. Please contact support.')
+
+    members = (
+        session.query(User)
+        .filter(
+            User.brokerage_id == current_user.brokerage_id,
+            User.role.in_(INVITABLE_ROLES),
+            User.is_active.is_(True),
+        )
+        .order_by(User.role.asc(), User.full_name.asc(), User.email.asc())
+        .all()
+    )
+    return {'members': members}
 
 
 @router.get('/invitations/{token}', response_model=InvitationValidationResponse)
@@ -272,6 +403,7 @@ def accept_invitation(
         brokerage_name=invitation.brokerage_name,
         brokerage_id=invitation.brokerage_id,
         role=invitation.role,
+        assigned_broker_id=invitation.assigned_broker_id,
         is_head_or_owner=False,
         # Delivering the invitation to this mailbox already proved ownership.
         is_verified=True,

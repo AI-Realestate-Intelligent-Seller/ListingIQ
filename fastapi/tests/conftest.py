@@ -25,7 +25,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app import db  # noqa: E402
 from app.auth import hash_password  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import AiRun, Booking, Conversation, Invitation, Lead, Message, User  # noqa: E402
+from app.models import (AiRun, Booking, Campaign, Conversation, Invitation, Lead,  # noqa: E402
+                        Message, User)
 
 
 @pytest.fixture(scope='session', autouse=True)
@@ -44,6 +45,8 @@ def clean_tables():
         session.query(Lead).delete()
         session.query(Message).delete()
         session.query(Conversation).delete()
+        # After leads and conversations: both carry a campaign_id.
+        session.query(Campaign).delete()
         session.query(Booking).delete()
         session.query(AiRun).delete()
         session.query(Invitation).delete()

@@ -212,13 +212,16 @@ def hand_to_broker(session, conversation: Conversation) -> None:
     Autopilot is switched off and ownership recorded, so an inbound message
     afterwards is left pending for the broker instead of waking Bobbie.
     """
-    update_lead_progress(session, conversation, ai_enabled=False, handled_by='broker')
+    update_lead_progress(session, conversation, ai_enabled=False, handled_by='broker',
+                         next_followup_at=None)
     logger.info('[handover] conversation %s handed to the broker', conversation.id)
 
 
 def hand_to_bobbie(session, conversation: Conversation) -> None:
     """Broker explicitly gives the thread back to Bobbie."""
     update_lead_progress(session, conversation, ai_enabled=True, handled_by='bobbie')
+    from .followup_scheduler import resume_silent_followup_cadence
+    resume_silent_followup_cadence(session, conversation)
     logger.info('[handover] conversation %s handed back to Bobbie', conversation.id)
 
 
@@ -230,6 +233,7 @@ def mark_lead_completed(session, conversation: Conversation, **values) -> None:
             'queue_status': 'completed',
             'lead_status': values.get('lead_status') or finalized_lead_status(conversation.lead_status),
             'processed_at': values.get('processed_at') or datetime.utcnow(),
+            'next_followup_at': None,
         },
     )
 

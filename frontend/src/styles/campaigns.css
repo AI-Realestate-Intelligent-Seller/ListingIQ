@@ -1,0 +1,245 @@
+/* Campaigns — the overview of every batch of outreach, and the composer that
+   writes one. Fields, buttons and errors reuse the SMS workspace styles
+   (.sms-field, .sms-error, .sms-count) so a form reads the same everywhere;
+   only the campaign table, the token row and the message preview live here. */
+
+.campaigns-view,
+.campaign-composer {
+  display: flex; flex-direction: column; gap: 18px;
+  width: 100%; min-width: 0; max-width: 100%;
+}
+
+.campaigns-view { height: 100%; min-height: 0; overflow: hidden; }
+.campaigns-scroll-area {
+  flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  scrollbar-gutter: stable; padding-right: 6px;
+}
+.campaigns-scroll-area > :first-child { margin-top: 0; }
+.campaigns-scroll-area > * + * { margin-top: 18px; }
+
+.campaigns-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.campaigns-header .view-title { margin: 6px 0 0; }
+.campaigns-header p { margin: 6px 0 0; color: var(--muted); font-size: 13px; max-width: 62ch; }
+
+.campaigns-back {
+  display: inline-block; margin-bottom: 8px; padding: 0;
+  border: 0; background: none; color: var(--muted);
+  font: inherit; font-size: 12.5px; cursor: pointer;
+}
+.campaigns-back:hover { color: var(--ink); }
+
+.campaigns-notice {
+  margin: 0; padding: 10px 13px; border-radius: 10px;
+  background: #eef6f2; border: 1px solid var(--accent-line);
+  color: #0f5548; font-size: 13px;
+}
+.campaigns-warning {
+  margin: 0; padding: 9px 12px; border-radius: 9px;
+  background: #fff8ea; border: 1px solid #f0d9a8; color: #8a5a00; font-size: 12.5px;
+}
+.campaigns-note { margin: 0; color: var(--muted); font-size: 12px; }
+.campaigns-muted { display: block; margin-top: 3px; color: var(--muted); font-size: 11.5px; font-weight: 400; }
+
+/* -- drafts ---------------------------------------------------------------- */
+.campaigns-drafts { display: grid; gap: 10px; }
+.campaigns-drafts h3 { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+
+/* -- campaign cards -------------------------------------------------------- */
+.campaigns-card-grid { display: flex; flex-direction: column; gap: 10px; }
+.campaigns-card {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  gap: 16px; padding: 16px 18px;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--surface);
+  box-shadow: 0 1px 2px rgba(20,25,22,.07);
+  transition: border-color .15s;
+}
+.campaigns-card:hover { border-color: var(--line-strong); }
+.campaigns-card-main {
+  display: grid; flex: 1 1 260px; min-width: 0; gap: 4px; padding: 0;
+  border: 0; background: transparent; color: var(--ink); font: inherit;
+  text-align: left; cursor: pointer;
+}
+.campaigns-card-name { font-size: 14px; font-weight: 700; }
+.campaigns-card-main:hover .campaigns-card-name { color: var(--blue-dark); }
+.campaigns-card-meta {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
+  color: var(--muted); font-size: 11.5px;
+}
+.campaigns-card-status {
+  padding: 3px 9px; border-radius: 999px;
+  background: #e3f1e7; color: #2e7d4f; font-size: 11px; font-weight: 700;
+  white-space: nowrap;
+}
+.campaigns-card-status-draft { background: var(--surface-2); color: var(--muted); }
+.campaigns-draft-card .campaigns-card-stats { margin-left: auto; }
+.campaigns-card-warning { color: #b23a24; font-size: 11px; }
+.campaigns-card-stats { display: flex; align-items: center; gap: 22px; }
+.campaigns-card-stat { min-width: 48px; text-align: right; }
+.campaigns-card-stat b {
+  display: block; font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", Consolas,
+    "SFMono-Regular", Menlo, monospace;
+  font-size: 15px; font-variant-numeric: tabular-nums;
+}
+.campaigns-card-stat > span {
+  color: var(--muted); font-size: 10px; letter-spacing: .03em;
+  text-transform: uppercase; white-space: nowrap;
+}
+.campaigns-card-action { flex-shrink: 0; }
+
+/* -- overview table -------------------------------------------------------- */
+.campaigns-table-wrap {
+  width: 100%; min-width: 0; max-width: 100%; overflow-x: auto;
+  overscroll-behavior-inline: contain; -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--white);
+}
+.campaigns-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.campaigns-table th,
+.campaigns-table td { padding: 12px 14px; text-align: left; border-bottom: 1px solid var(--line); }
+.campaigns-table thead th {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--muted); background: var(--surface-2); font-weight: 700; white-space: nowrap;
+}
+.campaigns-table tbody tr:last-child th,
+.campaigns-table tbody tr:last-child td { border-bottom: 0; }
+.campaigns-table tbody th { font-weight: 600; }
+/* Replies are the column the broker is scanning for. */
+.campaigns-strong { font-weight: 700; color: #0f5548; }
+.campaigns-actions-cell { text-align: right; white-space: nowrap; }
+
+.campaigns-link {
+  padding: 0; border: 0; background: none; font: inherit; font-weight: 600;
+  color: var(--ink); text-align: left; cursor: pointer; text-decoration: underline;
+  text-decoration-color: var(--accent-line); text-underline-offset: 3px;
+}
+.campaigns-link:hover { color: #0f5548; }
+
+.campaigns-pagination {
+  display: flex; align-items: center; justify-content: flex-end; gap: 10px;
+  margin-top: -8px;
+}
+.campaigns-pagination span { color: var(--muted); font-size: 12px; }
+.campaigns-pagination button {
+  padding: 7px 11px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--white); color: var(--ink); font: inherit; font-size: 12px;
+  font-weight: 600; cursor: pointer;
+}
+.campaigns-pagination button:hover:not(:disabled) { border-color: #a9bcb5; }
+.campaigns-pagination button:disabled { opacity: .45; cursor: not-allowed; }
+
+/* -- composer -------------------------------------------------------------- */
+.campaign-composer-actions { display: flex; gap: 9px; flex-shrink: 0; }
+
+/* One column: the message box, then the table of leads it will reach. The
+   leads used to sit beside it, but they are the campaign's copy of the pool
+   table now and need the full width to read like one. */
+.campaign-composer-layout { display: grid; gap: 18px; align-items: start; }
+.campaign-editor {
+  display: grid; gap: 13px; align-content: start;
+  padding: clamp(18px, 2.4vw, 28px);
+  border: 1px solid #dce7e2; border-radius: 16px;
+  background: #f5f9f7;
+  box-shadow: 0 8px 24px rgba(20, 40, 35, .055);
+}
+.campaign-editor textarea { line-height: 1.55; resize: vertical; }
+.campaign-editor > .sms-field input,
+.campaign-editor > .sms-field textarea {
+  background: var(--white);
+}
+
+.campaign-tokens { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.campaign-tokens-label { color: var(--muted); font-size: 12px; margin-right: 2px; }
+.campaign-token {
+  padding: 4px 9px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--white); cursor: pointer;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px; color: #0f5548;
+}
+.campaign-token:hover { border-color: var(--accent-line); background: #eef6f2; }
+
+.campaign-skipped {
+  padding: 12px 14px; border: 1px solid var(--line); border-radius: 11px; background: #fbfbfa;
+}
+.campaign-skipped strong { display: block; font-size: 13px; margin-bottom: 7px; }
+.campaign-skipped ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 5px; }
+.campaign-skipped li { display: flex; justify-content: space-between; gap: 12px; font-size: 12.5px; }
+.campaign-skipped em { font-style: normal; color: var(--muted); text-align: right; }
+
+
+/* The real message, shaped like the outbound bubble it becomes. */
+@media (max-width: 720px) {
+  .campaigns-view { height: auto; overflow: visible; }
+  .campaigns-scroll-area { overflow: visible; padding-right: 0; }
+  .campaigns-header { flex-direction: column; }
+  .campaigns-table { min-width: 680px; }
+  .campaigns-table-wrap { scrollbar-width: thin; }
+  .campaign-composer-actions { width: 100%; }
+  .campaign-editor { padding: 16px; border-radius: 13px; }
+  .campaign-composer-actions button { flex: 1; }
+  .campaigns-pagination { flex-wrap: wrap; }
+  .campaigns-card { align-items: flex-start; }
+  .campaigns-card-main { flex-basis: 100%; }
+  .campaigns-card-stats {
+    width: 100%; justify-content: space-between; gap: 10px;
+    padding-top: 12px; border-top: 1px solid var(--line);
+  }
+  .campaigns-card-stat { min-width: 0; text-align: left; }
+  .campaigns-card-action { width: 100%; }
+  .campaigns-draft-card .campaigns-card-stats { margin-left: 0; }
+}
+
+/* -- the shared reason ------------------------------------------------------
+   Its own block rather than another .sms-field, because it carries the suggest
+   button, the signal breakdown and a list of clickable wordings. */
+.campaign-reason { display: grid; gap: 7px; }
+.campaign-reason-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.campaign-reason-head label { font-size: 12.5px; font-weight: 600; }
+.campaign-reason textarea {
+  width: 100%; padding: 10px 12px; border: 1px solid var(--line);
+  border-radius: 9px; background: var(--white); font: inherit; font-size: 13px;
+  line-height: 1.55; resize: vertical;
+}
+.campaign-suggest { padding: 5px 11px; font-size: 12px; white-space: nowrap; }
+
+.campaign-ideas {
+  display: grid; gap: 8px; padding: 11px 13px;
+  border: 1px solid var(--accent-line); border-radius: 11px; background: #f7fbf9;
+}
+.campaign-ideas-signals { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; }
+/* What the set has in common, as counted from the imported signals. */
+.campaign-signal-chip {
+  padding: 3px 9px; border-radius: 999px; background: var(--white);
+  border: 1px solid var(--accent-line); font-size: 11.5px; color: #0f5548; font-weight: 600;
+}
+.campaign-ideas-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.campaign-ideas-list button {
+  width: 100%; padding: 9px 11px; text-align: left; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 9px; background: var(--white);
+  font: inherit; font-size: 12.5px; line-height: 1.5;
+}
+.campaign-ideas-list button:hover { border-color: var(--accent-line); background: #eef6f2; }
+
+.campaign-reply-badge {
+  flex-shrink: 0; padding: 2px 9px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--white);
+  color: var(--muted); font-size: 11px; font-weight: 600;
+}
+.campaign-reply-badge.replied {
+  border-color: var(--accent-line); background: #eef6f2; color: #0f5548;
+}
+
+/* -- the campaign's leads ---------------------------------------------------
+   Deliberately the Lead Pool's own .leads-table: these leads left the pool and
+   this is where they are read now, so the table should be the same table. It
+   carries no select box, no remove and no details drawer — the only action on
+   a campaigned lead is opening the conversation it produced. */
+.campaign-people { display: grid; gap: 11px; }
+.campaign-people-head { display: flex; align-items: center; gap: 10px; }
+.campaign-people-head h3 { margin: 0; font-size: 14px; }
+
+.campaign-table th[scope="row"] small { display: block; color: var(--muted); font-size: 11.5px; font-weight: 400; }
+/* The message is the widest thing here and the reason the table exists. */
+.campaign-table .campaign-message-cell {
+  min-width: 260px; max-width: 460px; font-size: 12.5px; line-height: 1.5; color: var(--ink);
+}
+.campaign-table .campaign-open-cell { text-align: right; width: 1%; white-space: nowrap; }
+.campaign-long { color: #8a5a00; font-weight: 600; }

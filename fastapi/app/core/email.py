@@ -18,6 +18,7 @@ from .config import settings
 logger = get_logger(__name__)
 
 INVITATION_SUBJECT = "You've been invited to join your brokerage on ListingIQ"
+PASSWORD_RESET_SUBJECT = "Reset your ListingIQ password"
 
 # Kept as module attributes for backwards compatibility with existing imports.
 SMTP_HOST = settings['smtp']['host']
@@ -39,6 +40,33 @@ def get_frontend_url() -> str:
 
 def build_invitation_url(token: str) -> str:
     return f"{get_frontend_url()}/join?token={token}"
+
+
+def build_password_reset_url(token: str) -> str:
+    return f"{get_frontend_url()}/reset-password?token={token}"
+
+
+def send_password_reset_email(recipient_email: str, reset_url: str) -> None:
+    safe_url = escape(reset_url, quote=True)
+    html_body = f"""
+<html><body style="font-family:Arial,Helvetica,sans-serif;color:#0c1424;background:#f4f6f8;padding:40px 16px;">
+  <div style="max-width:520px;margin:auto;background:#fff;border:1px solid #dfe3e8;border-radius:12px;padding:36px;">
+    <div style="font-size:20px;font-weight:700;color:#1f5c4d;">ListingIQ</div>
+    <h1 style="font-size:25px;margin:26px 0 12px;">Reset your password</h1>
+    <p style="color:#4a5568;line-height:1.6;">Use the button below to choose a new password. This link expires in one hour and stops working after your password is changed.</p>
+    <a href="{safe_url}" style="display:inline-block;margin:10px 0 22px;padding:13px 22px;background:#1f5c4d;color:#fff;text-decoration:none;border-radius:8px;font-weight:700;">Choose a new password</a>
+    <p style="font-size:13px;color:#657083;word-break:break-all;">If the button does not work, open:<br><a href="{safe_url}" style="color:#1f5c4d;">{safe_url}</a></p>
+    <p style="font-size:12px;color:#8a94a3;margin-top:24px;">If you did not request this reset, you can safely ignore this email.</p>
+  </div>
+</body></html>
+"""
+    text_body = (
+        "Reset your ListingIQ password\n\n"
+        "Open this link to choose a new password. It expires in one hour:\n"
+        f"{reset_url}\n\n"
+        "If you did not request this reset, you can safely ignore this email.\n"
+    )
+    send_email(recipient_email, PASSWORD_RESET_SUBJECT, html_body, text_body)
 
 
 def build_invitation_email_html(

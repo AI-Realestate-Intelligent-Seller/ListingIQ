@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from ..db import SessionLocal
 from ..models import Conversation, Message
 from ..routes.auth import get_current_user
+from ..tenancy import brokerage_user_ids
 
 router = APIRouter()
 
@@ -16,7 +17,7 @@ def get_db():
 
 @router.get('/')
 def list_conversations(current_user=Depends(get_current_user), db: Session = Depends(get_db)):
-    conversations = db.query(Conversation).filter(Conversation.user_id == current_user.id).all()
+    conversations = db.query(Conversation).filter(Conversation.user_id.in_(brokerage_user_ids(db, current_user))).all()
     response = []
     for conv in conversations:
         latest_message = (
@@ -40,7 +41,7 @@ def list_conversations(current_user=Depends(get_current_user), db: Session = Dep
 
 @router.get('/{conversation_id}/messages')
 def get_conversation_messages(conversation_id: int, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
-    conv = db.query(Conversation).filter(Conversation.id == conversation_id, Conversation.user_id == current_user.id).first()
+    conv = db.query(Conversation).filter(Conversation.id == conversation_id, Conversation.user_id.in_(brokerage_user_ids(db, current_user))).first()
     if not conv:
         raise HTTPException(status_code=404, detail='Conversation not found')
     messages = db.query(Message).filter(Message.conversation_id == conv.id).order_by(Message.created_at).all()

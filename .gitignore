@@ -15,7 +15,7 @@ node_modules/
 .next/
 dist/
 build/
-
+SMS with Simulation and basic python and js/
 # Environment
 .env
 .env.*
@@ -28,6 +28,9 @@ build/
 
 # VS Code
 .vscode/
+
+# Local ListingIQ databases and backups
+fastapi/listingiq.db*
 
 # Zip backups
 *.zip

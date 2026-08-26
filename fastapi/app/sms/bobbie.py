@@ -83,6 +83,44 @@ def _latest_inbound(history: list) -> str:
     return ''
 
 
+def generate_no_response_followup(conversation, history: list, attempt: int, maximum: int) -> str:
+    """Write one low-pressure follow-up using the stored thread as context."""
+    address = conversation.property_address or 'the property'
+    fallbacks = {
+        1: f'Just circling back—did you happen to see my earlier text about {address}?',
+        2: f'I wanted to follow up once more about {address}. Is selling something you would consider?',
+        maximum: ('Just closing the loop. If selling is still something you’d consider, feel free to reply. '
+                  'Otherwise, I won’t follow up again.'),
+    }
+    fallback = fallbacks.get(attempt, fallbacks.get(maximum))
+    recent = [{'role': 'Bobbie' if item.get('direction') == 'outbound' else 'Owner',
+               'text': str(item.get('text') or '')} for item in history[-12:]]
+    final = attempt >= maximum
+    instruction = (
+        'Write Bobbie’s final follow-up SMS. Say this is the last outreach in a calm, respectful way, invite a '
+        'reply if selling is still relevant, and say there will be no more follow-ups. Do not threaten or pressure.'
+        if final else
+        f'Write follow-up SMS {attempt} of {maximum} because the owner has not replied. Briefly and naturally ask '
+        'whether they saw the earlier property text. Do not claim urgency, invent facts, or pressure them.'
+    )
+    try:
+        result = completion([
+            {'role': 'system', 'content': (
+                'You write concise property-owner SMS messages for Bobbie. Use the supplied chat history, avoid '
+                'repeating an earlier follow-up verbatim, use at most 220 characters, and output only the SMS.')},
+            {'role': 'user', 'content': json.dumps({
+                'property': address, 'attempt': attempt, 'maximum_attempts': maximum,
+                'recent_conversation': recent, 'instruction': instruction,
+            })},
+        ], temperature=0.25, max_tokens=90)
+        message = clean_reply(result.get('content') or '')
+        return fit_complete_sms(message, 240) if message else fallback
+    except AiUnavailableError as error:
+        logger.warning('[followup-ai] contact=%s attempt=%s fallback=true error=%s',
+                       conversation.contact, attempt, error)
+        return fallback
+
+
 # ---------------------------------------------------------------------------
 # Disposition
 # ---------------------------------------------------------------------------

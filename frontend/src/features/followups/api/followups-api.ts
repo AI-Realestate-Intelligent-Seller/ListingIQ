@@ -17,11 +17,15 @@ const FOLLOWUPS = "/followups";
  */
 export function listFollowUps(
   accessToken: string,
+  scope: "replied" | "all" = "replied",
   state?: FollowUpState,
   signal?: AbortSignal,
+  campaignId?: number,
 ): Promise<FollowUp[]> {
-  const query = state ? `?state=${state}` : "";
-  return getJson<FollowUp[]>(`${FOLLOWUPS}${query}`, accessToken, signal);
+  const query = new URLSearchParams({ scope });
+  if (state) query.set("state", state);
+  if (campaignId !== undefined) query.set("campaign_id", String(campaignId));
+  return getJson<FollowUp[]>(`${FOLLOWUPS}?${query}`, accessToken, signal);
 }
 
 export function setFollowUpState(

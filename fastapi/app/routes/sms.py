@@ -1,6 +1,7 @@
 """SMS workspace API — the broker-facing inbox powered by Bobbie.
 
-Every conversation belongs to the authenticated broker (Conversation.user_id).
+Conversations belong to the brokerage (see app.tenancy); Conversation.user_id
+records which account started the thread.
 The broker is always taken from the JWT, never from the request body, so one
 broker can never read or write another brokerage's threads.
 """
@@ -12,7 +13,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..logger import get_logger
-from ..models import Conversation, Message, User
+from ..models import Conversation, Lead, Message, User
+from ..tenancy import brokerage_user_ids
 from ..schemas import (
     SmsConversationCreate,
     SmsConversationCreated,
@@ -42,7 +44,8 @@ def _require_sms_access(user: User) -> None:
 
 def _owned_conversation(session: Session, conversation_id: int, user: User) -> Conversation:
     conversation = (session.query(Conversation)
-                    .filter(Conversation.id == conversation_id, Conversation.user_id == user.id)
+                    .filter(Conversation.id == conversation_id,
+                            Conversation.user_id.in_(brokerage_user_ids(session, user)))
                     .first())
     if not conversation:
         raise HTTPException(status_code=404, detail='Conversation not found')
@@ -55,6 +58,11 @@ def _serialize(session: Session, conversation: Conversation) -> dict:
               .order_by(Message.created_at.desc(), Message.id.desc())
               .first())
     count = session.query(Message).filter(Message.conversation_id == conversation.id).count()
+    # The pool row behind the thread, when it came from an import. It is what
+    # the details panel reads, so the thread can offer the same ⓘ as the pool.
+    lead_id = (session.query(Lead.id)
+               .filter(Lead.conversation_id == conversation.id)
+               .scalar())
     # The broker owes a reply when Bobbie has stepped back and the owner spoke last.
     awaiting = bool(
         conversation.handled_by == 'broker'
@@ -63,6 +71,7 @@ def _serialize(session: Session, conversation: Conversation) -> dict:
     )
     return {
         'id': conversation.id,
+        'lead_id': lead_id,
         'contact': conversation.contact,
         'name': conversation.name,
         'property_address': conversation.property_address,
@@ -128,7 +137,8 @@ def knowledge_reindex(current_user: User = Depends(get_current_user)):
 def list_conversations(current_user: User = Depends(get_current_user), session: Session = Depends(get_db)):
     _require_sms_access(current_user)
     conversations = (session.query(Conversation)
-                     .filter(Conversation.user_id == current_user.id)
+                     .filter(Conversation.user_id.in_(
+                         brokerage_user_ids(session, current_user)))
                      .order_by(Conversation.created_at.desc())
                      .all())
     return [_serialize(session, conversation) for conversation in conversations]
@@ -145,7 +155,8 @@ def create_conversation(
     contact = payload.contact.strip()
 
     existing = (session.query(Conversation)
-                .filter(Conversation.contact == contact, Conversation.user_id == current_user.id)
+                .filter(Conversation.contact == contact,
+                        Conversation.user_id.in_(brokerage_user_ids(session, current_user)))
                 .first())
     if existing and session.query(Message).filter(Message.conversation_id == existing.id).count():
         raise HTTPException(

@@ -1,4 +1,5 @@
 import os
+import hashlib
 from datetime import datetime, timedelta
 from typing import Optional
 import jwt
@@ -31,3 +32,28 @@ def decode_access_token(token: str) -> dict:
         return payload
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+
+def create_password_reset_token(user_id: int, hashed_password: str) -> str:
+    """Create a one-hour token that becomes invalid as soon as the password changes."""
+    return create_access_token(
+        {
+            'user_id': user_id,
+            'purpose': 'password_reset',
+            'password_marker': hashlib.sha256(hashed_password.encode('utf-8')).hexdigest(),
+        },
+        expires_delta=timedelta(hours=1),
+    )
+
+def decode_password_reset_token(token: str, hashed_password: str) -> int:
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=400, detail='This password reset link is invalid or has expired.')
+
+    expected_marker = hashlib.sha256(hashed_password.encode('utf-8')).hexdigest()
+    if payload.get('purpose') != 'password_reset' or payload.get('password_marker') != expected_marker:
+        raise HTTPException(status_code=400, detail='This password reset link is invalid or has expired.')
+    try:
+        return int(payload['user_id'])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=400, detail='This password reset link is invalid or has expired.')

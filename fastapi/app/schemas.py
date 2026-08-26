@@ -49,6 +49,16 @@ class AuthResponse(BaseModel):
 class RefreshRequest(BaseModel):
     refresh_token: str
 
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+class PasswordResetRequest(BaseModel):
+    token: str = Field(min_length=1)
+    password: str = Field(min_length=8)
+
+class MessageResponse(BaseModel):
+    message: str
+
 class RegistrationResponse(BaseModel):
     message: str
     email: EmailStr
@@ -56,6 +66,7 @@ class RegistrationResponse(BaseModel):
 class InvitationCreate(BaseModel):
     email: EmailStr
     role: str
+    broker_id: Optional[int] = None
 
     @validator('role')
     def role_must_be_invitable(cls, value: str) -> str:
@@ -66,6 +77,33 @@ class InvitationCreate(BaseModel):
 
 class InvitationResponse(BaseModel):
     message: str
+
+class DirectoryMemberResponse(BaseModel):
+    id: int
+    full_name: Optional[str]
+    email: EmailStr
+    role: str
+    is_active: bool
+    assigned_broker_id: Optional[int] = None
+
+    class Config:
+        orm_mode = True
+
+class TeamDirectoryResponse(BaseModel):
+    members: List[DirectoryMemberResponse]
+
+class LeadAssignmentRequest(BaseModel):
+    agent_id: Optional[int] = None
+
+class LeadAssignmentStageRequest(BaseModel):
+    stage: str
+
+    @validator('stage')
+    def stage_must_be_known(cls, value: str) -> str:
+        normalized = (value or '').strip().lower().replace(' ', '_')
+        if normalized not in {'new', 'in_progress', 'done'}:
+            raise ValueError('Stage must be one of: new, in_progress, done.')
+        return normalized
 
 class InvitationValidationResponse(BaseModel):
     valid: bool
@@ -122,6 +160,9 @@ class SmsMessageOut(BaseModel):
 
 class SmsConversationOut(BaseModel):
     id: int
+    # The lead pool row behind the thread, when it came from an import. Null for
+    # a thread the broker started by hand, which has no property record to show.
+    lead_id: Optional[int] = None
     contact: str
     name: Optional[str]
     property_address: Optional[str]
@@ -155,13 +196,28 @@ LEAD_STATUSES = ('processing', 'want_more_info', 'interested', 'ready_to_sell',
 # The decision recorded on a replied lead.
 FOLLOWUP_STATES = ('pending', 'accepted', 'declined')
 
+class FollowUpPropertyOut(BaseModel):
+    lead_id: int
+    address: Optional[str] = None
+    area: Optional[str] = None
+    campaign_id: Optional[int] = None
+    campaign_name: Optional[str] = None
+    signals: list[str] = Field(default_factory=list)
+
 class FollowUpOut(BaseModel):
     """One conversation the owner has replied to, with the reason it is waiting."""
     id: int
+    # The lead pool row behind the thread, for the property details panel.
+    lead_id: Optional[int] = None
+    # The campaign that opened this thread, when one did.
+    campaign_id: Optional[int] = None
+    campaign_name: Optional[str] = None
     contact: str
     name: Optional[str]
     property_address: Optional[str]
     area: Optional[str] = None
+    properties: list[FollowUpPropertyOut] = Field(default_factory=list)
+    has_multiple_properties: bool = False
     ai_enabled: bool
     handled_by: str
     awaiting_broker_reply: bool
@@ -233,6 +289,94 @@ class LeadCampaignRequest(BaseModel):
     lead_ids: List[int] = Field(min_items=1, max_items=100_000)
     # Optional: when blank, each lead's own signals supply the reason.
     outreach_reason: Optional[str] = Field(None, max_length=300)
+
+class CampaignDraftRequest(BaseModel):
+    """Turn a selection in the Lead Pool into a draft campaign to compose."""
+    lead_ids: List[int] = Field(min_items=1, max_items=100_000)
+    name: Optional[str] = Field(None, max_length=200)
+    message_template: Optional[str] = Field(None, max_length=1600)
+
+class CampaignUpdateRequest(BaseModel):
+    """Rename a campaign, rewrite its message or its reason, or all three."""
+    name: Optional[str] = Field(None, max_length=200)
+    message_template: Optional[str] = Field(None, max_length=1600)
+    # Empty string is meaningful: it hands {{reason}} back to each lead's signal.
+    outreach_reason: Optional[str] = Field(None, max_length=300)
+
+class CampaignSignalShare(BaseModel):
+    """How much of the campaign carries one signal."""
+    key: str
+    label: str
+    count: int
+    share: float
+
+class CampaignReasonSuggestions(BaseModel):
+    """Reason wordings that fit what this set of leads has in common."""
+    signals: List[CampaignSignalShare] = []
+    suggestions: List[str] = []
+    # 'ai' when DeepSeek phrased them, 'catalog' for the built-in wordings.
+    source: str = 'catalog'
+    # Why the catalog was used, when it was. Empty on the happy path.
+    note: str = ''
+
+class CampaignRecipient(BaseModel):
+    """One lead of a campaign: what it would receive, or what it did receive.
+
+    Carries the same fields the lead pool shows, because a campaigned lead is
+    listed here instead of there and the table is the same table.
+    """
+    lead_id: int
+    owner_name: Optional[str]
+    phone: Optional[str]
+    property_address: Optional[str]
+    area: Optional[str] = None
+    signals: List[dict] = []
+    score: int = 0
+    stage: Optional[str] = None
+    last_activity_at: Optional[datetime] = None
+    text: str
+    is_long: bool = False
+    # Set once the campaign has been sent, so its leads can be opened from here
+    # — they no longer appear in the lead pool.
+    conversation_id: Optional[int] = None
+    replied: bool = False
+
+class CampaignSkip(BaseModel):
+    lead_id: int
+    owner_name: Optional[str]
+    reason: str
+
+class CampaignPreview(BaseModel):
+    campaign_id: int
+    recipients: List[CampaignRecipient]
+    skipped: List[CampaignSkip]
+    # Set when the template will not render; the composer shows it and blocks Send.
+    template_error: str = ''
+    tokens: dict = {}
+
+class CampaignOut(BaseModel):
+    """A campaign and how its outreach is going."""
+    id: int
+    name: str
+    message_template: str
+    outreach_reason: str = ''
+    status: str
+    sent_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    recipients: int = 0
+    delivered: int = 0
+    replied: int = 0
+    no_reply: int = 0
+    not_sent: int = 0
+
+class CampaignDetail(CampaignOut):
+    preview: CampaignPreview
+
+class CampaignDraftResult(BaseModel):
+    # The full detail, so the composer opens without a second round trip.
+    campaign: CampaignDetail
+    # Selected leads the draft could not take, each with the reason.
+    not_added: List[CampaignSkip] = []
 
 class TokenData(BaseModel):
     user_id: Optional[int]

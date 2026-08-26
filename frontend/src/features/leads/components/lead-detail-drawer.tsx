@@ -7,7 +7,6 @@ import type { LeadDetail, LeadStage } from "../types/leads.types";
 
 const STAGE_CLASS: Record<LeadStage, string> = {
   ready: "ready",
-  new: "new",
   in_campaign: "campaign",
   needs_review: "review",
   dnc: "dnc",
@@ -47,15 +46,28 @@ function formatMoment(value: string | null): string {
   });
 }
 
+/** Fallback wording when the caller has no stage catalog of its own to pass. */
+const DEFAULT_STAGE_LABELS: Record<string, string> = {
+  ready: "Ready",
+  in_campaign: "In campaign",
+  needs_review: "Needs review",
+  dnc: "Do not contact",
+};
+
 type LeadDetailDrawerProps = {
   /** The lead to show, or null when the drawer is closed. */
   leadId: number | null;
   accessToken: string;
-  stageLabels: Record<string, string>;
+  /** From the pool's stage catalog. Omitted outside the pool, where the
+      built-in wording is enough. */
+  stageLabels?: Record<string, string>;
   onClose: () => void;
-  onOpenConversation: (conversationId: number) => void;
-  onStartCampaign: (leadId: number) => void;
-  onRemove: (lead: LeadDetail) => void;
+  /** Omit where the caller is already the place threads are read: the panel
+      then shows the property alone, with no action that leads back to itself. */
+  onOpenConversation?: (conversationId: number) => void;
+  /** Drafts a one-lead campaign and opens it in the Campaigns tab to write. */
+  onStartCampaign?: (leadId: number) => void;
+  onRemove?: (lead: LeadDetail) => void;
 };
 
 /**
@@ -66,7 +78,7 @@ type LeadDetailDrawerProps = {
 export function LeadDetailDrawer({
   leadId,
   accessToken,
-  stageLabels,
+  stageLabels = DEFAULT_STAGE_LABELS,
   onClose,
   onOpenConversation,
   onStartCampaign,
@@ -294,17 +306,19 @@ export function LeadDetailDrawer({
           ) : null}
         </div>
 
-        {shown ? (
+        {shown && (onOpenConversation || onStartCampaign || onRemove) ? (
           <footer className="leads-drawer-actions">
             {shown.conversation ? (
-              <button
-                className="button"
-                type="button"
-                onClick={() => onOpenConversation(shown.conversation!.id)}
-              >
-                Open conversation
-              </button>
-            ) : (
+              onOpenConversation ? (
+                <button
+                  className="button"
+                  type="button"
+                  onClick={() => onOpenConversation(shown.conversation!.id)}
+                >
+                  Open conversation
+                </button>
+              ) : null
+            ) : onStartCampaign ? (
               <button
                 className="button"
                 type="button"
@@ -318,12 +332,14 @@ export function LeadDetailDrawer({
                       : undefined
                 }
               >
-                ✦ Start with Bobbie
+                ✦ Create campaign
               </button>
-            )}
-            <button type="button" className="sms-button-secondary" onClick={() => onRemove(shown)}>
-              Remove
-            </button>
+            ) : null}
+            {onRemove ? (
+              <button type="button" className="sms-button-secondary" onClick={() => onRemove(shown)}>
+                Remove
+              </button>
+            ) : null}
           </footer>
         ) : null}
       </aside>

@@ -7,8 +7,8 @@ import type { ImportPreview } from "../types/leads.types";
 /** The fields a broker can point at a column, in the order they are shown. */
 const MAPPABLE: { field: string; label: string; hint?: string }[] = [
   { field: "owner_name", label: "Owner name" },
-  { field: "phone", label: "Phone", hint: "Used to match duplicates" },
-  { field: "property_address", label: "Property address" },
+  { field: "phone", label: "Phone", hint: "Duplicate fallback when no property is selected" },
+  { field: "property_address", label: "Property address", hint: "Select this to match duplicate properties" },
   { field: "area", label: "Area or city" },
   { field: "signals", label: "Signals" },
 ];
@@ -114,8 +114,8 @@ export function ImportDialog({
             <fieldset className="import-fieldset">
               <legend>Columns</legend>
               <p className="import-mapping-note">
-                Detected from the header. Change any that are wrong — the counts above
-                update as you do.
+                Select the property-address column before importing. Other fields are
+                detected from the header, and the counts update as you change them.
               </p>
               <div className={`import-mapping${isRemapping ? " busy" : ""}`}>
                 {MAPPABLE.map(({ field, label, hint }) => (

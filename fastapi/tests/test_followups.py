@@ -90,6 +90,28 @@ def test_only_leads_who_replied_are_listed(client, make_user, auth_header, sent_
     assert {item['id'] for item in listed} == {replied_id, silent_id}
 
 
+def test_all_scope_includes_replied_and_silent_conversations(client, make_user, auth_header,
+                                                             sent_sms):
+    make_user(BROKER_EMAIL, role='broker')
+    headers = auth_header(BROKER_EMAIL)
+    replied_id = start_conversation(client, headers)
+    silent_id = start_conversation(client, headers, contact=SECOND_CONTACT, name='Priya Nguyen')
+    owner_replies(client)
+
+    rows = client.get(f'{FOLLOWUPS_URL}?scope=all', headers=headers)
+    assert rows.status_code == 200, rows.text
+    by_id = {row['id']: row for row in rows.json()}
+    assert set(by_id) == {replied_id, silent_id}
+    assert by_id[replied_id]['reply_count'] == 1
+    assert by_id[silent_id]['reply_count'] == 0
+
+
+def test_followups_reject_unknown_scope(client, make_user, auth_header):
+    make_user(BROKER_EMAIL, role='broker')
+    response = client.get(f'{FOLLOWUPS_URL}?scope=unknown', headers=auth_header(BROKER_EMAIL))
+    assert response.status_code == 400
+
+
 def test_a_broker_never_sees_another_brokerages_followups(client, make_user, auth_header, sent_sms):
     make_user(BROKER_EMAIL, role='broker')
     make_user(OTHER_EMAIL, role='broker', brokerage_id='brokerage-2', brokerage_name='Other Group')
@@ -159,7 +181,7 @@ def test_a_quiet_thread_reports_the_days_of_silence(client, make_user, auth_head
 # --------------------------------------------------------------------------
 
 def test_accepting_and_declining_a_lead_round_trips(client, make_user, auth_header, sent_sms):
-    make_user(BROKER_EMAIL, role='agent')
+    make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
     conversation_id = start_conversation(client, headers)
     owner_replies(client)

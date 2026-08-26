@@ -161,7 +161,8 @@ def test_import_requires_authentication(client):
 
 def test_a_broker_never_sees_another_brokers_leads(client, make_user, auth_header):
     make_user(BROKER_EMAIL, role='broker')
-    make_user('other.broker@linchpinglobal.net', role='broker')
+    make_user('other.broker@linchpinglobal.net', role='broker',
+              brokerage_id='brokerage-2', brokerage_name='Other Group')
     upload(client, auth_header(BROKER_EMAIL))
 
     response = client.get(LEADS_URL, headers=auth_header('other.broker@linchpinglobal.net'))
@@ -172,15 +173,16 @@ def test_a_broker_never_sees_another_brokers_leads(client, make_user, auth_heade
 # -- stage, search, filters ------------------------------------------------
 
 
-def test_freshly_imported_leads_read_as_new_then_become_ready(client, make_user, auth_header, session):
+def test_a_contactable_lead_is_ready_for_outreach_immediately(client, make_user, auth_header, session):
+    """There is no waiting stage: imported and contactable means ready."""
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
     upload(client, headers)
 
     stages = {item['stage'] for item in client.get(LEADS_URL, headers=headers).json()['leads']}
-    assert stages == {'new'}
+    assert stages == {'ready'}
 
-    # Age every lead past the freshness window.
+    # Age them; nothing about the stage changes.
     for lead in session.query(Lead).all():
         lead.refreshed_at = datetime.utcnow() - timedelta(days=2)
         lead.created_at = datetime.utcnow() - timedelta(days=2)
@@ -188,7 +190,6 @@ def test_freshly_imported_leads_read_as_new_then_become_ready(client, make_user,
 
     stages = {item['stage'] for item in client.get(LEADS_URL, headers=headers).json()['leads']}
     assert stages == {'ready'}
-
 
 def test_a_lead_without_a_phone_needs_review(client, make_user, auth_header):
     make_user(BROKER_EMAIL, role='broker')
@@ -226,6 +227,97 @@ def test_signal_filter_requires_every_selected_signal(client, make_user, auth_he
     assert both == []
 
 
+# One town written three ways, plus a county and a second state, so the
+# location filters have something to actually disagree about.
+LOCATION_CSV = (
+    'Owner Name,Phone,Property Address\n'
+    'Ann Reed,3125550001,"2800 Pine Ave, Mattoon, IL, 61938"\n'
+    'Ben Cole,3125550002,"14 Oak St, Village of Mattoon, IL 61938"\n'
+    'Cara Dane,3125550003,"9 Elm Rd, Coles County, IL 61938"\n'
+    'Dev Rao,3125550004,"950 Edgar Dr, Charleston, IL, 61920"\n'
+    'Eve Shah,3125550005,"5 Oak Ln, Springfield, MO 65801"\n'
+)
+
+
+def location_pool(client, make_user, auth_header):
+    make_user(BROKER_EMAIL, role='broker')
+    headers = auth_header(BROKER_EMAIL)
+    upload(client, headers, LOCATION_CSV)
+    return headers
+
+
+def owners(client, headers, **params):
+    return sorted(item['owner_name']
+                  for item in client.get(LEADS_URL, headers=headers, params=params).json()['leads'])
+
+
+def test_location_reads_state_town_and_zip_out_of_the_address(client, make_user, auth_header):
+    headers = location_pool(client, make_user, auth_header)
+    locations = client.get(LEADS_URL, headers=headers).json()['locations']
+
+    assert [item['key'] for item in locations['states']] == ['IL', 'MO']
+    assert {item['key'] for item in locations['zips']} == {'61938', '61920', '65801'}
+    assert ('61938', 3) in [(item['key'], item['count']) for item in locations['zips']]
+    shared_zip = next(item for item in locations['zips'] if item['key'] == '61938')
+    assert shared_zip['label'] == '61938 · Coles County, IL / Mattoon, IL'
+    assert 'Illinois' in [item['label'] for item in locations['states']]
+
+
+def test_each_location_filter_stands_on_its_own(client, make_user, auth_header):
+    headers = location_pool(client, make_user, auth_header)
+
+    assert owners(client, headers, state='IL') == ['Ann Reed', 'Ben Cole', 'Cara Dane', 'Dev Rao']
+    assert owners(client, headers, zip='61920') == ['Dev Rao']
+    # Two values of one kind widen rather than narrow.
+    assert owners(client, headers, state=['IL', 'MO']) == [
+        'Ann Reed', 'Ben Cole', 'Cara Dane', 'Dev Rao', 'Eve Shah']
+
+
+def test_location_filters_of_different_kinds_narrow_each_other(client, make_user, auth_header):
+    headers = location_pool(client, make_user, auth_header)
+
+    assert owners(client, headers, state='IL', zip='61920') == ['Dev Rao']
+    # A state and a town in a different state agree on nothing.
+    assert owners(client, headers, state='MO', city='mattoon|IL') == []
+
+
+def test_a_town_finds_the_leads_that_spell_it_differently(client, make_user, auth_header):
+    """The point of the whole feature: a town is a ZIP, not a spelling.
+
+    Three of these leads are in Mattoon and only one says so — the others say
+    "Village of Mattoon" and name the county instead. They share a ZIP, so
+    asking for the town has to find all three.
+    """
+    headers = location_pool(client, make_user, auth_header)
+
+    assert owners(client, headers, city='mattoon|IL') == ['Ann Reed', 'Ben Cole', 'Cara Dane']
+
+
+def test_the_town_menu_narrows_under_a_state_but_the_state_menu_does_not(
+        client, make_user, auth_header):
+    """Dependent counts, computed under the other filters but not their own.
+
+    Narrowing the state list too would leave no way to change the state — only
+    to clear it — so each list is counted with its own filter lifted.
+    """
+    headers = location_pool(client, make_user, auth_header)
+    locations = client.get(LEADS_URL, headers=headers, params={'state': 'IL'}).json()['locations']
+
+    assert [item['key'] for item in locations['states']] == ['IL', 'MO']
+    assert '65801' not in [item['key'] for item in locations['zips']]
+    assert all(item['key'].endswith('|IL') for item in locations['cities'])
+
+
+def test_a_selection_that_matches_nothing_keeps_its_place_in_the_menu(
+        client, make_user, auth_header):
+    """Otherwise the filter stays in force with nothing on screen to lift it."""
+    headers = location_pool(client, make_user, auth_header)
+    locations = client.get(LEADS_URL, headers=headers, params={'state': 'CA'}).json()['locations']
+
+    assert ('CA', 0) in [(item['key'], item['count']) for item in locations['states']]
+    assert owners(client, headers, state='CA') == []
+
+
 def test_facets_count_the_whole_pool(client, make_user, auth_header):
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
@@ -234,7 +326,7 @@ def test_facets_count_the_whole_pool(client, make_user, auth_header):
     facets = client.get(LEADS_URL, headers=headers).json()['facets']
     assert facets['total'] == 3
     assert facets['signals']['high_equity'] == 1
-    assert facets['stages']['new'] == 3
+    assert facets['stages']['ready'] == 3
 
 
 # -- campaigns -------------------------------------------------------------
@@ -262,10 +354,15 @@ def test_campaign_starts_bobbie_and_moves_the_lead_into_the_sms_tab(
     assert [item['contact'] for item in conversations] == ['+13125550188']
     assert conversations[0]['handled_by'] == 'bobbie'
 
+    # The lead now lives under its campaign, not in the pool.
     refreshed = client.get(LEADS_URL, headers=headers).json()['leads']
-    campaigned = next(item for item in refreshed if item['id'] == target['id'])
-    assert campaigned['stage'] == 'in_campaign'
-    assert campaigned['last_activity_at'] is not None
+    assert target['id'] not in [item['id'] for item in refreshed]
+
+    campaign_id = client.get('/api/v1/campaigns', headers=headers).json()[0]['id']
+    detail = client.get(f'/api/v1/campaigns/{campaign_id}', headers=headers).json()
+    listed = detail['preview']['recipients']
+    assert [item['lead_id'] for item in listed] == [target['id']]
+    assert listed[0]['conversation_id'] is not None
 
 
 def test_campaign_skips_leads_it_cannot_text_but_starts_the_rest(
@@ -279,7 +376,7 @@ def test_campaign_skips_leads_it_cannot_text_but_starts_the_rest(
                            json={'lead_ids': [item['id'] for item in leads]})
     body = response.json()
     assert len(body['started']) == 3
-    assert [item['reason'] for item in body['skipped']] == ['No usable phone number.']
+    assert [item['reason'] for item in body['skipped']] == ['Needs review — no usable phone number.']
 
 
 def test_campaign_never_texts_a_dnc_lead(client, make_user, auth_header, sent_sms, session):
@@ -308,13 +405,14 @@ def test_a_lead_cannot_be_campaigned_twice(client, make_user, auth_header, sent_
     client.post(f'{LEADS_URL}/campaign', headers=headers, json={'lead_ids': [lead_id]})
     again = client.post(f'{LEADS_URL}/campaign', headers=headers, json={'lead_ids': [lead_id]})
     assert again.json()['started'] == []
-    assert again.json()['skipped'][0]['reason'] == 'Already in a campaign.'
+    assert again.json()['skipped'][0]['reason'] == 'Already texted in a campaign.'
     assert len(sent_sms) == 1
 
 
 def test_campaign_rejects_another_brokers_lead(client, make_user, auth_header, sent_sms):
     make_user(BROKER_EMAIL, role='broker')
-    make_user('other.broker@linchpinglobal.net', role='broker')
+    make_user('other.broker@linchpinglobal.net', role='broker',
+              brokerage_id='brokerage-2', brokerage_name='Other Group')
     upload(client, auth_header(BROKER_EMAIL))
     lead_id = client.get(LEADS_URL, headers=auth_header(BROKER_EMAIL)).json()['leads'][0]['id']
 
@@ -339,8 +437,9 @@ def test_last_activity_follows_the_conversation(client, make_user, auth_header, 
                         text='Who is this?', created_at=later))
     session.commit()
 
-    refreshed = client.get(LEADS_URL, headers=headers).json()['leads']
-    item = next(row for row in refreshed if row['id'] == lead_id)
+    # Read through the lead's own endpoint: a campaigned lead is no longer in
+    # the pool listing, but its activity must still track its conversation.
+    item = client.get(f'{LEADS_URL}/{lead_id}', headers=headers).json()
     assert item['last_activity_at'].startswith(later.isoformat()[:16])
 
 
@@ -355,6 +454,8 @@ def test_deleting_the_conversation_returns_the_lead_to_the_pool(
     lead = session.query(Lead).filter(Lead.id == lead_id).first()
     client.delete(f'/api/v1/sms/conversations/{lead.conversation_id}', headers=headers)
 
+    # Undoing the contact also releases the lead from its campaign, or it would
+    # be listed under a campaign with no message and hidden from the pool.
     item = next(row for row in client.get(LEADS_URL, headers=headers).json()['leads']
                 if row['id'] == lead_id)
     assert item['conversation_id'] is None
@@ -363,7 +464,8 @@ def test_deleting_the_conversation_returns_the_lead_to_the_pool(
 
 def test_delete_removes_only_the_owners_lead(client, make_user, auth_header):
     make_user(BROKER_EMAIL, role='broker')
-    make_user('other.broker@linchpinglobal.net', role='broker')
+    make_user('other.broker@linchpinglobal.net', role='broker',
+              brokerage_id='brokerage-2', brokerage_name='Other Group')
     headers = auth_header(BROKER_EMAIL)
     upload(client, headers)
     lead_id = client.get(LEADS_URL, headers=headers).json()['leads'][0]['id']
@@ -394,7 +496,8 @@ def test_bulk_delete_removes_the_selection(client, make_user, auth_header):
 
 def test_bulk_delete_ignores_another_brokers_leads(client, make_user, auth_header):
     make_user(BROKER_EMAIL, role='broker')
-    make_user('other.broker@linchpinglobal.net', role='broker')
+    make_user('other.broker@linchpinglobal.net', role='broker',
+              brokerage_id='brokerage-2', brokerage_name='Other Group')
     headers = auth_header(BROKER_EMAIL)
     upload(client, headers)
     ids = [item['id'] for item in client.get(LEADS_URL, headers=headers).json()['leads']]
@@ -495,12 +598,16 @@ def test_detail_carries_the_conversation_once_campaigned(
     body = client.get(f'{LEADS_URL}/{lead_id}', headers=headers).json()
     assert body['conversation']['handled_by'] == 'bobbie'
     assert body['conversation']['message_count'] == 1
-    assert body['conversation']['latest_message'].startswith('Hey')
+    # The opener is the campaign template rendered for this lead, so it carries
+    # the owner's own name and address rather than a fixed string.
+    assert body['conversation']['latest_message'].startswith('Hi Marcus,')
+    assert '4517 W Adams St' in body['conversation']['latest_message']
 
 
 def test_detail_is_scoped_to_the_owning_broker(client, make_user, auth_header):
     make_user(BROKER_EMAIL, role='broker')
-    make_user('other.broker@linchpinglobal.net', role='broker')
+    make_user('other.broker@linchpinglobal.net', role='broker',
+              brokerage_id='brokerage-2', brokerage_name='Other Group')
     headers = auth_header(BROKER_EMAIL)
     upload(client, headers)
     lead_id = client.get(LEADS_URL, headers=headers).json()['leads'][0]['id']
@@ -611,7 +718,8 @@ def test_preview_returns_a_token_the_import_can_reuse(client, make_user, auth_he
 
 def test_another_brokers_token_is_not_accepted(client, make_user, auth_header):
     make_user(BROKER_EMAIL, role='broker')
-    make_user('other.broker@linchpinglobal.net', role='broker')
+    make_user('other.broker@linchpinglobal.net', role='broker',
+              brokerage_id='brokerage-2', brokerage_name='Other Group')
     token = preview(client, auth_header(BROKER_EMAIL)).json()['token']
 
     response = client.post(f'{LEADS_URL}/import',
@@ -726,7 +834,7 @@ def test_import_honours_the_chosen_mapping(client, make_user, auth_header):
     assert {item['stage'] for item in leads} == {'needs_review'}
 
 
-def test_a_re_preview_keeps_the_staged_file_when_the_mapping_is_wrong(
+def test_a_failed_mapping_requires_another_upload(
         client, make_user, auth_header):
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
@@ -738,12 +846,28 @@ def test_a_re_preview_keeps_the_staged_file_when_the_mapping_is_wrong(
                             'mapping': json.dumps({'phone': '', 'property_address': ''})})
     assert bad.status_code == 400
 
-    # The file survives, so the broker can correct the choice.
-    recovered = client.post(f'{LEADS_URL}/preview', headers=headers,
-                            data={'token': token,
-                                  'mapping': json.dumps({'property_address': 'search_address'})})
+    # The failed preview is discarded; reusing its token is not supported.
+    expired = client.post(f'{LEADS_URL}/preview', headers=headers,
+                          data={'token': token,
+                                'mapping': json.dumps({'property_address': 'search_address'})})
+    assert expired.status_code == 410
+
+    # Trying again means uploading the source file again, then explicitly
+    # choosing which vendor column contains the property address.
+    fresh = preview(client, headers, MATCH_CSV)
+    assert fresh.status_code == 200
+    fresh_token = fresh.json()['token']
+    recovered = client.post(
+        f'{LEADS_URL}/preview',
+        headers=headers,
+        data={
+            'token': fresh_token,
+            'mapping': json.dumps({'property_address': 'search_address'}),
+        },
+    )
     assert recovered.status_code == 200
     assert recovered.json()['importable'] == 3
+    assert recovered.json()['mapping']['property_address'] == 'search_address'
 
 
 def test_a_malformed_mapping_is_rejected_cleanly(client, make_user, auth_header):
@@ -858,23 +982,50 @@ def test_the_shipped_sample_file_imports_cleanly(client, make_user, auth_header)
     leads = client.get(LEADS_URL, headers=headers).json()['leads']
     assert all(item['phone'] and item['property_address'] for item in leads)
     assert all('expired' in {s['key'] for s in item['signals']} for item in leads)
-    assert all(item['stage'] == 'new' for item in leads)
+    assert all(item['stage'] == 'ready' for item in leads)
 
 
-# -- every row is its own lead ---------------------------------------------
+# -- duplicate properties and phone fallback ------------------------------
 
 
-def test_the_same_file_twice_adds_every_lead_twice(client, make_user, auth_header):
-    """Nothing is matched or merged, so a repeat import is a repeat import."""
+def test_the_same_file_twice_skips_numbers_already_in_the_pool(client, make_user, auth_header):
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
 
     assert upload(client, headers).json()['created'] == 3
-    assert upload(client, headers).json()['created'] == 3
-    assert client.get(LEADS_URL, headers=headers).json()['facets']['total'] == 6
+    repeated = upload(client, headers)
+    assert repeated.status_code == 400
+    assert '3 duplicate rows were skipped' in repeated.json()['detail']
+    assert client.get(LEADS_URL, headers=headers).json()['facets']['total'] == 3
 
 
-def test_repeated_rows_within_one_file_each_become_a_lead(client, make_user, auth_header):
+def test_hob_upload_skips_numbers_already_imported_by_broker(
+        client, make_user, auth_header):
+    hob_email = 'hob@linchpinglobal.net'
+    make_user(BROKER_EMAIL, role='broker')
+    make_user(hob_email, role='hob')
+
+    assert upload(client, auth_header(BROKER_EMAIL)).json()['created'] == 3
+    hob_headers = auth_header(hob_email)
+    initial = preview(client, hob_headers)
+    assert initial.status_code == 200
+    assert initial.json()['importable'] == 3
+
+    # Duplicate validation begins only after the HOB confirms which column is
+    # the property address; the protection still spans the whole brokerage.
+    mapped = client.post(
+        f'{LEADS_URL}/preview',
+        headers=hob_headers,
+        data={
+            'token': initial.json()['token'],
+            'mapping': json.dumps({'property_address': 'Property Address'}),
+        },
+    )
+    assert mapped.status_code == 400
+    assert '3 duplicate rows were skipped' in mapped.json()['detail']
+
+
+def test_repeated_property_within_one_file_is_skipped(client, make_user, auth_header):
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
 
@@ -882,12 +1033,79 @@ def test_repeated_rows_within_one_file_each_become_a_lead(client, make_user, aut
                     'owner,phone,address,signals\n'
                     'Marcus Webb,3125550142,4517 W Adams St,FSBO\n'
                     'Marcus Webb,3125550142,4517 W Adams St,Vacant\n').json()
-    assert result['created'] == 2
+    assert result['created'] == 1
+    assert result['warnings'] == [
+        '1 duplicate row was skipped because the property or phone already exists.'
+    ]
 
     leads = client.get(LEADS_URL, headers=headers).json()['leads']
+    assert len(leads) == 1
+    assert [signal['key'] for signal in leads[0]['signals']] == ['fsbo']
+
+
+def test_same_phone_with_different_properties_creates_separate_leads(
+        client, make_user, auth_header):
+    make_user(BROKER_EMAIL, role='broker')
+    headers = auth_header(BROKER_EMAIL)
+
+    result = upload(client, headers,
+                    'owner,phone,address,signals\n'
+                    'Dana,+13125550142,415 Northview Lane,Expired\n'
+                    'Dana,+13125550142,22 Rosewood Ct,Vacant\n').json()
+
+    assert result['created'] == 2
+    assert result['warnings'] == []
+    leads = client.get(LEADS_URL, headers=headers).json()['leads']
     assert len(leads) == 2
-    # Each keeps only the signal on its own row; nothing is merged across them.
-    assert sorted({s['key'] for item in leads for s in item['signals']}) == ['fsbo', 'vacant']
+    assert {lead['property_address'] for lead in leads} == {
+        '415 Northview Lane',
+        '22 Rosewood Ct',
+    }
+
+
+def test_upload_analysis_deduplicates_property_not_phone(session, make_user):
+    broker = make_user(BROKER_EMAIL, role='broker')
+    report = leads_service.analyze_upload(
+        session,
+        broker,
+        ('owner,phone,address,signals\n'
+         'Dana,+13125550142,"415 Northview Lane, Charleston IL",Expired\n'
+         'Dana,+13125550142,"22 Rosewood Ct, Charleston IL",Vacant\n'
+         'Dana,+13125550199,"415 Northview Ln, Charleston IL",Probate\n').encode(),
+        'leads.csv',
+    )
+
+    assert report['total_rows'] == 3
+    assert report['importable'] == 2
+    assert report['duplicate_count'] == 1
+    assert [row['property_address'] for row in report['rows']] == [
+        '415 Northview Lane, Charleston IL',
+        '22 Rosewood Ct, Charleston IL',
+    ]
+
+
+def test_preview_defers_dedup_until_property_mapping_is_confirmed(session, make_user):
+    broker = make_user(BROKER_EMAIL, role='broker')
+    content = MATCH_CSV.encode()
+
+    initial = leads_service.analyze_upload(
+        session, broker, content, 'matches.csv', {}, mapping_confirmed=False)
+    assert initial['mapping']['property_address'] is None
+    assert initial['importable'] == 3
+    assert initial['duplicate_count'] == 0
+
+    by_property = leads_service.analyze_upload(
+        session, broker, content, 'matches.csv',
+        {'property_address': 'search_address'}, mapping_confirmed=True)
+    assert by_property['mapping']['property_address'] == 'search_address'
+    assert by_property['importable'] == 3
+
+    by_phone = leads_service.analyze_upload(
+        session, broker, content, 'matches.csv',
+        {'property_address': ''}, mapping_confirmed=True)
+    assert by_phone['mapping']['property_address'] is None
+    assert by_phone['importable'] == 1
+    assert by_phone['duplicate_count'] == 2
 
 
 def test_the_limit_takes_rows_from_the_top(client, make_user, auth_header):

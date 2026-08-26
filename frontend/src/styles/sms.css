@@ -104,6 +104,96 @@
 }
 .sms-pill.on { border-color: var(--accent-line); background: var(--accent-soft); color: var(--blue); }
 .sms-pill:hover { border-color: #a9bcb5; }
+@property --sms-pill-light-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+.sms-pill-moving-border {
+  position: relative; isolation: isolate;
+  border-color: rgba(31, 92, 77, .45);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, .5), 0 0 10px rgba(87, 182, 156, .12);
+}
+.sms-inline-ai-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin: 0 2px; padding: 3px 9px;
+  border: 1px solid rgba(31, 92, 77, .55); border-radius: 999px;
+  background: #e3f1e7; color: #176b4d;
+  font-size: 11.5px; font-weight: 700; line-height: 1.35; vertical-align: middle;
+}
+.sms-pill-moving-border > * { position: relative; z-index: 2; }
+.sms-pill-moving-border::before {
+  content: ""; position: absolute; z-index: 1; inset: 1px;
+  border-radius: inherit; pointer-events: none;
+  background: linear-gradient(
+    110deg,
+    transparent 24%,
+    rgba(255, 255, 255, .12) 38%,
+    rgba(255, 255, 255, .82) 48%,
+    rgba(117, 246, 207, .42) 54%,
+    transparent 70%
+  );
+  background-size: 280% 100%;
+  background-position: 130% 0;
+  animation: sms-pill-background-light 6s ease-in-out infinite;
+}
+.sms-pill-moving-border::after {
+  content: ""; position: absolute; z-index: 1; inset: -2px; padding: 2px;
+  border-radius: inherit; pointer-events: none;
+  background: conic-gradient(
+    from var(--sms-pill-light-angle),
+    transparent 0deg 275deg,
+    rgba(255, 255, 255, 0) 290deg,
+    #ffffff 320deg,
+    #75f6cf 338deg,
+    transparent 360deg
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  filter: drop-shadow(0 0 3px rgba(117, 246, 207, .95));
+  animation: sms-pill-border-light 6s linear infinite;
+}
+/* Human-takeover pill: the travelling light is a full RGB spectrum. Bobbie's
+   green `.on` state keeps its existing AI accent. */
+.sms-pill-moving-border:not(.on)::before {
+  background: linear-gradient(
+    110deg,
+    transparent 20%,
+    rgba(255, 45, 85, .28) 34%,
+    rgba(0, 122, 255, .34) 45%,
+    rgba(52, 211, 153, .32) 56%,
+    transparent 72%
+  );
+  background-size: 280% 100%;
+}
+.sms-pill-moving-border:not(.on)::after {
+  background: conic-gradient(
+    from var(--sms-pill-light-angle),
+    transparent 0deg 250deg,
+    #ff2d55 278deg,
+    #ffcc00 298deg,
+    #34d399 318deg,
+    #007aff 338deg,
+    #af52de 350deg,
+    transparent 360deg
+  );
+  filter: drop-shadow(0 0 4px rgba(0, 122, 255, .65));
+}
+@keyframes sms-pill-border-light {
+  to { --sms-pill-light-angle: 360deg; }
+}
+@keyframes sms-pill-background-light {
+  0%, 12% { background-position: 130% 0; opacity: 0; }
+  22% { opacity: .85; }
+  72% { opacity: .7; }
+  88%, 100% { background-position: -55% 0; opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sms-pill-moving-border::before,
+  .sms-pill-moving-border::after { animation: none; }
+  .sms-pill-moving-border::before { opacity: .18; }
+}
 .sms-icon-button {
   width: 34px; height: 34px; display: grid; place-items: center;
   border: 1px solid var(--line); border-radius: 8px;

@@ -4,10 +4,11 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 
 import { useRouter } from "next/navigation";
 
-import { ConfirmDialog, type ConfirmRequest } from "@/components/dialog/confirm-dialog";
+import { listCampaigns } from "@/features/campaigns/api/campaigns-api";
+import type { Campaign } from "@/features/campaigns/types/campaigns.types";
 import { readAuthSession } from "@/features/auth/lib/auth-storage";
 import { endSession } from "@/features/auth/lib/session-guard";
-import { listMessages, sendMessage, setHandover } from "@/features/sms/api/sms-api";
+import { createConversation, listMessages, sendMessage, setHandover } from "@/features/sms/api/sms-api";
 import {
   LEAD_LABELS,
   LEAD_STATUS_ORDER,
@@ -16,10 +17,12 @@ import {
   formatTime,
   initials,
 } from "@/features/sms/lib/sms-format";
-import type { LeadStatus, SmsMessage } from "@/features/sms/types/sms.types";
+import type { LeadStatus, NewConversationPayload, SmsMessage } from "@/features/sms/types/sms.types";
+import { NewConversationDialog } from "@/features/sms/components/new-conversation-dialog";
 import { ApiRequestError } from "@/lib/api/http-client";
+import { LeadDetailDrawer } from "@/features/leads/components/lead-detail-drawer";
 
-import { bookAppointment, listFollowUps, setFollowUpState, setFollowUpStatus } from "../api/followups-api";
+import { bookAppointment, listFollowUps, setFollowUpStatus } from "../api/followups-api";
 import type { AppointmentPayload, FollowUp, FollowUpState } from "../types/followups.types";
 import { AppointmentDialog } from "./appointment-dialog";
 
@@ -68,27 +71,49 @@ function channelLabel(message: SmsMessage): string {
 type FollowUpsBoardProps = {
   /** Opens a particular thread on arrival, e.g. from the Lead Pool. */
   focusConversationId?: number | null;
+  /** Narrows the board to one campaign's replies, e.g. from the Campaigns tab. */
+  campaignId?: number | null;
 };
 
-export function FollowUpsBoard({ focusConversationId = null }: FollowUpsBoardProps) {
+export function FollowUpsBoard({
+  focusConversationId = null,
+  campaignId = null,
+}: FollowUpsBoardProps) {
   const [followUps, setFollowUps] = useState<FollowUp[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
   const [messages, setMessages] = useState<SmsMessage[]>([]);
-  const [stateFilter, setStateFilter] = useState<FollowUpState | "all">("all");
+  /** Every campaign the brokerage has, so one with no replies yet is still
+      offered — the list cannot be built from the replies it is meant to find. */
+  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [selectedCampaignId, setSelectedCampaignId] = useState(
+    campaignId === null ? "" : String(campaignId),
+  );
+  const [isCampaignMenuOpen, setIsCampaignMenuOpen] = useState(false);
+  const [isStatusMenuOpen, setIsStatusMenuOpen] = useState(false);
+  const [scope, setScope] = useState<"replied" | "all">(
+    campaignId === null ? "replied" : "all",
+  );
+  const [search, setSearch] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isWorking, setIsWorking] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [isSchedulerOpen, setIsSchedulerOpen] = useState(false);
+  const [isNewConversationOpen, setIsNewConversationOpen] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [notice, setNotice] = useState("");
-  const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
 
   const threadRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const statusMenuRef = useRef<HTMLDivElement | null>(null);
   const router = useRouter();
   const session = useMemo(() => readAuthSession(), []);
   const token = session?.access_token ?? "";
+  /** The lead behind the open thread, shown in the same panel as the Lead Pool. */
+  const [detailId, setDetailId] = useState<number | null>(null);
+  const [isPropertiesOpen, setIsPropertiesOpen] = useState(false);
   const viewer = session?.user ?? null;
+  const isAgent = viewer?.role === "agent";
+  const followUpScope = isAgent ? "replied" : scope;
 
   /** A rejected token means the session is over; stop polling and sign out. */
   const handleApiError = useCallback(
@@ -110,7 +135,15 @@ export function FollowUpsBoard({ focusConversationId = null }: FollowUpsBoardPro
     async (signal?: AbortSignal) => {
       if (!token) return;
       try {
-        setFollowUps(await listFollowUps(token, undefined, signal));
+        setFollowUps(
+          await listFollowUps(
+            token,
+            followUpScope,
+            undefined,
+            signal,
+            selectedCampaignId ? Number(selectedCampaignId) : undefined,
+          ),
+        );
         setErrorMessage("");
       } catch (error) {
         handleApiError(error, "Could not load your follow-ups.");
@@ -118,7 +151,7 @@ export function FollowUpsBoard({ focusConversationId = null }: FollowUpsBoardPro
         setIsLoading(false);
       }
     },
-    [token, handleApiError],
+    [token, followUpScope, selectedCampaignId, handleApiError],
   );
 
   const refreshMessages = useCallback(
@@ -164,7 +197,30 @@ export function FollowUpsBoard({ focusConversationId = null }: FollowUpsBoardPro
     if (focusConversationId === null) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setActiveId(focusConversationId);
+    setScope("all");
   }, [focusConversationId]);
+
+  // The campaign list is its own request: a sent campaign with no replies yet
+  // still belongs in the box, and the replies obviously cannot supply it.
+  // Drafts are left out — nothing has been sent, so they can never have a
+  // reply, and offering one would only ever return an empty list.
+  useEffect(() => {
+    if (!token) return;
+    const controller = new AbortController();
+    listCampaigns(token, controller.signal)
+      .then((rows) => setCampaigns(rows.filter((item) => item.status === "sent")))
+      .catch(() => setCampaigns([]));
+    return () => controller.abort();
+  }, [token]);
+
+  // Arriving from a campaign card shows every conversation from that campaign,
+  // including owners who have not replied yet.
+  useEffect(() => {
+    if (campaignId === null) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSelectedCampaignId(String(campaignId));
+    setScope("all");
+  }, [campaignId]);
 
   // Keep the newest message in view.
   useEffect(() => {
@@ -172,9 +228,46 @@ export function FollowUpsBoard({ focusConversationId = null }: FollowUpsBoardPro
     if (thread) thread.scrollTop = thread.scrollHeight;
   }, [messages]);
 
-  const visible = followUps.filter(
-    (item) => stateFilter === "all" || item.followup_state === stateFilter,
-  );
+  useEffect(() => {
+    if (!isStatusMenuOpen) return;
+    const close = (event: PointerEvent) => {
+      if (!statusMenuRef.current?.contains(event.target as Node)) setIsStatusMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setIsStatusMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [isStatusMenuOpen]);
+
+  const needle = search.trim().toLowerCase();
+  const selectedCampaign = campaigns.find((item) => String(item.id) === selectedCampaignId);
+  const visible = followUps.filter((item) => {
+    if (selectedCampaignId && item.campaign_id !== Number(selectedCampaignId)) return false;
+    if (!needle) return true;
+    return [item.name, item.contact, item.property_address]
+      .filter(Boolean)
+      .some((value) => String(value).toLowerCase().includes(needle));
+  });
+
+  async function handleCreate(payload: NewConversationPayload): Promise<void> {
+    const result = await createConversation(payload, token);
+    setIsNewConversationOpen(false);
+    setScope("all");
+    setSelectedCampaignId("");
+    setSearch("");
+    setNotice(
+      result.started
+        ? `Bobbie's introduction was sent to ${result.conversation.contact}.`
+        : `Thread created for ${result.conversation.contact}. Nothing sent yet.`,
+    );
+    setFollowUps(await listFollowUps(token, "all"));
+    setActiveId(result.conversation.id);
+  }
 
   // The first message the assignee sent by hand is where Bobbie stepped aside.
   const takeoverId =
@@ -197,31 +290,6 @@ export function FollowUpsBoard({ focusConversationId = null }: FollowUpsBoardPro
     }
   }
 
-  function decide(state: FollowUpState): void {
-    if (!active) return;
-    const followUp = active;
-    if (state === "declined") {
-      setConfirmRequest({
-        title: `Decline ${followUp.name || followUp.contact}?`,
-        body: "The conversation is kept, but this lead is recorded as one you are not working. You can accept it later.",
-        confirmLabel: "Decline lead",
-        tone: "danger",
-        onConfirm: () =>
-          runAction(
-            () => setFollowUpState(followUp.id, "declined", token),
-            `${followUp.name || followUp.contact} was declined.`,
-          ),
-      });
-      return;
-    }
-    void runAction(
-      () => setFollowUpState(followUp.id, state, token),
-      state === "accepted"
-        ? `You accepted ${followUp.name || followUp.contact}.`
-        : "The decision was cleared.",
-    );
-  }
-
   function changeStatus(leadStatus: LeadStatus): void {
     if (!active) return;
     void runAction(
@@ -236,7 +304,7 @@ export function FollowUpsBoard({ focusConversationId = null }: FollowUpsBoardPro
     const conversationId = active.id;
     void runAction(async () => {
       await setHandover(conversationId, to, token);
-      const rows = await listFollowUps(token);
+      const rows = await listFollowUps(token, scope);
       return rows.find((row) => row.id === conversationId) ?? active;
     }, to === "broker"
       ? "You have taken over. Write your reply below — Bobbie will not answer this thread."
@@ -287,31 +355,106 @@ export function FollowUpsBoard({ focusConversationId = null }: FollowUpsBoardPro
   return (
     <section className="followups-board">
       <header className="followups-header">
-        <span className="sms-eyebrow">CONVERSATIONS</span>
-        <h1>Follow-ups</h1>
-        <p>
-          {viewer ? `${ROLE_LABELS[viewer.role] ?? "Workspace"} view — ${viewer.full_name}, ` : ""}
-          showing every conversation where the owner has replied
-        </p>
+        <div>
+          <span className="sms-eyebrow">CONVERSATIONS</span>
+          <h1 className="view-title">Follow-ups</h1>
+          <p>
+            {viewer ? `${ROLE_LABELS[viewer.role] ?? "Workspace"} view — ${viewer.full_name}` : ""}
+          </p>
+        </div>
+        <button className="button" type="button" onClick={() => setIsNewConversationOpen(true)}>
+          + New conversation
+        </button>
       </header>
 
       <div className="followups-layout">
         <aside className="followups-list-panel">
+          {!isAgent ? (
+            <div className="followups-scope" role="group" aria-label="Conversation scope">
+              <button
+                type="button"
+                className={scope === "replied" ? "active" : undefined}
+                aria-pressed={scope === "replied"}
+                onClick={() => setScope("replied")}
+              >
+                Replied
+              </button>
+              <button
+                type="button"
+                className={scope === "all" ? "active" : undefined}
+                aria-pressed={scope === "all"}
+                onClick={() => setScope("all")}
+              >
+                All
+              </button>
+            </div>
+          ) : null}
+
+          <label className="sms-search followups-search">
+            <span className="sr-only">Search conversations</span>
+            <input
+              type="search"
+              value={search}
+              placeholder="Search name, number or address"
+              onChange={(event) => setSearch(event.target.value)}
+            />
+          </label>
+
           <div className="followups-list-head">
-            <label className="sr-only" htmlFor="followup-state-filter">
-              Filter follow-ups
-            </label>
-            <select
-              id="followup-state-filter"
-              value={stateFilter}
-              onChange={(event) => setStateFilter(event.target.value as FollowUpState | "all")}
-            >
-              <option value="all">All replies</option>
-              <option value="pending">Awaiting a decision</option>
-              <option value="accepted">Accepted</option>
-              <option value="declined">Declined</option>
-            </select>
-            <span className="sms-count">{visible.length}</span>
+            <div className="followups-campaign-filter">
+              <span>Campaign</span>
+              <div className="followups-campaign-select">
+                <button
+                  id="followup-campaign-filter"
+                  type="button"
+                  className="followups-campaign-box"
+                  aria-haspopup="listbox"
+                  aria-expanded={isCampaignMenuOpen}
+                  onClick={() => setIsCampaignMenuOpen((current) => !current)}
+                >
+                  {selectedCampaign?.name ?? "All campaigns"}
+                </button>
+                {isCampaignMenuOpen ? (
+                  <div className="followups-campaign-menu" role="listbox" aria-label="Campaign">
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={selectedCampaignId === ""}
+                      className={selectedCampaignId === "" ? "active" : undefined}
+                      onClick={() => {
+                        setSelectedCampaignId("");
+                        setIsCampaignMenuOpen(false);
+                      }}
+                    >
+                      <span>All campaigns</span>
+                      {selectedCampaignId === "" ? <span aria-hidden="true">✓</span> : null}
+                    </button>
+                    {campaigns.map((item) => {
+                      const selected = selectedCampaignId === String(item.id);
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          role="option"
+                          aria-selected={selected}
+                          className={selected ? "active" : undefined}
+                          onClick={() => {
+                            setSelectedCampaignId(String(item.id));
+                            setIsCampaignMenuOpen(false);
+                          }}
+                        >
+                          <span>{item.name}</span>
+                          {selected ? <span aria-hidden="true">✓</span> : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+            <span className="sms-count" title={`${visible.length} conversations`}>
+              {visible.length}
+            </span>
           </div>
 
           <div className="followups-list" role="list">
@@ -319,8 +462,12 @@ export function FollowUpsBoard({ focusConversationId = null }: FollowUpsBoardPro
             {!isLoading && visible.length === 0 ? (
               <p className="sms-muted">
                 {followUps.length === 0
-                  ? "No owner has replied yet. Replies land here as soon as they arrive."
-                  : "No follow-ups match that filter."}
+                  ? followUpScope === "replied"
+                    ? isAgent
+                      ? "No owner replies are assigned to you yet."
+                      : "No owner has replied yet. Switch to All to see every conversation."
+                    : "No conversations yet. Start one to begin outreach."
+                  : "No conversations match the current search and campaign filters."}
               </p>
             ) : null}
 
@@ -334,12 +481,15 @@ export function FollowUpsBoard({ focusConversationId = null }: FollowUpsBoardPro
               >
                 <span className="followup-card-top">
                   <strong>{item.name || item.contact}</strong>
-                  <small>{formatTime(item.last_reply_at)}</small>
+                  <small>{formatTime(item.last_reply_at ?? item.latest_message_at)}</small>
                 </span>
                 <span className="followup-card-meta">
                   {[item.property_address, item.area].filter(Boolean).join(" · ") || item.contact}
                 </span>
-                <span className={`followup-reason reason-${item.reason}`}>{item.reason_label}</span>
+                <span className={`followup-reason reason-${item.reason}`}>
+                  {item.reply_count > 0 ? item.reason_label : "Waiting for first reply"}
+                </span>
+                {item.has_multiple_properties ? <span className="followup-multiple-signal">Multiple properties</span> : null}
                 {item.followup_state === "pending" ? null : (
                   <span className={`followup-state-badge ${item.followup_state}`}>
                     {STATE_LABELS[item.followup_state]}
@@ -350,43 +500,84 @@ export function FollowUpsBoard({ focusConversationId = null }: FollowUpsBoardPro
           </div>
         </aside>
 
-        <div className="followups-panel">
+        <div className={active?.reply_count === 0 ? "sms-thread-panel" : "followups-panel"}>
           {active ? (
             <>
-              <header className="followups-panel-header">
+              <header className={active.reply_count === 0 ? "sms-thread-header" : "followups-panel-header"}>
                 <span className="sms-avatar large" aria-hidden="true">{initials(active)}</span>
                 <div>
-                  <h2>{active.name || active.contact}</h2>
+                  {active.reply_count === 0 ? (
+                    <h3>{active.name || active.contact}</h3>
+                  ) : (
+                    <h2>{active.name || active.contact}</h2>
+                  )}
                   <p>
                     {[active.property_address, active.area, active.contact]
                       .filter(Boolean)
                       .join(" · ")}
                   </p>
                 </div>
-                <label className="followups-status">
-                  <span className="sr-only">Lead status</span>
-                  <select
-                    value={active.lead_status}
-                    disabled={isWorking}
-                    onChange={(event) => changeStatus(event.target.value as LeadStatus)}
+                {active.has_multiple_properties ? (
+                  <button
+                    type="button"
+                    className="followup-multiple-properties"
+                    onClick={() => setIsPropertiesOpen(true)}
+                    aria-label="View multiple properties for this owner"
+                    data-tooltip="This person owns multiple properties that are expected to sell. Click to view all addresses."
                   >
-                    {LEAD_STATUS_ORDER.map((status) => (
-                      <option key={status} value={status}>
-                        {LEAD_LABELS[status]}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                    <span aria-hidden="true">⌂</span>
+                    <span className="sr-only">Multiple properties</span>
+                  </button>
+                ) : null}
+                {active.handled_by === "bobbie" ? (
+                  <button
+                    type="button"
+                    className="sms-pill on sms-pill-moving-border"
+                    disabled={isWorking}
+                    onClick={() => changeHandover("broker")}
+                    title="Pause Bobbie and reply yourself"
+                  >
+                    <span aria-hidden="true">✦</span>
+                    <span className="sms-pill-label">Bobbie AI is replying · Take over</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="sms-pill sms-pill-moving-border"
+                    disabled={isWorking}
+                    onClick={() => changeHandover("bobbie")}
+                    title="Bobbie takes the conversation back"
+                  >
+                    <span aria-hidden="true">✎</span>
+                    <span className="sms-pill-label">You are replying · Hand back to Bobbie</span>
+                  </button>
+                )}
+                {/* Only an imported lead has a property record to open; a thread
+                    started by hand carries nothing beyond what the header shows. */}
+                {active.lead_id !== null ? (
+                  <button
+                    type="button"
+                    className="sms-icon-button"
+                    onClick={() => setDetailId(active.lead_id)}
+                    aria-label={`View details for ${active.name || active.contact}`}
+                    title="View property details"
+                  >
+                    ⓘ
+                  </button>
+                ) : null}
               </header>
 
-              <p className="followups-summary">
-                <span className={`followup-reason reason-${active.reason}`}>{active.reason_label}</span>
-                <span>
-                  {active.reply_count} {active.reply_count === 1 ? "reply" : "replies"} ·{" "}
-                  {active.handled_by === "bobbie" ? "Bobbie is replying" : "You are replying"}
-                  {active.meeting_booked ? " · meeting booked" : ""}
-                </span>
-              </p>
+              {active.reply_count > 0 ? (
+                <p className="followups-summary">
+                  <span className={`followup-reason reason-${active.reason}`}>
+                    {active.reason_label}
+                  </span>
+                  <span>
+                    {active.reply_count} {active.reply_count === 1 ? "reply" : "replies"}
+                    {active.meeting_booked ? " · meeting booked" : ""}
+                  </span>
+                </p>
+              ) : null}
 
               <div className="sms-thread followups-thread" ref={threadRef} aria-live="polite">
                 {messages.length === 0 ? (
@@ -430,73 +621,42 @@ export function FollowUpsBoard({ focusConversationId = null }: FollowUpsBoardPro
                 )}
               </div>
 
-              {/* The composer exists only once the thread is yours: two voices
-                  on one thread is worse than an extra click, so replying is
-                  gated on the same handover the SMS workspace uses. */}
-              {active.handled_by === "broker" ? (
+              {/* Replied follow-ups require an explicit takeover. Before the
+                  first reply this mirrors the SMS workspace: the composer is
+                  available and sending makes the broker the thread's voice. */}
+              {active.reply_count === 0 || active.handled_by === "broker" ? (
                 <form className="sms-composer followups-composer" onSubmit={handleSend}>
-                  <textarea
-                    ref={composerRef}
-                    name="text"
-                    rows={2}
-                    maxLength={1600}
-                    placeholder={`Write a message to ${active.name || active.contact}…`}
-                    disabled={isSending}
-                    required
-                  />
-                  <div className="sms-composer-actions">
-                    <span className="sms-composer-hint">
-                      You are handling this conversation. Bobbie will not reply here.
-                    </span>
-                    <button className="button" type="submit" disabled={isSending}>
-                      {isSending ? "Sending…" : "Send"}
+                  <div className="followups-compose-field">
+                    <textarea
+                      ref={composerRef}
+                      name="text"
+                      rows={1}
+                      maxLength={1600}
+                      placeholder={`Write a message to ${active.name || active.contact}…`}
+                      disabled={isSending}
+                      required
+                    />
+                    <button
+                      className="button followups-send-button"
+                      type="submit"
+                      disabled={isSending}
+                      aria-label={isSending ? "Sending message" : "Send message"}
+                      title={isSending ? "Sending…" : "Send message"}
+                    >
+                      {isSending ? (
+                        <span className="followups-send-loading" aria-hidden="true">•••</span>
+                      ) : (
+                        <svg viewBox="0 0 20 20" aria-hidden="true">
+                          <path d="M3 3.5 17 10 3 16.5l2-5.1L12 10l-7-1.4-2-5.1Z" />
+                        </svg>
+                      )}
                     </button>
                   </div>
                 </form>
               ) : null}
 
-              <footer className="followups-actions">
-                {active.followup_state === "accepted" ? (
-                  <button
-                    type="button"
-                    className="sms-button-secondary"
-                    disabled={isWorking}
-                    onClick={() => decide("pending")}
-                  >
-                    ✓ Accepted · undo
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="button"
-                    style={{ backgroundColor: "#176b5b" }}
-                    disabled={isWorking}
-                    onClick={() => decide("accepted")}
-                  >
-                    Accept lead
-                  </button>
-                )}
-
-                {active.handled_by === "bobbie" ? (
-                  <button
-                    type="button"
-                    className="sms-button-secondary"
-                    disabled={isWorking}
-                    onClick={() => changeHandover("broker")}
-                  >
-                    Take over conversation
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="sms-button-secondary"
-                    disabled={isWorking}
-                    onClick={() => changeHandover("bobbie")}
-                  >
-                    Hand back to Bobbie
-                  </button>
-                )}
-
+              {active.reply_count > 0 ? (
+                <footer className="followups-actions">
                 <button
                   type="button"
                   className="sms-button-secondary"
@@ -507,34 +667,52 @@ export function FollowUpsBoard({ focusConversationId = null }: FollowUpsBoardPro
                   Schedule appointment
                 </button>
 
-                {active.followup_state === "declined" ? (
+                <div className="followups-status" ref={statusMenuRef}>
+                  <span className="followups-status-label">Lead status</span>
                   <button
                     type="button"
-                    className="followups-decline"
+                    className="followups-status-trigger"
                     disabled={isWorking}
-                    onClick={() => decide("pending")}
+                    aria-haspopup="listbox"
+                    aria-expanded={isStatusMenuOpen}
+                    onClick={() => setIsStatusMenuOpen((current) => !current)}
                   >
-                    Declined · undo
+                    <span>{LEAD_LABELS[active.lead_status]}</span>
+                    <span className="followups-status-chevron" aria-hidden="true" />
                   </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="followups-decline"
-                    disabled={isWorking}
-                    onClick={() => decide("declined")}
-                  >
-                    Decline
-                  </button>
-                )}
-              </footer>
+                  {isStatusMenuOpen ? (
+                    <div className="followups-status-menu" role="listbox" aria-label="Lead status">
+                      {LEAD_STATUS_ORDER.map((status) => {
+                        const selected = active.lead_status === status;
+                        return (
+                          <button
+                            key={status}
+                            type="button"
+                            role="option"
+                            aria-selected={selected}
+                            className={selected ? "active" : undefined}
+                            onClick={() => {
+                              setIsStatusMenuOpen(false);
+                              if (!selected) changeStatus(status);
+                            }}
+                          >
+                            <span>{LEAD_LABELS[status]}</span>
+                            {selected ? <span aria-hidden="true">✓</span> : null}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+                </footer>
+              ) : null}
             </>
           ) : (
             <div className="sms-empty">
               <div aria-hidden="true">◎</div>
-              <h3>Select a follow-up</h3>
+              <h3>Select a conversation</h3>
               <p>
-                Every owner who has answered appears on the left. Pick one to read the thread and
-                decide what happens next.
+                Pick a thread on the left to read the conversation and decide what happens next.
               </p>
             </div>
           )}
@@ -548,7 +726,6 @@ export function FollowUpsBoard({ focusConversationId = null }: FollowUpsBoardPro
         </p>
       ) : null}
 
-      <ConfirmDialog request={confirmRequest} onClose={() => setConfirmRequest(null)} />
 
       <AppointmentDialog
         followUp={isSchedulerOpen ? active : null}
@@ -556,6 +733,44 @@ export function FollowUpsBoard({ focusConversationId = null }: FollowUpsBoardPro
         onClose={() => setIsSchedulerOpen(false)}
         onBook={handleBook}
       />
+
+      <NewConversationDialog
+        open={isNewConversationOpen}
+        onClose={() => setIsNewConversationOpen(false)}
+        onCreate={handleCreate}
+      />
+
+      {/* The thread is already open here, so the panel offers the property
+          record only — no action that would lead back to this same screen. */}
+      <LeadDetailDrawer
+        leadId={detailId}
+        accessToken={token}
+        onClose={() => setDetailId(null)}
+      />
+
+      <div className={`leads-drawer-scrim${isPropertiesOpen ? " open" : ""}`} role="presentation" onClick={() => setIsPropertiesOpen(false)} />
+      <aside className={`leads-drawer followup-properties-drawer${isPropertiesOpen ? " open" : ""}`} role="dialog" aria-modal="true" aria-label="Multiple property details" aria-hidden={!isPropertiesOpen}>
+        <header className="leads-drawer-header">
+          <div><span className="sms-eyebrow">MULTIPLE PROPERTIES</span><h3>{active?.name || active?.contact || "Owner"}</h3></div>
+          <button type="button" className="sms-icon-button" onClick={() => setIsPropertiesOpen(false)} aria-label="Close property details">✕</button>
+        </header>
+        <div className="leads-drawer-body">
+          <p className="followup-properties-intro">All property leads connected to {active?.contact} in this conversation.</p>
+          {active?.properties.map((property, index) => (
+            <section className="leads-drawer-section followup-property-card" key={property.lead_id}>
+              <h4>Property {index + 1}</h4>
+              <dl className="leads-facts">
+                <div><dt>Address</dt><dd>{property.address || "Not on file"}</dd></div>
+                <div><dt>Area</dt><dd>{property.area || "Not on file"}</dd></div>
+                <div><dt>Campaign</dt><dd>{property.campaign_name || "Not in a campaign"}</dd></div>
+              </dl>
+              <div className="followup-property-signals">
+                {property.signals.length ? property.signals.map((signal) => <span className="leads-signal" key={signal}>{signal}</span>) : <span className="leads-none">No signals</span>}
+              </div>
+            </section>
+          ))}
+        </div>
+      </aside>
     </section>
   );
 }

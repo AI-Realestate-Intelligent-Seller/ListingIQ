@@ -41,11 +41,47 @@ export type RegistrationResponse = {
   email: string;
 };
 
+export type MessageResponse = {
+  message: string;
+};
+
 export type InvitableRole = Exclude<UserRole, "hob">;
 
 /** Response of POST /team/invitations — deliberately free of the raw token. */
 export type InvitationCreatedResponse = {
   message: string;
+};
+
+export type DirectoryMember = {
+  id: number;
+  full_name: string | null;
+  email: string;
+  role: InvitableRole;
+  is_active: boolean;
+  assigned_broker_id: number | null;
+};
+
+export type TeamDirectoryResponse = {
+  members: DirectoryMember[];
+};
+
+export type BrokerageOverview = {
+  total_leads: number;
+  campaigns_sent_this_month: number;
+  campaign_conversations: number;
+  campaign_replied: number;
+  campaign_reply_rate: number;
+  replies_requiring_attention: number;
+  appointments_booked_this_month: number;
+  booked_leads: number;
+  lead_to_appointment_rate: number;
+  average_response_seconds: number | null;
+  workload: {
+    user_id: number;
+    name: string;
+    role: InvitableRole;
+    lead_count: number;
+  }[];
 };
 
 /** Response of GET /team/invitations/{token}. */

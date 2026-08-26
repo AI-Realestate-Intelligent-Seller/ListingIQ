@@ -15,7 +15,7 @@ export function Brand({ light = false }: BrandProps) {
         <i />
       </span>
       <strong>
-        Seller<span>IQ</span>
+        Listing<span>IQ</span>
       </strong>
     </Link>
   );

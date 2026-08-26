@@ -1,8 +1,10 @@
 """Lead pool API — prospecting data the broker reviews before Bobbie texts.
 
-Every lead belongs to the authenticated broker (Lead.user_id), taken from the
-JWT and never from the request, so one brokerage can never read or campaign
-another's pool.
+The pool belongs to the brokerage, not the account: every read is scoped to the
+accounts sharing the caller's brokerage_id, resolved from the JWT and never
+from the request. `Lead.user_id` records who imported the row. One brokerage can
+therefore never read, campaign or delete another's pool, while teammates work
+one shared pool — see app.tenancy.
 """
 
 import json
@@ -19,6 +21,7 @@ from ..leads import uploads
 from ..leads.importer import MAPPABLE_FIELDS
 from ..logger import get_logger
 from ..models import Lead, User
+from ..tenancy import brokerage_user_ids
 from ..schemas import LeadCampaignRequest, LeadDeleteRequest
 from .auth import get_current_user, get_db
 
@@ -61,16 +64,28 @@ def list_leads(
     search: str = '',
     signal: list[str] = Query(default=[]),
     stage: str = '',
+    state: list[str] = Query(default=[], description='USPS state codes, e.g. IL'),
+    city: list[str] = Query(default=[], description='Town keys from the location facets, e.g. "mattoon|IL"'),
+    # Aliased rather than named `zip`, which would shadow the builtin.
+    zip_code: list[str] = Query(default=[], alias='zip', description='Five-digit ZIP codes'),
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
 ):
-    """The broker's pool, filtered by text, signals and stage."""
+    """The broker's pool, filtered by text, signals, stage and location.
+
+    The three location filters are independent — any one of them narrows the
+    pool on its own — and the counts returned in `locations` are dependent, each
+    computed under the other two, so the menus narrow one another as they are
+    used. See app.leads.location for how a location is read out of an address.
+    """
     _require_access(current_user)
     # Stage and last activity are system-owned; refresh them before reading.
-    leads_service.sync_activity(session, current_user.id)
+    leads_service.sync_activity(session, brokerage_user_ids(session, current_user))
     return {
-        'leads': leads_service.list_leads(session, current_user, search, signal, stage),
+        'leads': leads_service.list_leads(session, current_user, search, signal, stage,
+                                          state, city, zip_code),
         'facets': leads_service.facets(session, current_user),
+        'locations': leads_service.location_facets(session, current_user, state, city, zip_code),
         'signal_catalog': catalog.catalog(),
         'stage_catalog': catalog.stage_catalog(),
     }
@@ -121,13 +136,16 @@ async def preview_import(
 
     try:
         report = leads_service.analyze_upload(
-            session, current_user, path.read_bytes(), name, overrides)
+            session, current_user, path.read_bytes(), name, overrides,
+            mapping_confirmed='property_address' in overrides)
     except Exception as error:  # noqa: BLE001 - the parser must never leak a traceback
         logger.exception('Lead preview failed for user %s', current_user.id)
         raise HTTPException(status_code=400, detail=f'The file could not be read: {error}')
 
     if not report['importable']:
-        # The file stays staged: the broker may just need to fix the mapping.
+        # A failed mapping ends this preview. The next attempt must upload the
+        # source again instead of reusing potentially incorrect staged input.
+        uploads.discard(path)
         report.pop('rows', None)
         raise HTTPException(
             status_code=400,
@@ -216,8 +234,11 @@ def lead_detail(lead_id: int, current_user: User = Depends(get_current_user),
                 session: Session = Depends(get_db)):
     """One lead in full, for the details panel."""
     _require_access(current_user)
-    leads_service.sync_activity(session, current_user.id)
-    lead = session.query(Lead).filter(Lead.id == lead_id, Lead.user_id == current_user.id).first()
+    leads_service.sync_activity(session, brokerage_user_ids(session, current_user))
+    lead = (session.query(Lead)
+            .filter(Lead.id == lead_id,
+                    Lead.user_id.in_(brokerage_user_ids(session, current_user)))
+            .first())
     if not lead:
         raise HTTPException(status_code=404, detail='Lead not found')
     return leads_service.detail(session, lead)
@@ -246,7 +267,10 @@ def delete_many(
 def delete_lead(lead_id: int, current_user: User = Depends(get_current_user),
                 session: Session = Depends(get_db)):
     _require_access(current_user)
-    lead = session.query(Lead).filter(Lead.id == lead_id, Lead.user_id == current_user.id).first()
+    lead = (session.query(Lead)
+            .filter(Lead.id == lead_id,
+                    Lead.user_id.in_(brokerage_user_ids(session, current_user)))
+            .first())
     if not lead:
         raise HTTPException(status_code=404, detail='Lead not found')
     session.delete(lead)

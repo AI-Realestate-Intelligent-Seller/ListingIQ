@@ -5,12 +5,13 @@ export type LeadSignal = {
 };
 
 /** Stages are derived by the backend; the broker never sets one by hand. */
-export type LeadStage = "dnc" | "in_campaign" | "needs_review" | "new" | "ready";
+export type LeadStage = "dnc" | "in_campaign" | "needs_review" | "ready";
 
 export type Lead = {
   id: number;
   owner_name: string | null;
   phone: string | null;
+  phone_numbers: { phone: string; dnc: boolean }[];
   property_address: string | null;
   area: string | null;
   signals: LeadSignal[];
@@ -40,6 +41,22 @@ export type LeadDetail = Lead & {
   } | null;
 };
 
+/** One choice in the location filter, with how many leads it would show. */
+export type LocationOption = {
+  /** What the API expects back: "IL", "mattoon|IL", "61938". */
+  key: string;
+  label: string;
+  /** Counted under the other two location filters, not this one's own. */
+  count: number;
+};
+
+/** The location filter menu, rebuilt on every request as the filters narrow. */
+export type LocationFacets = {
+  states: LocationOption[];
+  cities: LocationOption[];
+  zips: LocationOption[];
+};
+
 export type LeadFacets = {
   total: number;
   signals: Record<string, number>;
@@ -49,6 +66,7 @@ export type LeadFacets = {
 export type LeadPoolResponse = {
   leads: Lead[];
   facets: LeadFacets;
+  locations: LocationFacets;
   signal_catalog: LeadSignal[];
   stage_catalog: { key: LeadStage; label: string }[];
 };
@@ -63,8 +81,9 @@ export type ImportPreview = {
   /** Columns treated as yes/no signal flags, keyed by signal. */
   signal_columns: Record<string, string>;
   total_rows: number;
-  /** Rows that could be read as a lead. Nothing is merged, so this is a count of rows. */
+  /** Readable rows remaining after existing and repeated phone numbers are removed. */
   importable: number;
+  duplicate_count: number;
   warnings: string[];
   sample: {
     owner_name: string | null;
@@ -83,13 +102,13 @@ export type LeadImportResult = {
   warnings: string[];
 };
 
-export type CampaignResult = {
-  started: { lead_id: number; owner_name: string | null; conversation_id: number; text: string }[];
-  skipped: { lead_id: number; owner_name: string | null; reason: string }[];
-};
-
 export type LeadQuery = {
   search?: string;
   signals?: string[];
   stage?: string;
+  /** USPS state codes. Each location filter narrows the pool on its own. */
+  states?: string[];
+  /** Town keys from the location facets, e.g. "mattoon|IL". */
+  cities?: string[];
+  zips?: string[];
 };

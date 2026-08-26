@@ -15,11 +15,25 @@ export type FollowUpReason =
 
 export type FollowUp = {
   id: number;
+  /** The lead pool row behind the thread, for the property details panel. */
+  lead_id: number | null;
+  /** The campaign that opened this thread, when one did. */
+  campaign_id: number | null;
+  campaign_name: string | null;
   contact: string;
   name: string | null;
   property_address: string | null;
   /** From the lead pool row behind the thread, when it came from an import. */
   area: string | null;
+  properties: {
+    lead_id: number;
+    address: string | null;
+    area: string | null;
+    campaign_id: number | null;
+    campaign_name: string | null;
+    signals: string[];
+  }[];
+  has_multiple_properties: boolean;
   ai_enabled: boolean;
   handled_by: "bobbie" | "broker";
   awaiting_broker_reply: boolean;

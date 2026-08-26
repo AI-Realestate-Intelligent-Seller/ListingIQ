@@ -6,10 +6,14 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 from .. import db
 from ..schemas import (UserCreate, UserRegister, UserOut, AuthResponse, RegistrationResponse,
-                       RefreshRequest)
+                       RefreshRequest, ForgotPasswordRequest, PasswordResetRequest, MessageResponse)
 from ..models import User
-from ..auth import hash_password, verify_password, create_access_token, ACCESS_TOKEN_EXPIRE_MINUTES
-from ..logger import set_request_context
+from ..auth import (hash_password, verify_password, create_access_token,
+                    create_password_reset_token, decode_password_reset_token,
+                    ACCESS_TOKEN_EXPIRE_MINUTES)
+from ..core.email import (EmailDeliveryError, build_password_reset_url,
+                          send_password_reset_email)
+from ..logger import get_logger, set_request_context
 
 # Login is a plain JSON endpoint, not an OAuth2 password-grant endpoint, so the
 # access token is simply pasted into Swagger's Authorize dialog as a bearer token.
@@ -21,6 +25,10 @@ bearer_scheme = HTTPBearer(
 )
 
 router = APIRouter()
+logger = get_logger(__name__)
+PASSWORD_RESET_REQUEST_MESSAGE = (
+    'If an active account exists for that email, a password reset link has been sent.'
+)
 
 def get_db():
     db_session = db.SessionLocal()
@@ -108,6 +116,44 @@ def login(form: UserCreate, session: Session = Depends(get_db)):
         "expires_in": expires_in,
         "user": user,
     }
+
+
+@router.post('/forgot-password', response_model=MessageResponse)
+def forgot_password(payload: ForgotPasswordRequest, session: Session = Depends(get_db)):
+    """Email a reset link while returning the same response for unknown accounts."""
+    email = str(payload.email).strip().lower()
+    user = session.query(User).filter(User.email == email, User.is_active.is_(True)).first()
+    if user:
+        token = create_password_reset_token(user.id, user.hashed_password)
+        try:
+            send_password_reset_email(user.email, build_password_reset_url(token))
+        except EmailDeliveryError:
+            # Do not reveal whether an address is registered through differing responses.
+            logger.exception('password_reset_email_failed user_id=%s', user.id)
+    return {'message': PASSWORD_RESET_REQUEST_MESSAGE}
+
+
+@router.post('/reset-password', response_model=MessageResponse)
+def reset_password(payload: PasswordResetRequest, session: Session = Depends(get_db)):
+    """Replace the password once; its hash invalidates this and all older reset links."""
+    from jwt import DecodeError
+
+    # Read the untrusted user id only to locate the password hash. Full signature,
+    # expiry, purpose and password-marker validation happens immediately after.
+    try:
+        import jwt
+        unverified = jwt.decode(payload.token, options={'verify_signature': False})
+        user_id = int(unverified.get('user_id'))
+    except (DecodeError, TypeError, ValueError):
+        raise HTTPException(status_code=400, detail='This password reset link is invalid or has expired.')
+
+    user = session.query(User).filter(User.id == user_id, User.is_active.is_(True)).first()
+    if not user:
+        raise HTTPException(status_code=400, detail='This password reset link is invalid or has expired.')
+    decode_password_reset_token(payload.token, user.hashed_password)
+    user.hashed_password = hash_password(payload.password)
+    session.commit()
+    return {'message': 'Your password has been reset. You can now log in.'}
 
 
 @router.post('/refresh', response_model=AuthResponse)

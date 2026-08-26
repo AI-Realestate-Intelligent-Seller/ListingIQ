@@ -7,10 +7,13 @@ export type LeadStatus =
   | "no_response"
   | "dnc";
 
-export type QueueStatus = "idle" | "waiting" | "active" | "completed" | "failed";
+export type QueueStatus = "idle" | "waiting" | "active" | "completed" | "failed" | "dead";
 
 export type SmsConversation = {
   id: number;
+  /** The lead pool row behind the thread, when it came from an import. Null for
+      a thread started by hand, which has no property record to show. */
+  lead_id: number | null;
   contact: string;
   name: string | null;
   property_address: string | null;

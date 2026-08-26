@@ -1,7 +1,6 @@
 import { getJson, postFile, postForm, postJson } from "@/lib/api/http-client";
 
 import type {
-  CampaignResult,
   ImportPreview,
   LeadDetail,
   LeadImportResult,
@@ -21,6 +20,10 @@ export function fetchLeadPool(
   if (query.stage) params.set("stage", query.stage);
   // Repeated keys — the API requires every listed signal to be present.
   for (const key of query.signals ?? []) params.append("signal", key);
+  // Location is the other way round: any one of the listed places matches.
+  for (const key of query.states ?? []) params.append("state", key);
+  for (const key of query.cities ?? []) params.append("city", key);
+  for (const key of query.zips ?? []) params.append("zip", key);
 
   const suffix = params.toString();
   return getJson<LeadPoolResponse>(`${LEADS}${suffix ? `?${suffix}` : ""}`, accessToken, signal);
@@ -74,18 +77,6 @@ export function deleteLeads(leadIds: number[], accessToken: string): Promise<{ d
   return postJson<{ deleted: number }, { lead_ids: number[] }>(
     `${LEADS}/delete`,
     { lead_ids: leadIds },
-    accessToken,
-  );
-}
-
-export function startCampaign(
-  leadIds: number[],
-  outreachReason: string,
-  accessToken: string,
-): Promise<CampaignResult> {
-  return postJson<CampaignResult, { lead_ids: number[]; outreach_reason: string | null }>(
-    `${LEADS}/campaign`,
-    { lead_ids: leadIds, outreach_reason: outreachReason.trim() || null },
     accessToken,
   );
 }

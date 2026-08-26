@@ -9,6 +9,7 @@ import "../styles/dashboard.css";
 import "../styles/sms.css";
 import "../styles/leads.css";
 import "../styles/followups.css";
+import "../styles/campaigns.css";
 import "../styles/responsive.css";
 
 const geistSans = Geist({

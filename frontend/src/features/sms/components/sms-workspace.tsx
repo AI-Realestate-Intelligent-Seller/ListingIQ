@@ -9,9 +9,9 @@ import { readAuthSession } from "@/features/auth/lib/auth-storage";
 import { endSession } from "@/features/auth/lib/session-guard";
 import { ConfirmDialog, type ConfirmRequest } from "@/components/dialog/confirm-dialog";
 import { ApiRequestError } from "@/lib/api/http-client";
+import { LeadDetailDrawer } from "@/features/leads/components/lead-detail-drawer";
 
 import {
-  createConversation,
   deleteConversation,
   listConversations,
   listMessages,
@@ -20,11 +20,9 @@ import {
 } from "../api/sms-api";
 import { LEAD_LABELS, dateLabel, formatTime, initials } from "../lib/sms-format";
 import type {
-  NewConversationPayload,
   SmsConversation,
   SmsMessage,
 } from "../types/sms.types";
-import { NewConversationDialog } from "./new-conversation-dialog";
 
 /** How often the open thread and the conversation list refresh. */
 const POLL_INTERVAL_MS = 5000;
@@ -50,12 +48,13 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
   const [search, setSearch] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isSending, setIsSending] = useState(false);
-  const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [notice, setNotice] = useState("");
   /** Mobile only: the conversation list is an off-canvas drawer over the thread. */
   const [isListOpen, setIsListOpen] = useState(false);
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
+  /** The lead behind the open thread, shown in the same panel as the Lead Pool. */
+  const [detailId, setDetailId] = useState<number | null>(null);
 
   const threadRef = useRef<HTMLDivElement | null>(null);
   const router = useRouter();
@@ -161,18 +160,6 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
     if (thread) thread.scrollTop = thread.scrollHeight;
   }, [messages]);
 
-  async function handleCreate(payload: NewConversationPayload): Promise<void> {
-    const result = await createConversation(payload, token);
-    setIsDialogOpen(false);
-    setNotice(
-      result.started
-        ? `Bobbie's introduction was sent to ${result.conversation.contact}.`
-        : `Thread created for ${result.conversation.contact}. Nothing sent yet.`,
-    );
-    await refreshConversations();
-    openConversation(result.conversation.id);
-  }
-
   async function handleSend(event: React.FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (isSending || activeId === null) return;
@@ -260,10 +247,6 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
           </button>
         </header>
 
-        <button className="button sms-new-button" type="button" onClick={() => setIsDialogOpen(true)}>
-          + New conversation
-        </button>
-
         <label className="sms-search">
           <span className="sr-only">Search conversations</span>
           <input
@@ -345,18 +328,18 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
               {active.handled_by === "bobbie" ? (
                 <button
                   type="button"
-                  className="sms-pill on"
+                  className="sms-pill on sms-pill-moving-border"
                   onClick={() => changeHandover("broker")}
                   title="Pause Bobbie and reply yourself"
-                  aria-label="Bobbie is replying. Take over."
+                  aria-label="Bobbie AI is replying. Take over."
                 >
                   <span aria-hidden="true">✦</span>
-                  <span className="sms-pill-label">Bobbie is replying · Take over</span>
+                  <span className="sms-pill-label">Bobbie AI is replying · Take over</span>
                 </button>
               ) : (
                 <button
                   type="button"
-                  className="sms-pill"
+                  className="sms-pill sms-pill-moving-border"
                   onClick={() => changeHandover("bobbie")}
                   title="Bobbie takes the conversation back"
                   aria-label="You are replying. Hand back to Bobbie."
@@ -365,6 +348,19 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
                   <span className="sms-pill-label">You are replying · Hand back to Bobbie</span>
                 </button>
               )}
+              {/* Only an imported lead has a property record to open; a thread
+                  started by hand carries nothing beyond what the header shows. */}
+              {active.lead_id !== null ? (
+                <button
+                  type="button"
+                  className="sms-icon-button"
+                  onClick={() => setDetailId(active.lead_id)}
+                  aria-label={`View details for ${active.name || active.contact}`}
+                  title="View property details"
+                >
+                  ⓘ
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="sms-icon-button"
@@ -441,10 +437,7 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
           <div className="sms-empty">
             <div aria-hidden="true">◎</div>
             <h3>Select a conversation</h3>
-            <p>Pick a thread on the left, or start a new outreach and let Bobbie open the conversation.</p>
-            <button className="button" type="button" onClick={() => setIsDialogOpen(true)}>
-              New conversation
-            </button>
+            <p>Pick a thread on the left to read the conversation.</p>
             <button
               type="button"
               className="sms-button-secondary sms-drawer-button"
@@ -465,10 +458,12 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
 
       <ConfirmDialog request={confirmRequest} onClose={() => setConfirmRequest(null)} />
 
-      <NewConversationDialog
-        open={isDialogOpen}
-        onClose={() => setIsDialogOpen(false)}
-        onCreate={handleCreate}
+      {/* The thread is already open here, so the panel offers the property
+          record only — no action that would lead back to this same screen. */}
+      <LeadDetailDrawer
+        leadId={detailId}
+        accessToken={token}
+        onClose={() => setDetailId(null)}
       />
     </section>
   );

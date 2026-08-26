@@ -85,6 +85,11 @@ def load_config():
         'reply_delay_seconds': float(os.getenv('AI_REPLY_DELAY_SECONDS', sms_cfg.get('reply_delay_seconds', 1.4))),
         'queue_cooldown_seconds': float(os.getenv('LEAD_QUEUE_COOLDOWN_MS', sms_cfg.get('queue_cooldown_ms', 5000))) / 1000.0,
         'lead_job_timeout_seconds': float(os.getenv('LEAD_JOB_TIMEOUT_MS', sms_cfg.get('lead_job_timeout_ms', 0))) / 1000.0,
+        'followup_enabled': str(os.getenv('BOBBIE_FOLLOWUP_ENABLED', sms_cfg.get('followup_enabled', 'true'))).lower() in ('1', 'true', 'yes', 'on'),
+        'followup_first_delay_hours': float(os.getenv('BOBBIE_FOLLOWUP_FIRST_HOURS', sms_cfg.get('followup_first_delay_hours', 48))),
+        'followup_gap_hours': float(os.getenv('BOBBIE_FOLLOWUP_GAP_HOURS', sms_cfg.get('followup_gap_hours', 72))),
+        'followup_max_attempts': int(os.getenv('BOBBIE_FOLLOWUP_MAX_ATTEMPTS', sms_cfg.get('followup_max_attempts', 3))),
+        'followup_poll_seconds': float(os.getenv('BOBBIE_FOLLOWUP_POLL_SECONDS', sms_cfg.get('followup_poll_seconds', 60))),
     }
     # Vector store (ChromaDB) lives inside the project, so no root-owned path is
     # needed. CHROMA_PATH is the current name; LANCEDB_PATH is still read so

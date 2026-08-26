@@ -9,13 +9,14 @@ import { endSession } from "@/features/auth/lib/session-guard";
 import { ConfirmDialog, type ConfirmRequest } from "@/components/dialog/confirm-dialog";
 import { ApiRequestError } from "@/lib/api/http-client";
 
+import { createCampaignDraft } from "@/features/campaigns/api/campaigns-api";
+
 import {
   deleteLeads,
   fetchLeadPool,
   importLeads,
   previewImport,
   repreviewImport,
-  startCampaign,
 } from "../api/leads-api";
 import type {
   ImportPreview,
@@ -24,13 +25,19 @@ import type {
   LeadPoolResponse,
   LeadStage,
 } from "../types/leads.types";
-import { CampaignDialog } from "./campaign-dialog";
 import { ImportDialog } from "./import-dialog";
 import { LeadDetailDrawer } from "./lead-detail-drawer";
+import {
+  LocationFilter,
+  NO_LOCATION,
+  locationCount,
+  type LocationSelection,
+} from "./location-filter";
 
 const EMPTY_POOL: LeadPoolResponse = {
   leads: [],
   facets: { total: 0, signals: {}, stages: {} },
+  locations: { states: [], cities: [], zips: [] },
   signal_catalog: [],
   stage_catalog: [],
 };
@@ -38,7 +45,6 @@ const EMPTY_POOL: LeadPoolResponse = {
 /** Stages carry meaning, so each gets its own colour rather than one grey chip. */
 const STAGE_CLASS: Record<LeadStage, string> = {
   ready: "ready",
-  new: "new",
   in_campaign: "campaign",
   needs_review: "review",
   dnc: "dnc",
@@ -70,17 +76,22 @@ function relativeTime(value: string | null): string {
 }
 
 type LeadPoolProps = {
-  /** Lets the pool send the broker to the SMS tab once a campaign starts. */
-  onCampaignStarted?: () => void;
-  /** Opens one thread in the SMS tab, for a lead that is already in a campaign. */
+  /**
+   * Hands a freshly drafted campaign to the Campaigns tab, where the broker
+   * names it and writes the message. Nothing is sent from the pool.
+   */
+  onDraftCampaign?: (campaignId: number) => void;
+  /** Opens one thread in Follow-ups, for a lead that is already in a campaign. */
   onOpenConversation?: (conversationId: number) => void;
 };
 
-export function LeadPool({ onCampaignStarted, onOpenConversation }: LeadPoolProps) {
+export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps) {
   const [pool, setPool] = useState<LeadPoolResponse>(EMPTY_POOL);
-  const [search, setSearch] = useState("");
   const [activeSignals, setActiveSignals] = useState<string[]>([]);
   const [stage, setStage] = useState("");
+  const [search, setSearch] = useState("");
+  /** State / town / ZIP chips. Read out of each address, not stored per lead. */
+  const [location, setLocation] = useState<LocationSelection>(NO_LOCATION);
   const [selected, setSelected] = useState<number[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isImporting, setIsImporting] = useState(false);
@@ -89,7 +100,7 @@ export function LeadPool({ onCampaignStarted, onOpenConversation }: LeadPoolProp
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [isRemapping, setIsRemapping] = useState(false);
   const [mappingError, setMappingError] = useState("");
-  const [isCampaignOpen, setIsCampaignOpen] = useState(false);
+  const [isDrafting, setIsDrafting] = useState(false);
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
   /** The lead whose details panel is open, or null. */
   const [detailId, setDetailId] = useState<number | null>(null);
@@ -117,7 +128,20 @@ export function LeadPool({ onCampaignStarted, onOpenConversation }: LeadPoolProp
     async (signal?: AbortSignal) => {
       if (!token) return;
       try {
-        setPool(await fetchLeadPool({ search, signals: activeSignals, stage }, token, signal));
+        setPool(
+          await fetchLeadPool(
+            {
+              search,
+              signals: activeSignals,
+              stage,
+              states: location.states,
+              cities: location.cities,
+              zips: location.zips,
+            },
+            token,
+            signal,
+          ),
+        );
         setErrorMessage("");
       } catch (error) {
         handleApiError(error, "Could not load the lead pool.");
@@ -125,10 +149,10 @@ export function LeadPool({ onCampaignStarted, onOpenConversation }: LeadPoolProp
         setIsLoading(false);
       }
     },
-    [token, search, activeSignals, stage, handleApiError],
+    [token, search, activeSignals, stage, location, handleApiError],
   );
 
-  // Filters live on the server, so debounce the typing before refetching.
+  // Filters live on the server, so briefly coalesce changes before refetching.
   useEffect(() => {
     const controller = new AbortController();
     const timer = window.setTimeout(() => void refresh(controller.signal), 220);
@@ -216,29 +240,35 @@ export function LeadPool({ onCampaignStarted, onOpenConversation }: LeadPoolProp
     }
   }
 
-  async function handleCampaign(outreachReason: string): Promise<void> {
-    const result = await startCampaign(selectedVisible, outreachReason, token);
-    setIsCampaignOpen(false);
-    setSelected([]);
-
-    const started = result.started.length;
-    const skipped = result.skipped.length;
-    setNotice(
-      started > 0
-        ? `Bobbie has opened ${started} ${started === 1 ? "conversation" : "conversations"}.` +
-            (skipped ? ` ${skipped} lead(s) were skipped.` : "")
-        : "No conversations were started.",
-    );
-    if (skipped) {
-      setErrorMessage(
-        result.skipped
-          .slice(0, 3)
-          .map((item) => `${item.owner_name ?? `Lead ${item.lead_id}`}: ${item.reason}`)
-          .join(" "),
-      );
+  /**
+   * Drafts a campaign from the selection and moves the broker to the Campaigns
+   * tab to write it. This sends nothing: the message is composed there, against
+   * a preview of what each owner would actually read.
+   */
+  async function handleDraftCampaign(leadIds: number[]): Promise<void> {
+    if (isDrafting || leadIds.length === 0) return;
+    setIsDrafting(true);
+    setErrorMessage("");
+    try {
+      const result = await createCampaignDraft(leadIds, token);
+      setSelected([]);
+      if (result.not_added.length) {
+        // Say so before the composer opens with fewer rows than were selected.
+        setErrorMessage(
+          `${result.not_added.length} of the selected leads were left out: ` +
+            result.not_added
+              .slice(0, 3)
+              .map((item) => `${item.owner_name ?? `Lead ${item.lead_id}`} — ${item.reason}`)
+              .join(" "),
+        );
+      }
+      await refresh();
+      onDraftCampaign?.(result.campaign.id);
+    } catch (error) {
+      handleApiError(error, "Could not start a campaign from that selection.");
+    } finally {
+      setIsDrafting(false);
     }
-    await refresh();
-    if (started > 0) onCampaignStarted?.();
   }
 
   /** Shared by the row bin and the selection bar; ids are always plural here. */
@@ -256,7 +286,7 @@ export function LeadPool({ onCampaignStarted, onOpenConversation }: LeadPoolProp
       body:
         lead.conversation_id === null
           ? "The lead is removed from your pool. Re-importing the same list brings it back."
-          : "The lead leaves your pool. The conversation Bobbie already started stays in the SMS tab.",
+          : "The lead leaves your pool. The conversation Bobbie already started stays in Follow-ups.",
       confirmLabel: "Remove lead",
       tone: "danger",
       onConfirm: async () => {
@@ -278,7 +308,7 @@ export function LeadPool({ onCampaignStarted, onOpenConversation }: LeadPoolProp
         (inCampaign
           ? `${inCampaign} of them already ${inCampaign === 1 ? "has a" : "have"} conversation${
               inCampaign === 1 ? "" : "s"
-            } in the SMS tab, which will not be deleted.`
+            } in Follow-ups, which will not be deleted.`
           : "Re-importing the same list brings them back."),
       confirmLabel: `Remove ${count === 1 ? "lead" : "leads"}`,
       tone: "danger",
@@ -286,7 +316,7 @@ export function LeadPool({ onCampaignStarted, onOpenConversation }: LeadPoolProp
     });
   }
 
-  const isFiltered = Boolean(search || stage || activeSignals.length);
+  const isFiltered = Boolean(search.trim() || stage || activeSignals.length || locationCount(location));
   const stageLabels = Object.fromEntries(pool.stage_catalog.map((item) => [item.key, item.label]));
 
   return (
@@ -294,7 +324,16 @@ export function LeadPool({ onCampaignStarted, onOpenConversation }: LeadPoolProp
       <header className="leads-header">
         <div>
           <span className="sms-eyebrow">PROSPECTING</span>
-          <h2>Lead Pool</h2>
+          <div className="leads-title-row">
+            <h1 className="view-title">Lead Pool</h1>
+            <LocationFilter
+              facets={pool.locations}
+              selection={location}
+              onChange={setLocation}
+              advancedSearch={search}
+              onAdvancedSearchChange={setSearch}
+            />
+          </div>
           <p>
             {pool.facets.total === 0
               ? "Import a CSV or Excel file to start building your pool."
@@ -322,44 +361,36 @@ export function LeadPool({ onCampaignStarted, onOpenConversation }: LeadPoolProp
       </header>
 
       <div className="leads-toolbar">
-        <label className="leads-search">
-          <span className="sr-only">Search name or address</span>
-          <input
-            type="search"
-            value={search}
-            placeholder="Search name or address"
-            onChange={(event) => setSearch(event.target.value)}
-          />
-        </label>
-
         <label className="leads-stage-filter">
           <span className="sr-only">Filter by stage</span>
           <select value={stage} onChange={(event) => setStage(event.target.value)}>
             <option value="">All stages</option>
-            {pool.stage_catalog.map((item) => (
-              <option key={item.key} value={item.key}>
-                {item.label}
-                {pool.facets.stages[item.key] ? ` (${pool.facets.stages[item.key]})` : ""}
-              </option>
-            ))}
+            {pool.stage_catalog
+              .filter((item) => item.key !== "needs_review" && item.key !== "in_campaign")
+              .map((item) => (
+                <option key={item.key} value={item.key}>
+                  {item.label}
+                  {pool.facets.stages[item.key] ? ` (${pool.facets.stages[item.key]})` : ""}
+                </option>
+              ))}
           </select>
         </label>
 
         <div className="leads-signal-filters" role="group" aria-label="Filter by signal">
-          {pool.signal_catalog.map((item) => (
-            <button
-              key={item.key}
-              type="button"
-              className={`leads-chip${activeSignals.includes(item.key) ? " on" : ""}`}
-              aria-pressed={activeSignals.includes(item.key)}
-              onClick={() => toggleSignal(item.key)}
-            >
-              {item.label}
-              {pool.facets.signals[item.key] ? (
+          {pool.signal_catalog
+            .filter((item) => (pool.facets.signals[item.key] ?? 0) > 0)
+            .map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                className={`leads-chip${activeSignals.includes(item.key) ? " on" : ""}`}
+                aria-pressed={activeSignals.includes(item.key)}
+                onClick={() => toggleSignal(item.key)}
+              >
+                {item.label}
                 <span className="leads-chip-count">{pool.facets.signals[item.key]}</span>
-              ) : null}
-            </button>
-          ))}
+              </button>
+            ))}
           {isFiltered ? (
             <button
               type="button"
@@ -368,6 +399,7 @@ export function LeadPool({ onCampaignStarted, onOpenConversation }: LeadPoolProp
                 setSearch("");
                 setStage("");
                 setActiveSignals([]);
+                setLocation(NO_LOCATION);
               }}
             >
               Clear filters
@@ -396,15 +428,15 @@ export function LeadPool({ onCampaignStarted, onOpenConversation }: LeadPoolProp
             <button
               className="button"
               type="button"
-              onClick={() => setIsCampaignOpen(true)}
-              disabled={selectedVisible.length > MAX_CAMPAIGN_SIZE}
+              onClick={() => void handleDraftCampaign(selectedVisible)}
+              disabled={isDrafting || selectedVisible.length > MAX_CAMPAIGN_SIZE}
               title={
                 selectedVisible.length > MAX_CAMPAIGN_SIZE
                   ? `A campaign can hold at most ${MAX_CAMPAIGN_SIZE} leads.`
                   : undefined
               }
             >
-              ✦ Create campaign
+              {isDrafting ? "Opening…" : "✦ Create campaign"}
             </button>
           </div>
         </div>
@@ -425,9 +457,24 @@ export function LeadPool({ onCampaignStarted, onOpenConversation }: LeadPoolProp
               </th>
               <th scope="col">Owner / Property</th>
               <th scope="col">Signals</th>
-              <th scope="col" className="leads-numeric">Score</th>
+              <th scope="col" className="leads-numeric leads-score-header">
+                <span>Score</span>
+                <span className="leads-score-help">
+                  <button
+                    type="button"
+                    aria-label="About ListingIQ lead scores"
+                    aria-describedby="leads-score-explanation"
+                  >
+                    ?
+                  </button>
+                  <span id="leads-score-explanation" role="tooltip">
+                    This is ListingIQ’s estimated lead score based on the signals available for this record.
+                  </span>
+                </span>
+              </th>
               <th scope="col">Stage</th>
               <th scope="col">Last activity</th>
+              <th scope="col">Phone</th>
               <th scope="col"><span className="sr-only">Actions</span></th>
             </tr>
           </thead>
@@ -473,6 +520,20 @@ export function LeadPool({ onCampaignStarted, onOpenConversation }: LeadPoolProp
                     </span>
                   </td>
                   <td className="leads-activity">{relativeTime(lead.last_activity_at)}</td>
+                  <td className="leads-phone-cell">
+                    {lead.phone_numbers.length > 0 ? (
+                      <span className="leads-phone-list">
+                        {lead.phone_numbers.map((number) => (
+                          <span className="leads-phone-entry" key={number.phone}>
+                            <a href={`tel:${number.phone}`}>{number.phone}</a>
+                            {number.dnc ? <span className="leads-phone-dnc">DNC</span> : null}
+                          </span>
+                        ))}
+                      </span>
+                    ) : (
+                      <span className="leads-none">No number</span>
+                    )}
+                  </td>
                   <td className="leads-row-actions">
                     <button
                       type="button"
@@ -507,7 +568,9 @@ export function LeadPool({ onCampaignStarted, onOpenConversation }: LeadPoolProp
             <p>
               {pool.facets.total === 0
                 ? "Upload a .csv or .xlsx file with owner name, phone, property address and signal columns. Column names are matched loosely, so most vendor exports work as-is."
-                : "Try a different search, stage or signal."}
+                : stage === "in_campaign"
+                  ? "Leads handed to a campaign are listed under that campaign, in the Campaigns tab."
+                  : "Try a different location, stage, or signal."}
             </p>
           </div>
         ) : null}
@@ -529,12 +592,6 @@ export function LeadPool({ onCampaignStarted, onOpenConversation }: LeadPoolProp
           setDetailId(null);
           onOpenConversation?.(conversationId);
         }}
-        onStartCampaign={(id) => {
-          setSelected([id]);
-          setDetailId(null);
-          setIsCampaignOpen(true);
-        }}
-        onRemove={confirmRemoveOne}
       />
 
       <ImportDialog
@@ -553,13 +610,6 @@ export function LeadPool({ onCampaignStarted, onOpenConversation }: LeadPoolProp
       />
 
       <ConfirmDialog request={confirmRequest} onClose={() => setConfirmRequest(null)} />
-
-      <CampaignDialog
-        open={isCampaignOpen}
-        count={selectedVisible.length}
-        onClose={() => setIsCampaignOpen(false)}
-        onConfirm={handleCampaign}
-      />
     </section>
   );
 }

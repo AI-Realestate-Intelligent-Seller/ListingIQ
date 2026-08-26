@@ -9,6 +9,32 @@ from app.models import Invitation, User
 from app.routes.team import hash_token
 
 HOB_EMAIL = 'hob@linchpinglobal.net'
+
+
+def test_hob_directory_lists_only_active_members_in_own_brokerage(client, make_user, auth_header):
+    make_user(HOB_EMAIL, role='hob')
+    broker = make_user('broker@linchpinglobal.net', role='broker')
+    agent = make_user('agent@linchpinglobal.net', role='agent')
+    make_user('inactive@linchpinglobal.net', role='agent', is_active=False)
+    make_user('other@otherbrokerage.net', role='agent', brokerage_id='brokerage-2')
+
+    response = client.get('/api/v1/team/directory', headers=auth_header(HOB_EMAIL))
+
+    assert response.status_code == 200
+    assert response.json() == {
+        'members': [
+            {'id': agent.id, 'full_name': 'Test User', 'email': agent.email, 'role': 'agent', 'is_active': True, 'assigned_broker_id': None},
+            {'id': broker.id, 'full_name': 'Test User', 'email': broker.email, 'role': 'broker', 'is_active': True, 'assigned_broker_id': None},
+        ]
+    }
+
+
+def test_non_hob_cannot_view_team_directory(client, make_user, auth_header):
+    make_user('agent@linchpinglobal.net', role='agent')
+
+    response = client.get('/api/v1/team/directory', headers=auth_header('agent@linchpinglobal.net'))
+
+    assert response.status_code == 403
 INVITE_URL = '/api/v1/team/invitations'
 
 
@@ -18,8 +44,11 @@ def token_from(outbox):
     return outbox[-1]['invitation_url'].split('token=')[1]
 
 
-def invite(client, headers, email, role='broker'):
-    return client.post(INVITE_URL, json={'email': email, 'role': role}, headers=headers)
+def invite(client, headers, email, role='broker', broker_id=None):
+    payload = {'email': email, 'role': role}
+    if broker_id is not None:
+        payload['broker_id'] = broker_id
+    return client.post(INVITE_URL, json=payload, headers=headers)
 
 
 # --------------------------------------------------------------------------
@@ -56,9 +85,12 @@ def test_unauthenticated_cannot_invite(client):
 @pytest.mark.parametrize('role', ['broker', 'agent'])
 def test_allowed_roles(client, make_user, auth_header, session, role):
     make_user(HOB_EMAIL, role='hob')
-    assert invite(client, auth_header(HOB_EMAIL), f'{role}.invitee@linchpinglobal.net', role).status_code == 200
+    broker = make_user('assigned.broker@linchpinglobal.net', role='broker')
+    assert invite(client, auth_header(HOB_EMAIL), f'{role}.invitee@linchpinglobal.net', role,
+                  broker.id if role == 'agent' else None).status_code == 200
     stored = session.query(Invitation).filter(Invitation.role == role).one()
     assert stored.status == 'pending'
+    assert stored.assigned_broker_id == (broker.id if role == 'agent' else None)
 
 
 @pytest.mark.parametrize('role', ['hob', 'admin', 'developer', 'HOB', ''])
@@ -129,29 +161,13 @@ def test_hob_cannot_invite_self(client, make_user, auth_header):
     assert response.status_code == 400
 
 
-def test_resend_is_throttled(client, make_user, auth_header):
+def test_resending_an_active_invitation_is_not_supported(client, make_user, auth_header, sent_emails):
     make_user(HOB_EMAIL, role='hob')
     assert invite(client, auth_header(HOB_EMAIL), 'john@linchpinglobal.net').status_code == 200
     response = invite(client, auth_header(HOB_EMAIL), 'john@linchpinglobal.net')
-    assert response.status_code == 429
-
-
-def test_resend_after_cooldown_supersedes_previous_invitation(client, make_user, auth_header, session, sent_emails):
-    make_user(HOB_EMAIL, role='hob')
-    assert invite(client, auth_header(HOB_EMAIL), 'john@linchpinglobal.net').status_code == 200
-    first_token = token_from(sent_emails)
-
-    # Age the first invitation past the resend cooldown.
-    first = session.query(Invitation).one()
-    first.created_at = datetime.utcnow() - timedelta(minutes=5)
-    session.commit()
-
-    assert invite(client, auth_header(HOB_EMAIL), 'john@linchpinglobal.net', 'agent').status_code == 200
-    second_token = token_from(sent_emails)
-    assert first_token != second_token
-
-    assert client.get(f'{INVITE_URL}/{first_token}').json()['valid'] is False
-    assert client.get(f'{INVITE_URL}/{second_token}').json()['valid'] is True
+    assert response.status_code == 409
+    assert response.json()['detail'] == 'An active invitation already exists for this email address.'
+    assert len(sent_emails) == 1
 
 
 def test_email_failure_does_not_persist_invitation(client, make_user, auth_header, session, monkeypatch):
@@ -253,7 +269,8 @@ def test_accept_creates_user_with_invited_role_and_brokerage(client, make_user, 
 
 def test_accepted_user_can_log_in(client, make_user, auth_header, sent_emails):
     make_user(HOB_EMAIL, role='hob')
-    invite(client, auth_header(HOB_EMAIL), 'sara@linchpinglobal.net', 'agent')
+    broker = make_user('sara.broker@linchpinglobal.net', role='broker')
+    invite(client, auth_header(HOB_EMAIL), 'sara@linchpinglobal.net', 'agent', broker.id)
     accept(client, token_from(sent_emails))
 
     login = client.post(
@@ -266,7 +283,8 @@ def test_accepted_user_can_log_in(client, make_user, auth_header, sent_emails):
 
 def test_accept_ignores_client_supplied_role_and_brokerage(client, make_user, auth_header, session, sent_emails):
     make_user(HOB_EMAIL, role='hob')
-    invite(client, auth_header(HOB_EMAIL), 'john@linchpinglobal.net', 'agent')
+    broker = make_user('john.broker@linchpinglobal.net', role='broker')
+    invite(client, auth_header(HOB_EMAIL), 'john@linchpinglobal.net', 'agent', broker.id)
     token = token_from(sent_emails)
 
     response = client.post(
@@ -283,10 +301,11 @@ def test_accept_ignores_client_supplied_role_and_brokerage(client, make_user, au
     )
     assert response.status_code == 200
 
-    created = session.query(User).filter(User.role != 'hob').one()
+    created = session.query(User).filter(User.email == 'john@linchpinglobal.net').one()
     assert created.email == 'john@linchpinglobal.net'
     assert created.role == 'agent'
     assert created.brokerage_id == 'brokerage-1'
+    assert created.assigned_broker_id == broker.id
     assert created.is_head_or_owner is False
     assert session.query(User).filter(User.email == 'attacker@linchpinglobal.net').count() == 0
 
