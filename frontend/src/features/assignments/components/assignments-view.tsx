@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { readAuthSession } from "@/features/auth/lib/auth-storage";
 import { assignLead, listAssignments, roundRobinAssignments } from "../api/assignments-api";
@@ -55,6 +55,16 @@ export function AssignmentsView() {
     };
   }, [openAssigneeId]);
 
+  const campaigns = useMemo(() => {
+    const groups = new Map<string, { name: string; leads: AssignmentLead[] }>();
+    for (const lead of data.leads) {
+      const key = lead.campaign_id === null ? "uncategorized" : String(lead.campaign_id);
+      const group = groups.get(key) ?? { name: lead.campaign_name || "Uncategorized", leads: [] };
+      groups.set(key, { ...group, leads: [...group.leads, lead] });
+    }
+    return [...groups.entries()];
+  }, [data.leads]);
+
   async function updateAssignee(lead: AssignmentLead, rawValue: string) {
     setOpenAssigneeId(null);
     const session = readAuthSession();
@@ -105,10 +115,16 @@ export function AssignmentsView() {
           </button>
         </div>
       </header>
-      <div className="leads-table-wrap assignments-table-wrap">
+      {campaigns.map(([campaignId, campaign]) => (
+      <section className="broker-assignment-campaign" key={campaignId}>
+        <div className="agent-campaign-heading">
+          <div><span>CAMPAIGN</span><h2>{campaign.name}</h2></div>
+          <strong>{campaign.leads.length}</strong>
+        </div>
+        <div className="leads-table-wrap assignments-table-wrap">
         <table className="leads-table assignments-table">
           <thead><tr><th>Owner / Property</th><th>Signals</th><th className="leads-numeric">Score</th><th>Stage</th><th>Last activity</th><th>Phone</th><th>Assignee</th></tr></thead>
-          <tbody>{data.leads.map((lead) => (
+          <tbody>{campaign.leads.map((lead) => (
             <tr key={lead.id}>
               <td><strong>{lead.owner_name || lead.phone || "Unnamed owner"}</strong><span className="leads-address">{lead.property_address || "No address on file"}{lead.area ? ` · ${lead.area}` : ""}</span></td>
               <td><span className="leads-signals">{lead.signals.length ? lead.signals.map((signal) => <span key={signal.key} className="leads-signal">{signal.label}</span>) : <span className="leads-none">—</span>}</span></td>
@@ -142,9 +158,11 @@ export function AssignmentsView() {
             </tr>
           ))}</tbody>
         </table>
-        {isLoading ? <p className="sms-muted">Loading replied leads…</p> : null}
-        {!isLoading && data.leads.length === 0 ? <div className="leads-empty"><div>◎</div><h3>No replied leads yet</h3><p>Leads will appear here after an owner replies to a campaign sent by you.</p></div> : null}
-      </div>
+        </div>
+      </section>
+      ))}
+      {isLoading ? <p className="sms-muted">Loading replied leads…</p> : null}
+      {!isLoading && data.leads.length === 0 ? <div className="leads-empty broker-assignments-empty"><div>◎</div><h3>No replied leads yet</h3><p>Leads will appear here after an owner replies to a campaign sent by you.</p></div> : null}
       {!isLoading && data.agents.length === 0 ? <p className="assignments-note">No agents are linked to you yet. Ask your HOB to assign an agent to you.</p> : null}
       {notice ? <p className="sms-toast" role="status">{notice}</p> : null}
       {error ? <p className="sms-toast error" role="alert">{error}</p> : null}

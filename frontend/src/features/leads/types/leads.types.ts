@@ -102,6 +102,28 @@ export type LeadImportResult = {
   warnings: string[];
 };
 
+/** One entry in a lead's timeline — a stage move, assignment change, AI/agent
+    ownership handoff, or notable activity. */
+export type LeadEvent = {
+  id: number;
+  event_category: "stage" | "assignment" | "ownership" | "activity";
+  event_type: string;
+  actor_type: "system" | "broker" | "hob" | "agent" | "ai";
+  actor_id: number | null;
+  actor_name: string | null;
+  target_id: number | null;
+  target_name: string | null;
+  from_value: string | null;
+  to_value: string | null;
+  reason: string | null;
+  meta: Record<string, unknown> | null;
+  created_at: string | null;
+};
+
+export type LeadHistory = {
+  events: LeadEvent[];
+};
+
 export type LeadQuery = {
   search?: string;
   signals?: string[];

@@ -60,9 +60,15 @@ def _serialize(session: Session, conversation: Conversation) -> dict:
     count = session.query(Message).filter(Message.conversation_id == conversation.id).count()
     # The pool row behind the thread, when it came from an import. It is what
     # the details panel reads, so the thread can offer the same ⓘ as the pool.
-    lead_id = (session.query(Lead.id)
-               .filter(Lead.conversation_id == conversation.id)
-               .scalar())
+    # One phone-number thread may represent several property leads. Returning
+    # the most recently active row keeps the info action deterministic; using
+    # scalar() here raised MultipleResultsFound *after* a successful handover,
+    # which made the UI report a false server failure.
+    lead_row = (session.query(Lead.id)
+                .filter(Lead.conversation_id == conversation.id)
+                .order_by(Lead.last_activity_at.desc(), Lead.id.desc())
+                .first())
+    lead_id = lead_row[0] if lead_row else None
     # The broker owes a reply when Bobbie has stepped back and the owner spoke last.
     awaiting = bool(
         conversation.handled_by == 'broker'

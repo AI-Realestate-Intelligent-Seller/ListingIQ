@@ -6,6 +6,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from ..leads import events as lead_events
 from ..leads.service import serialize
 from ..models import Campaign, Conversation, Lead, Message, User
 from ..schemas import LeadAssignmentRequest, LeadAssignmentStageRequest
@@ -54,7 +55,16 @@ def _replied_leads(session: Session, broker: User) -> list[Lead]:
     )
 
 
-ASSIGNMENT_STAGES = ('new', 'in_progress', 'done')
+ASSIGNMENT_STAGES = ('new', 'processing', 'want_more_info', 'interested', 'ready_to_sell',
+                     'not_interested', 'no_response', 'dnc')
+IN_PROGRESS_STAGES = {'processing', 'want_more_info', 'interested'}
+COMPLETED_STAGES = {'ready_to_sell', 'not_interested', 'no_response', 'dnc'}
+
+
+def _assignment_stage(lead: Lead) -> str:
+    """Normalize the old three-stage workflow while existing rows transition."""
+    return {'in_progress': 'processing', 'done': 'ready_to_sell'}.get(
+        lead.assignment_stage or 'new', lead.assignment_stage or 'new')
 
 
 def _stage_seconds(lead: Lead, now: datetime | None = None) -> dict[str, int]:
@@ -63,7 +73,7 @@ def _stage_seconds(lead: Lead, now: datetime | None = None) -> dict[str, int]:
     except (TypeError, ValueError):
         stored = {}
     totals = {stage: max(int(stored.get(stage, 0)), 0) for stage in ASSIGNMENT_STAGES}
-    stage = lead.assignment_stage or 'new'
+    stage = _assignment_stage(lead)
     if lead.assigned_agent_id and lead.assignment_stage_changed_at and stage in totals:
         elapsed = max(int(((now or datetime.utcnow()) - lead.assignment_stage_changed_at).total_seconds()), 0)
         totals[stage] += elapsed
@@ -73,7 +83,7 @@ def _stage_seconds(lead: Lead, now: datetime | None = None) -> dict[str, int]:
 def _serialize_assignment(session: Session, lead: Lead) -> dict:
     item = serialize(lead)
     item['assignee_id'] = lead.assigned_agent_id
-    item['assignment_stage'] = lead.assignment_stage or 'new'
+    item['assignment_stage'] = _assignment_stage(lead)
     item['assignment_stage_changed_at'] = lead.assignment_stage_changed_at
     item['stage_seconds'] = _stage_seconds(lead)
     item['campaign_id'] = lead.campaign_id
@@ -124,8 +134,8 @@ def broker_overview(
         Lead.user_id == current_user.id,
         Lead.assigned_agent_id.isnot(None),
     ).all()
-    in_progress = sum(1 for lead in assigned if lead.assignment_stage == 'in_progress')
-    completed = sum(1 for lead in assigned if lead.assignment_stage == 'done')
+    in_progress = sum(1 for lead in assigned if _assignment_stage(lead) in IN_PROGRESS_STAGES)
+    completed = sum(1 for lead in assigned if _assignment_stage(lead) in COMPLETED_STAGES)
     booked = session.query(Conversation).filter(
         Conversation.user_id == current_user.id,
         Conversation.meeting_booked.is_(True),
@@ -182,7 +192,7 @@ def my_assignment_overview(
     """Persisted assignment and follow-up metrics for the Agent Overview."""
     _require_agent(current_user)
     leads = session.query(Lead).filter(Lead.assigned_agent_id == current_user.id).all()
-    counts = {stage: sum(1 for lead in leads if (lead.assignment_stage or 'new') == stage)
+    counts = {stage: sum(1 for lead in leads if _assignment_stage(lead) == stage)
               for stage in ASSIGNMENT_STAGES}
 
     conversation_ids = [lead.conversation_id for lead in leads if lead.conversation_id]
@@ -202,20 +212,21 @@ def my_assignment_overview(
 
     completed_seconds = []
     for lead in leads:
-        if (lead.assignment_stage or 'new') != 'done':
+        if _assignment_stage(lead) not in COMPLETED_STAGES:
             continue
         totals = _stage_seconds(lead)
-        completed_seconds.append(totals['new'] + totals['in_progress'])
+        completed_seconds.append(sum(totals[stage] for stage in ('new', *IN_PROGRESS_STAGES)))
 
     total = len(leads)
     return {
         'assigned_leads': total,
         'new_assignments': counts['new'],
-        'in_progress_leads': counts['in_progress'],
-        'completed_leads': counts['done'],
+        'in_progress_leads': sum(counts[stage] for stage in IN_PROGRESS_STAGES),
+        'completed_leads': sum(counts[stage] for stage in COMPLETED_STAGES),
         'replies_requiring_attention': attention,
         'appointments_booked': appointments,
-        'completion_rate': round((counts['done'] / total * 100) if total else 0, 1),
+        'completion_rate': round((sum(counts[stage] for stage in COMPLETED_STAGES) / total * 100)
+                                 if total else 0, 1),
         'average_handling_seconds': (round(sum(completed_seconds) / len(completed_seconds))
                                      if completed_seconds else None),
     }
@@ -261,6 +272,12 @@ def round_robin_assignments(
         workload[agent.id] += 1
     if unassigned:
         session.commit()
+        for lead in unassigned:
+            lead_events.log_event(
+                session, lead.id, lead_events.ASSIGNMENT, 'assigned',
+                actor_type='broker', actor_id=current_user.id, target_id=lead.assigned_agent_id,
+                reason='round robin',
+            )
 
     return {
         'assigned': len(unassigned),
@@ -285,15 +302,29 @@ def update_my_lead_stage(
     if not lead:
         raise HTTPException(status_code=404, detail='Assigned lead not found.')
 
-    current_stage = lead.assignment_stage or 'new'
+    current_stage = _assignment_stage(lead)
     if payload.stage != current_stage:
         totals = _stage_seconds(lead)
         # _stage_seconds includes the live current interval; persist that snapshot.
         lead.assignment_stage_seconds = json.dumps(totals, sort_keys=True)
         lead.assignment_stage = payload.stage
         lead.assignment_stage_changed_at = datetime.utcnow()
+        if payload.stage != 'new' and lead.conversation_id:
+            conversation = session.query(Conversation).filter(
+                Conversation.id == lead.conversation_id).first()
+            if conversation:
+                conversation.lead_status = payload.stage
+                if payload.stage == 'dnc':
+                    conversation.dnc_alert = True
+                    conversation.ai_enabled = False
+                    conversation.handled_by = 'broker'
         session.commit()
         session.refresh(lead)
+        lead_events.log_event(
+            session, lead.id, lead_events.STAGE, 'stage_changed',
+            actor_type='agent', actor_id=current_user.id,
+            from_value=current_stage, to_value=payload.stage,
+        )
     return _serialize_assignment(session, lead)
 
 
@@ -309,6 +340,7 @@ def assign_lead(
     if not lead:
         raise HTTPException(status_code=404, detail='Replied lead not found.')
 
+    previous_agent_id = lead.assigned_agent_id
     if payload.agent_id is None:
         lead.assigned_agent_id = None
     else:
@@ -324,4 +356,18 @@ def assign_lead(
 
     session.commit()
     session.refresh(lead)
+
+    if previous_agent_id != lead.assigned_agent_id:
+        if lead.assigned_agent_id is None:
+            event_type = 'revoked'
+        elif previous_agent_id is None:
+            event_type = 'assigned'
+        else:
+            event_type = 'reassigned'
+        lead_events.log_event(
+            session, lead.id, lead_events.ASSIGNMENT, event_type,
+            actor_type='broker', actor_id=current_user.id, target_id=lead.assigned_agent_id,
+            from_value=str(previous_agent_id) if previous_agent_id else None,
+            to_value=str(lead.assigned_agent_id) if lead.assigned_agent_id else None,
+        )
     return _serialize_assignment(session, lead)

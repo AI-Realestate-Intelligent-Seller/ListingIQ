@@ -101,8 +101,10 @@ class LeadAssignmentStageRequest(BaseModel):
     @validator('stage')
     def stage_must_be_known(cls, value: str) -> str:
         normalized = (value or '').strip().lower().replace(' ', '_')
-        if normalized not in {'new', 'in_progress', 'done'}:
-            raise ValueError('Stage must be one of: new, in_progress, done.')
+        allowed = {'new', 'processing', 'want_more_info', 'interested', 'ready_to_sell',
+                   'not_interested', 'no_response', 'dnc'}
+        if normalized not in allowed:
+            raise ValueError('Choose New or a valid lead status.')
         return normalized
 
 class InvitationValidationResponse(BaseModel):
@@ -368,6 +370,10 @@ class CampaignOut(BaseModel):
     replied: int = 0
     no_reply: int = 0
     not_sent: int = 0
+    broker_id: Optional[int] = None
+    broker_name: Optional[str] = None
+    broker_email: Optional[EmailStr] = None
+    broker_role: Optional[str] = None
 
 class CampaignDetail(CampaignOut):
     preview: CampaignPreview

@@ -3,7 +3,8 @@
 import pytest
 
 from app import db
-from app.models import Conversation, Message
+from app.models import Conversation, Lead, Message
+from app.routes.sms import _serialize
 from app.sms import service
 from app.sms.bobbie import exact_offered_slot
 from app.sms.classifier import classify_lead_message, is_opt_out, merge_lead_status
@@ -503,6 +504,26 @@ def test_a_genuine_signature_is_accepted(client, make_user, auth_header, sent_sm
 # --------------------------------------------------------------------------
 # Bobbie ↔ broker handover
 # --------------------------------------------------------------------------
+
+def test_shared_property_thread_serializes_one_current_lead(session, make_user):
+    broker = make_user(BROKER_EMAIL, role='broker')
+    conversation = Conversation(
+        contact=CONTACT, user_id=broker.id, name='Dana',
+        property_address='22 Rosewood Ct', ai_enabled=True, handled_by='bobbie',
+    )
+    session.add(conversation)
+    session.commit()
+    first = Lead(user_id=broker.id, owner_name='Dana', phone=CONTACT,
+                 property_address='415 Northview Lane', conversation_id=conversation.id)
+    second = Lead(user_id=broker.id, owner_name='Dana', phone=CONTACT,
+                  property_address='22 Rosewood Ct', conversation_id=conversation.id)
+    session.add_all([first, second])
+    session.commit()
+
+    result = _serialize(session, conversation)
+
+    assert result['lead_id'] == second.id
+
 
 def test_a_broker_message_takes_the_thread_off_bobbie(client, make_user, auth_header, session, sent_sms):
     make_user(BROKER_EMAIL, role='broker')

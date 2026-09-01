@@ -314,6 +314,7 @@ def update_followup_status(
     """
     _require_access(current_user)
     conversation = _owned_conversation(session, conversation_id, current_user)
+    previous_status = conversation.lead_status
     updates: dict = {'lead_status': payload.lead_status}
     if payload.lead_status == 'dnc':
         # An owner marked do-not-contact must never be texted again, by anyone.
@@ -321,6 +322,15 @@ def update_followup_status(
     service.update_lead_progress(session, conversation, **updates)
     logger.info('[followup] conversation %s status set to %s by user %s',
                 conversation.id, payload.lead_status, current_user.id)
+    if previous_status != payload.lead_status:
+        from ..leads import events as lead_events
+        lead = session.query(Lead).filter(Lead.conversation_id == conversation.id).first()
+        if lead:
+            lead_events.log_event(
+                session, lead.id, lead_events.STAGE, 'stage_changed',
+                actor_type=current_user.role, actor_id=current_user.id,
+                from_value=previous_status, to_value=payload.lead_status,
+            )
     return _serialize_one(session, conversation, current_user)
 
 

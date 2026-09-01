@@ -97,6 +97,7 @@ async def telnyx_webhook(req: Request, background: BackgroundTasks, db: Session 
     # Any owner reply immediately ends the no-response cadence before Bobbie
     # considers the response. This also revives a previously dead thread.
     cancel_followup_cadence(db, conversation, owner_replied=True)
+    service.log_first_reply(db, conversation, message)
     service.record_inbound_classification(db, conversation, inbound['text'])
     if conversation.ai_enabled:
         background.add_task(service.process_ai_reply, conversation.id, inbound['text'])

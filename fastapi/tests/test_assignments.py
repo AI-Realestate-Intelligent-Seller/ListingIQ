@@ -78,7 +78,7 @@ def test_broker_overview_reports_campaign_and_assignment_metrics(make_user, sess
     lead = replied_lead(session, broker)
     lead.campaign_id = sent.id
     lead.assigned_agent_id = agent.id
-    lead.assignment_stage = 'in_progress'
+    lead.assignment_stage = 'processing'
     conversation = session.query(Conversation).filter(Conversation.id == lead.conversation_id).one()
     conversation.campaign_id = sent.id
     conversation.lead_status = 'interested'
@@ -164,8 +164,8 @@ def test_agent_overview_counts_assignment_pipeline(make_user, session):
     agent = make_user('agent@linchpinglobal.net', role='agent')
     lead = replied_lead(session, broker)
     lead.assigned_agent_id = agent.id
-    lead.assignment_stage = 'done'
-    lead.assignment_stage_seconds = '{"new": 120, "in_progress": 180, "done": 0}'
+    lead.assignment_stage = 'ready_to_sell'
+    lead.assignment_stage_seconds = '{"new": 120, "processing": 180, "ready_to_sell": 0}'
     conversation = session.query(Conversation).filter(Conversation.id == lead.conversation_id).one()
     conversation.meeting_booked = True
     session.commit()
@@ -232,10 +232,10 @@ def test_agent_stage_transition_accumulates_time(make_user, session):
 
     result = update_my_lead_stage(
         lead.id,
-        LeadAssignmentStageRequest(stage='in_progress'),
+        LeadAssignmentStageRequest(stage='processing'),
         agent,
         session,
     )
 
-    assert result['assignment_stage'] == 'in_progress'
+    assert result['assignment_stage'] == 'processing'
     assert result['stage_seconds']['new'] >= 299

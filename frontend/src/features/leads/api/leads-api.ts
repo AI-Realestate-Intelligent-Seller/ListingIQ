@@ -3,6 +3,7 @@ import { getJson, postFile, postForm, postJson } from "@/lib/api/http-client";
 import type {
   ImportPreview,
   LeadDetail,
+  LeadHistory,
   LeadImportResult,
   LeadPoolResponse,
   LeadQuery,
@@ -36,6 +37,16 @@ export function fetchLead(
   signal?: AbortSignal,
 ): Promise<LeadDetail> {
   return getJson<LeadDetail>(`${LEADS}/${leadId}`, accessToken, signal);
+}
+
+/** The lead's full timeline — intake, campaign attach, assignment moves,
+    AI/agent handoffs, meeting booked — oldest first. */
+export function fetchLeadHistory(
+  leadId: number,
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<LeadHistory> {
+  return getJson<LeadHistory>(`${LEADS}/${leadId}/history`, accessToken, signal);
 }
 
 /** Dry run: what the file would import, so the options can show real numbers. */

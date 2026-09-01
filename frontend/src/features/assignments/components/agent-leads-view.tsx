@@ -8,8 +8,13 @@ import type { AssignmentLead, AssignmentStage } from "../types/assignments.types
 
 const STAGES: { value: AssignmentStage; label: string }[] = [
   { value: "new", label: "New" },
-  { value: "in_progress", label: "In progress" },
-  { value: "done", label: "Done" },
+  { value: "processing", label: "In progress" },
+  { value: "want_more_info", label: "Wants info" },
+  { value: "interested", label: "Interested" },
+  { value: "ready_to_sell", label: "Ready to sell" },
+  { value: "not_interested", label: "Not interested" },
+  { value: "no_response", label: "No response" },
+  { value: "dnc", label: "Do not contact" },
 ];
 
 function activity(value: string | null): string {
@@ -108,7 +113,7 @@ export function AgentLeadsView() {
                     onClick={(event) => {
                       if (openStageId === lead.id) return setOpenStageId(null);
                       const rect = event.currentTarget.getBoundingClientRect();
-                      const menuWidth = Math.max(rect.width, 150);
+                      const menuWidth = Math.max(rect.width, 190);
                       setStageMenuPosition({ top: rect.bottom + 6, left: Math.max(10, Math.min(rect.left, window.innerWidth - menuWidth - 10)) });
                       setOpenStageId(lead.id);
                     }}
@@ -130,8 +135,8 @@ export function AgentLeadsView() {
       {openStageId !== null ? createPortal((() => {
         const lead = leads.find((item) => item.id === openStageId);
         if (!lead) return null;
-        return <div ref={stageMenuRef} className="agent-stage-menu" role="listbox" aria-label="Lead stage" style={stageMenuPosition}>
-          {STAGES.map((stage) => <button key={stage.value} type="button" role="option" aria-selected={lead.assignment_stage === stage.value} className={lead.assignment_stage === stage.value ? "active" : ""} onClick={() => void changeStage(lead, stage.value)}>{stage.label}</button>)}
+        return <div ref={stageMenuRef} className="agent-stage-menu followups-status-menu" role="listbox" aria-label="Lead status" style={stageMenuPosition}>
+          {STAGES.map((stage) => <button key={stage.value} type="button" role="option" aria-selected={lead.assignment_stage === stage.value} className={lead.assignment_stage === stage.value ? "active" : ""} onClick={() => void changeStage(lead, stage.value)}><span>{stage.label}</span>{lead.assignment_stage === stage.value ? <span aria-hidden="true">✓</span> : null}</button>)}
         </div>;
       })(), document.body) : null}
     </section>

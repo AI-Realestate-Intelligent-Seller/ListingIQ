@@ -25,6 +25,7 @@ from ..sms.outreach import build_single_lead_context
 from ..sms.followup_scheduler import schedule_initial_followup
 from ..tenancy import brokerage_user_ids
 from . import address as address_key
+from . import events as lead_events
 from . import reason_suggest
 from . import template as message_template
 from .service import derive_stage, lead_details, outreach_reason, serialize, split_signals
@@ -254,6 +255,14 @@ def attach(session: Session, user: User, campaign: Campaign, lead_ids: list[int]
                 lead = found[lead_id]
                 left_behind.append({'lead_id': lead_id, 'owner_name': lead.owner_name,
                                     'reason': 'Just claimed by another campaign.'})
+        for lead_id in claimed:
+            # The lead is locked to this campaign from here — it can't join
+            # another draft until this one is discarded (see docstring above).
+            lead_events.log_event(
+                session, lead_id, lead_events.STAGE, 'locked_to_campaign',
+                actor_type='broker', actor_id=user.id,
+                to_value=campaign.name, meta={'campaign_id': campaign.id},
+            )
     else:
         session.commit()
     return left_behind
@@ -522,6 +531,16 @@ def _send_to_lead(session: Session, user: User, campaign: Campaign, lead: Lead,
     lead.conversation_id = conversation.id
     lead.last_activity_at = datetime.utcnow()
     session.commit()
+    lead_events.log_event(
+        session, lead.id, lead_events.STAGE, 'attached_to_campaign',
+        actor_type='broker', actor_id=user.id,
+        to_value=campaign.name, meta={'campaign_id': campaign.id},
+    )
+    lead_events.log_event(
+        session, lead.id, lead_events.ACTIVITY, 'outreach_sent',
+        actor_type='broker', actor_id=user.id,
+        to_value=campaign.name, meta={'campaign_id': campaign.id, 'message_id': message.id},
+    )
     schedule_initial_followup(session, conversation)
     return {
         'lead_id': lead.id,
@@ -663,9 +682,21 @@ def overview(session: Session, user: User) -> list[dict]:
                  .filter(Campaign.user_id.in_(brokerage_user_ids(session, user)))
                  .order_by(Campaign.created_at.desc(), Campaign.id.desc())
                  .all())
-    return [_stats(campaign, member_counts.get(campaign.id, 0),
-                   delivered.get(campaign.id, 0), replied.get(campaign.id, 0))
-            for campaign in campaigns]
+    owners = {owner.id: owner for owner in session.query(User).filter(
+        User.id.in_({campaign.user_id for campaign in campaigns})).all()} if campaigns else {}
+    rows = []
+    for campaign in campaigns:
+        stats = _stats(campaign, member_counts.get(campaign.id, 0),
+                       delivered.get(campaign.id, 0), replied.get(campaign.id, 0))
+        owner = owners.get(campaign.user_id)
+        stats.update(
+            broker_id=owner.id if owner else campaign.user_id,
+            broker_name=(owner.full_name or owner.email) if owner else 'Unknown broker',
+            broker_email=owner.email if owner else None,
+            broker_role=owner.role if owner else None,
+        )
+        rows.append(stats)
+    return rows
 
 
 def suggest_reasons(session: Session, user: User, campaign: Campaign) -> dict:
@@ -677,5 +708,12 @@ def detail(session: Session, user: User, campaign: Campaign) -> dict:
     member_counts, delivered, replied = _counts_by_campaign(session, user)
     stats = _stats(campaign, member_counts.get(campaign.id, 0),
                    delivered.get(campaign.id, 0), replied.get(campaign.id, 0))
+    owner = session.query(User).filter(User.id == campaign.user_id).first()
+    stats.update(
+        broker_id=owner.id if owner else campaign.user_id,
+        broker_name=(owner.full_name or owner.email) if owner else 'Unknown broker',
+        broker_email=owner.email if owner else None,
+        broker_role=owner.role if owner else None,
+    )
     stats['preview'] = preview(session, user, campaign)
     return stats

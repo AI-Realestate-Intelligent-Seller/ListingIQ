@@ -1,7 +1,15 @@
 import type { Lead } from "@/features/leads/types/leads.types";
 
 export type AssignmentAgent = { id: number; full_name: string | null; email: string };
-export type AssignmentStage = "new" | "in_progress" | "done";
+export type AssignmentStage =
+  | "new"
+  | "processing"
+  | "want_more_info"
+  | "interested"
+  | "ready_to_sell"
+  | "not_interested"
+  | "no_response"
+  | "dnc";
 export type AssignmentLead = Lead & {
   assignee_id: number | null;
   assignment_stage: AssignmentStage;

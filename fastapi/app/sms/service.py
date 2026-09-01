@@ -15,7 +15,7 @@ import requests
 from ..core.config import settings
 from ..db import SessionLocal
 from ..logger import get_logger
-from ..models import Conversation, Message
+from ..models import Conversation, Lead, Message
 from . import bobbie, calendar_client
 from .deepseek import AiUnavailableError
 from .classifier import classify_lead_message, finalized_lead_status, is_opt_out, merge_lead_status
@@ -206,23 +206,63 @@ def update_lead_progress(session, conversation: Conversation, **values) -> None:
     session.commit()
 
 
+def _lead_id_for(session, conversation: Conversation) -> int | None:
+    lead = session.query(Lead).filter(Lead.conversation_id == conversation.id).first()
+    return lead.id if lead else None
+
+
+def _log_status_change(session, conversation: Conversation, previous_status: str, new_status: str) -> None:
+    """Records a lead_status move the AI pipeline made on its own — the
+    classifier on every inbound reply, and the disposition/closing logic.
+    Manual overrides from the Follow-ups status menu log their own event
+    where the broker/agent making the change is known.
+    """
+    if previous_status == new_status:
+        return
+    lead_id = _lead_id_for(session, conversation)
+    if not lead_id:
+        return
+    from ..leads import events as lead_events
+    lead_events.log_event(
+        session, lead_id, lead_events.STAGE, 'stage_changed',
+        actor_type='ai', from_value=previous_status, to_value=new_status,
+    )
+
+
 def hand_to_broker(session, conversation: Conversation) -> None:
     """Bobbie stops; the broker owns every further reply on this thread.
 
     Autopilot is switched off and ownership recorded, so an inbound message
     afterwards is left pending for the broker instead of waking Bobbie.
     """
+    from ..leads import events as lead_events
+    was_ai = conversation.handled_by != 'broker'
     update_lead_progress(session, conversation, ai_enabled=False, handled_by='broker',
                          next_followup_at=None)
     logger.info('[handover] conversation %s handed to the broker', conversation.id)
+    lead_id = _lead_id_for(session, conversation)
+    if lead_id and was_ai:
+        lead_events.log_event(
+            session, lead_id, lead_events.OWNERSHIP, 'handover_to_agent',
+            actor_type='ai', from_value='bobbie', to_value='broker',
+        )
 
 
 def hand_to_bobbie(session, conversation: Conversation) -> None:
     """Broker explicitly gives the thread back to Bobbie."""
+    from ..leads import events as lead_events
+    was_broker = conversation.handled_by == 'broker'
     update_lead_progress(session, conversation, ai_enabled=True, handled_by='bobbie')
     from .followup_scheduler import resume_silent_followup_cadence
     resume_silent_followup_cadence(session, conversation)
     logger.info('[handover] conversation %s handed back to Bobbie', conversation.id)
+    lead_id = _lead_id_for(session, conversation)
+    if lead_id and was_broker:
+        lead_events.log_event(
+            session, lead_id, lead_events.OWNERSHIP, 'handover_to_ai',
+            actor_type='broker', actor_id=conversation.user_id,
+            from_value='broker', to_value='bobbie',
+        )
 
 
 def mark_lead_completed(session, conversation: Conversation, **values) -> None:
@@ -238,16 +278,35 @@ def mark_lead_completed(session, conversation: Conversation, **values) -> None:
     )
 
 
+def log_first_reply(session, conversation: Conversation, message: Message) -> None:
+    """Records the lead's first-ever inbound reply on this thread. Later
+    replies are ordinary conversation, not a timeline-worthy event."""
+    lead_id = _lead_id_for(session, conversation)
+    if not lead_id:
+        return
+    prior_inbound = session.query(Message).filter(
+        Message.conversation_id == conversation.id,
+        Message.direction == 'inbound',
+        Message.id != message.id,
+    ).count()
+    if prior_inbound:
+        return
+    from ..leads import events as lead_events
+    lead_events.log_event(session, lead_id, lead_events.ACTIVITY, 'first_reply_received')
+
+
 def record_inbound_classification(session, conversation: Conversation, text: str) -> dict | None:
     classification = classify_lead_message(text)
     if not classification:
         logger.info('[lead-classifier] contact=%s status=unchanged terminal=false', conversation.contact)
         return None
+    previous_status = conversation.lead_status
     lead_status = merge_lead_status(conversation.lead_status, classification.get('lead_status'))
     updates = {'lead_status': lead_status}
     if 'dnc_alert' in classification:
         updates['dnc_alert'] = bool(classification['dnc_alert'])
     update_lead_progress(session, conversation, **updates)
+    _log_status_change(session, conversation, previous_status, lead_status)
     logger.info('[lead-classifier] contact=%s status=%s terminal=%s dnc=%s', conversation.contact,
                 lead_status, bool(classification.get('terminal')), bool(classification.get('dnc_alert')))
     return {**classification, 'lead_status': lead_status}
@@ -264,11 +323,16 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
         conversation = session.query(Conversation).filter(Conversation.id == conversation_id).first()
         if not conversation or not conversation.ai_enabled or conversation.handled_by != 'bobbie':
             return
+        # Only one branch below runs per call (each returns), so the status
+        # this conversation carried on entry is the "from" side of whichever
+        # move happens.
+        status_before = conversation.lead_status
 
         if is_opt_out(latest_inbound_text):
             reply = 'Understood — I’ll remove you from my outreach list. Take care.'
             hand_to_broker(session, conversation)
             mark_lead_completed(session, conversation, lead_status='dnc', dnc_alert=True)
+            _log_status_change(session, conversation, status_before, 'dnc')
             send_and_store_message(session, conversation, reply, 'ai.reply')
             logger.info('AI reply sent to %s', conversation.contact)
             return
@@ -293,6 +357,7 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
             send_and_store_message(session, conversation, closing_reply, 'ai.closing')
             hand_to_broker(session, conversation)
             mark_lead_completed(session, conversation, lead_status=disposition['lead_status'])
+            _log_status_change(session, conversation, status_before, disposition['lead_status'])
             logger.info('[ai-disposition] contact=%s conversation=closed intent=%s',
                         conversation.contact, disposition['intent'])
             return
@@ -301,6 +366,7 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
                             if conversation.lead_status in ('not_interested', 'no_response')
                             else merge_lead_status(conversation.lead_status, disposition['lead_status']))
         update_lead_progress(session, conversation, lead_status=continued_status, processed_at=None)
+        _log_status_change(session, conversation, status_before, continued_status)
 
         disposition_control = (
             f"Final disposition: CONTINUE. Intent: {disposition['intent']}. "
@@ -354,6 +420,15 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
                             hand_to_broker(session, conversation)
                             mark_lead_completed(session, conversation, lead_status='ready_to_sell',
                                                 meeting_booked=True)
+                            _log_status_change(session, conversation, status_before, 'ready_to_sell')
+                            lead_id = _lead_id_for(session, conversation)
+                            if lead_id:
+                                from ..leads import events as lead_events
+                                lead_events.log_event(
+                                    session, lead_id, lead_events.ACTIVITY, 'meeting_booked',
+                                    actor_type='ai',
+                                    meta={'start_at': str(booking.get('start_at'))},
+                                )
                             logger.info('Meeting booked for %s: %s', conversation.contact, booking.get('start_at'))
                             return
                         except calendar_client.SlotTakenError:

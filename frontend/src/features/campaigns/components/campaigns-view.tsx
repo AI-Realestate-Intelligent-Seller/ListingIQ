@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 
 import { useRouter } from "next/navigation";
 
@@ -66,7 +66,9 @@ export function CampaignsView({
   const [draftPage, setDraftPage] = useState(1);
 
   const router = useRouter();
-  const token = useMemo(() => readAuthSession()?.access_token ?? "", []);
+  const session = useMemo(() => readAuthSession(), []);
+  const token = session?.access_token ?? "";
+  const isHob = session?.user.role === "hob";
 
   const handleApiError = useCallback(
     (error: unknown, fallback: string) => {
@@ -167,8 +169,10 @@ export function CampaignsView({
     );
   }
 
-  const drafts = campaigns.filter((item) => item.status === "draft").sort(newestFirst);
-  const sent = campaigns.filter((item) => item.status === "sent").sort(newestFirst);
+  const brokerFirst = (a: Campaign, b: Campaign): number =>
+    (a.broker_name || "").localeCompare(b.broker_name || "") || newestFirst(a, b);
+  const drafts = campaigns.filter((item) => item.status === "draft").sort(isHob ? brokerFirst : newestFirst);
+  const sent = campaigns.filter((item) => item.status === "sent").sort(isHob ? brokerFirst : newestFirst);
   const sentPages = Math.max(1, Math.ceil(sent.length / CAMPAIGNS_PER_PAGE));
   const draftPages = Math.max(1, Math.ceil(drafts.length / CAMPAIGNS_PER_PAGE));
   const currentSentPage = Math.min(sentPage, sentPages);
@@ -203,7 +207,14 @@ export function CampaignsView({
       <div className="campaigns-scroll-area">
       {sent.length > 0 ? (
         <div className="campaigns-card-grid">
-          {visibleSent.map((campaign) => (
+          {visibleSent.map((campaign, index) => (
+            <Fragment key={campaign.id}>
+            {isHob && (index === 0 || visibleSent[index - 1]?.broker_id !== campaign.broker_id) ? (
+              <div className="campaigns-broker-heading">
+                <span>{campaign.broker_role === "hob" ? "HEAD OF BROKERAGE" : "AREA BROKER"}</span>
+                <strong>{campaign.broker_name || campaign.broker_email || "Unknown broker"}</strong>
+              </div>
+            ) : null}
             <article className="campaigns-card" key={campaign.id}>
               <button
                 type="button"
@@ -250,6 +261,7 @@ export function CampaignsView({
                 View replies
               </button>
             </article>
+            </Fragment>
           ))}
         </div>
       ) : null}
@@ -278,7 +290,14 @@ export function CampaignsView({
         <div className="campaigns-drafts">
           <h3>Drafts</h3>
           <div className="campaigns-card-grid">
-            {visibleDrafts.map((campaign) => (
+            {visibleDrafts.map((campaign, index) => (
+              <Fragment key={campaign.id}>
+              {isHob && (index === 0 || visibleDrafts[index - 1]?.broker_id !== campaign.broker_id) ? (
+                <div className="campaigns-broker-heading">
+                  <span>{campaign.broker_role === "hob" ? "HEAD OF BROKERAGE" : "AREA BROKER"}</span>
+                  <strong>{campaign.broker_name || campaign.broker_email || "Unknown broker"}</strong>
+                </div>
+              ) : null}
               <article className="campaigns-card campaigns-draft-card" key={campaign.id}>
                 <button
                   type="button"
@@ -308,6 +327,7 @@ export function CampaignsView({
                   Finish writing →
                 </button>
               </article>
+              </Fragment>
             ))}
           </div>
         </div>

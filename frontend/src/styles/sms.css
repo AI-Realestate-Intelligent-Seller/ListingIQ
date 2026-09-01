@@ -114,6 +114,16 @@
   border-color: rgba(31, 92, 77, .45);
   box-shadow: 0 0 0 1px rgba(255, 255, 255, .5), 0 0 10px rgba(87, 182, 156, .12);
 }
+/* Human agent replying (no .on): a plain, dull pill — no moving border or
+   background shimmer, that belongs to Bobbie actively working below. */
+.sms-pill-moving-border:not(.on) {
+  border-color: var(--line);
+  box-shadow: none;
+}
+.sms-pill-moving-border:not(.on)::before,
+.sms-pill-moving-border:not(.on)::after {
+  content: none;
+}
 .sms-inline-ai-pill {
   display: inline-flex; align-items: center; gap: 5px;
   margin: 0 2px; padding: 3px 9px;
@@ -154,9 +164,9 @@
   filter: drop-shadow(0 0 3px rgba(117, 246, 207, .95));
   animation: sms-pill-border-light 6s linear infinite;
 }
-/* Human-takeover pill: the travelling light is a full RGB spectrum. Bobbie's
-   green `.on` state keeps its existing AI accent. */
-.sms-pill-moving-border:not(.on)::before {
+/* RGB identifies Bobbie actively driving the conversation. The human-owned
+   hand-back pill keeps the standard white/green moving accent above. */
+.sms-pill-moving-border.on::before {
   background: linear-gradient(
     110deg,
     transparent 20%,
@@ -166,8 +176,9 @@
     transparent 72%
   );
   background-size: 280% 100%;
+  animation-duration: 3s;
 }
-.sms-pill-moving-border:not(.on)::after {
+.sms-pill-moving-border.on::after {
   background: conic-gradient(
     from var(--sms-pill-light-angle),
     transparent 0deg 250deg,
@@ -179,6 +190,7 @@
     transparent 360deg
   );
   filter: drop-shadow(0 0 4px rgba(0, 122, 255, .65));
+  animation-duration: 3s;
 }
 @keyframes sms-pill-border-light {
   to { --sms-pill-light-angle: 360deg; }

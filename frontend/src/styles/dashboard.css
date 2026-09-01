@@ -269,6 +269,8 @@
 .agent-leads-view .leads-table.agent-leads-table th,
 .agent-leads-view .leads-table.agent-leads-table td { display: table-cell; }
 .agent-campaign-group { margin-bottom: 24px; }
+.broker-assignment-campaign { margin-bottom: 24px; }
+.broker-assignments-empty { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
 .agent-campaign-heading { margin-bottom: 10px; display: flex; align-items: end; justify-content: space-between; gap: 16px; }
 .agent-campaign-heading span { color: var(--blue); font-size: 9px; font-weight: 700; letter-spacing: .15em; }
 .agent-campaign-heading h2 { margin: 5px 0 0; font-size: 18px; }
@@ -281,9 +283,16 @@
 .agent-stage-menu button:hover,
 .agent-stage-menu button:focus-visible { outline: none; background: var(--surface-2); }
 .agent-stage-menu button.active { background: var(--accent-soft); color: var(--blue-dark); font-weight: 700; }
+.agent-stage-menu.followups-status-menu { position: fixed; width: 190px; top: auto; right: auto; bottom: auto; }
+.agent-stage-menu.followups-status-menu button { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .agent-stage-select.stage-new { color: #77531f; background: #f4ead9; }
-.agent-stage-select.stage-in_progress { color: var(--blue-dark); background: var(--accent-soft); }
-.agent-stage-select.stage-done { color: #46504b; background: var(--surface-2); }
+.agent-stage-select.stage-processing,
+.agent-stage-select.stage-want_more_info,
+.agent-stage-select.stage-interested { color: var(--blue-dark); background: var(--accent-soft); }
+.agent-stage-select.stage-ready_to_sell { color: #176b4d; background: #e3f1e7; }
+.agent-stage-select.stage-not_interested,
+.agent-stage-select.stage-no_response,
+.agent-stage-select.stage-dnc { color: #46504b; background: var(--surface-2); }
 .agent-leads-empty { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
 .assignments-table td > strong { display: block; }
 .assignment-assignee-trigger { width: 100%; min-width: 165px; padding: 9px 10px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--line); border-radius: 7px; background: #fff; color: var(--ink); font: inherit; text-align: left; cursor: pointer; }

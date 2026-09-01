@@ -428,20 +428,6 @@ export function DashboardView() {
             </svg>
             <span>Overview</span>
           </button>
-          {user.role === "broker" ? (
-            <button
-              type="button"
-              role="tab"
-              aria-selected={view === "assignments"}
-              className={view === "assignments" ? "active" : undefined}
-              onClick={() => openTab("assignments")}
-            >
-              <svg className="dashboard-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
-                <path d="M3 5.5h9M3 10h7M3 14.5h5M13 12l2 2 3-4" />
-              </svg>
-              <span>Assignments</span>
-            </button>
-          ) : null}
           <button
             type="button"
             role="tab"
@@ -467,6 +453,20 @@ export function DashboardView() {
             </svg>
             <span>Campaigns</span>
           </button> : null}
+          {user.role === "broker" ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === "assignments"}
+              className={view === "assignments" ? "active" : undefined}
+              onClick={() => openTab("assignments")}
+            >
+              <svg className="dashboard-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
+                <path d="M3 5.5h9M3 10h7M3 14.5h5M13 12l2 2 3-4" />
+              </svg>
+              <span>Assignments</span>
+            </button>
+          ) : null}
           <button
             type="button"
             role="tab"

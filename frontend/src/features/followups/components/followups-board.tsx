@@ -21,6 +21,7 @@ import type { LeadStatus, NewConversationPayload, SmsMessage } from "@/features/
 import { NewConversationDialog } from "@/features/sms/components/new-conversation-dialog";
 import { ApiRequestError } from "@/lib/api/http-client";
 import { LeadDetailDrawer } from "@/features/leads/components/lead-detail-drawer";
+import { LeadTimeline } from "@/features/leads/components/lead-timeline";
 
 import { bookAppointment, listFollowUps, setFollowUpStatus } from "../api/followups-api";
 import type { AppointmentPayload, FollowUp, FollowUpState } from "../types/followups.types";
@@ -111,6 +112,10 @@ export function FollowUpsBoard({
   /** The lead behind the open thread, shown in the same panel as the Lead Pool. */
   const [detailId, setDetailId] = useState<number | null>(null);
   const [isPropertiesOpen, setIsPropertiesOpen] = useState(false);
+  /** Bumped whenever something in this tab might have added a history event —
+      an action here, or the poll picking up one from elsewhere — so the
+      history panel re-fetches without needing the lead to change. */
+  const [historyTick, setHistoryTick] = useState(0);
   const viewer = session?.user ?? null;
   const isAgent = viewer?.role === "agent";
   const followUpScope = isAgent ? "replied" : scope;
@@ -178,6 +183,9 @@ export function FollowUpsBoard({
     const timer = window.setInterval(() => {
       void refreshFollowUps();
       if (activeId !== null) void refreshMessages(activeId);
+      // Bobbie can hand a thread back on her own (e.g. a meeting just booked),
+      // so the history panel needs the same poll, not just the manual pills.
+      setHistoryTick((tick) => tick + 1);
     }, POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [activeId, refreshFollowUps, refreshMessages]);
@@ -282,6 +290,7 @@ export function FollowUpsBoard({
       const updated = await work();
       setFollowUps((rows) => rows.map((row) => (row.id === updated.id ? updated : row)));
       setNotice(success);
+      setHistoryTick((tick) => tick + 1);
       if (activeId !== null) await refreshMessages(activeId);
     } catch (error) {
       handleApiError(error, "Could not update this follow-up.");
@@ -717,6 +726,15 @@ export function FollowUpsBoard({
             </div>
           )}
         </div>
+
+        <aside className="followups-history-panel">
+          <LeadTimeline
+            leadId={active?.lead_id ?? null}
+            accessToken={token}
+            title={active ? "Lead history" : "History"}
+            refreshToken={historyTick}
+          />
+        </aside>
       </div>
 
       {errorMessage ? <p className="sms-toast error" role="alert">{errorMessage}</p> : null}

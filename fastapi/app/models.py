@@ -167,6 +167,10 @@ class Lead(Base):
     # Property attributes from the import (JSON text): beds, baths, price, …
     details = Column(Text, nullable=True)
     score = Column(Integer, nullable=False, default=0)
+    # Where this lead came from: 'csv_import' today; a future provider
+    # integration (BatchData, PropertyRadar, DealMachine, ...) sets its own
+    # value here rather than this being a fixed enum.
+    source = Column(String(50), nullable=False, default='csv_import')
     # Set once the owner opts out anywhere; the lead can never be campaigned again.
     dnc = Column(Boolean, nullable=False, default=False)
     conversation_id = Column(Integer, ForeignKey('conversations.id'), nullable=True, index=True)
@@ -186,6 +190,39 @@ class Lead(Base):
     user = relationship('User', foreign_keys=[user_id])
     conversation = relationship('Conversation')
     assigned_agent = relationship('User', foreign_keys=[assigned_agent_id])
+
+
+class LeadEvent(Base):
+    """One entry in a lead's history: a stage move, an assignment change, an
+    AI/agent ownership handoff, or a notable activity (e.g. a meeting booked).
+
+    Everything the timeline shows is a row here — there is no separate stage
+    history table, so a lead visiting "assigned" twice (revoke, reassign)
+    just adds two rows rather than overwriting one.
+    """
+    __tablename__ = 'lead_events'
+    id = Column(Integer, primary_key=True, index=True)
+    lead_id = Column(Integer, ForeignKey('leads.id'), nullable=False, index=True)
+    # 'stage' | 'assignment' | 'ownership' | 'activity' — lets the UI pick an
+    # icon/lane without parsing event_type.
+    event_category = Column(String(20), nullable=False)
+    # e.g. 'attached_to_campaign', 'assigned', 'revoked', 'reassigned',
+    # 'stage_changed', 'handover_to_ai', 'handover_to_agent', 'meeting_booked'.
+    event_type = Column(String(50), nullable=False)
+    # Who caused it: 'system' | 'broker' | 'hob' | 'agent' | 'ai'.
+    actor_type = Column(String(20), nullable=False, default='system')
+    actor_id = Column(Integer, ForeignKey('users.id'), nullable=True)
+    # For assignment/reassignment: who the lead went to.
+    target_id = Column(Integer, ForeignKey('users.id'), nullable=True)
+    from_value = Column(String(100), nullable=True)
+    to_value = Column(String(100), nullable=True)
+    reason = Column(Text, nullable=True)
+    # Free-form JSON text for anything else worth keeping (e.g. campaign name).
+    meta = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    lead = relationship('Lead')
+    actor = relationship('User', foreign_keys=[actor_id])
+    target = relationship('User', foreign_keys=[target_id])
 
 
 class AiRun(Base):

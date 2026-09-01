@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from ..leads import campaign as campaign_service
 from ..leads import catalog
+from ..leads import events as lead_events
 from ..leads import service as leads_service
 from ..leads import uploads
 from ..leads.importer import MAPPABLE_FIELDS
@@ -242,6 +243,21 @@ def lead_detail(lead_id: int, current_user: User = Depends(get_current_user),
     if not lead:
         raise HTTPException(status_code=404, detail='Lead not found')
     return leads_service.detail(session, lead)
+
+
+@router.get('/{lead_id}/history')
+def lead_history(lead_id: int, current_user: User = Depends(get_current_user),
+                 session: Session = Depends(get_db)):
+    """The lead's full timeline: intake, campaign attach, assignment moves,
+    AI/agent ownership handoffs, and notable activity — oldest first."""
+    _require_access(current_user)
+    lead = (session.query(Lead)
+            .filter(Lead.id == lead_id,
+                    Lead.user_id.in_(brokerage_user_ids(session, current_user)))
+            .first())
+    if not lead:
+        raise HTTPException(status_code=404, detail='Lead not found')
+    return {'events': lead_events.history_for(session, lead)}
 
 
 @router.post('/delete')

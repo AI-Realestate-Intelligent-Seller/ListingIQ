@@ -46,6 +46,10 @@
 
 /* -- campaign cards -------------------------------------------------------- */
 .campaigns-card-grid { display: flex; flex-direction: column; gap: 10px; }
+.campaigns-broker-heading { margin-top: 12px; padding: 8px 2px 2px; display: flex; align-items: center; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--line); }
+.campaigns-broker-heading:first-child { margin-top: 0; }
+.campaigns-broker-heading span { color: var(--blue); font-size: 9px; font-weight: 800; letter-spacing: .14em; }
+.campaigns-broker-heading strong { color: var(--ink); font-size: 13px; }
 .campaigns-card {
   display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
   gap: 16px; padding: 16px 18px;

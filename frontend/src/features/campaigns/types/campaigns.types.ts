@@ -21,6 +21,10 @@ export type Campaign = {
   no_reply: number;
   /** Members the send could not reach — no phone, on the DNC list, already texted. */
   not_sent: number;
+  broker_id: number | null;
+  broker_name: string | null;
+  broker_email: string | null;
+  broker_role: string | null;
 };
 
 /** One recipient of a draft, with the message they would actually receive. */
