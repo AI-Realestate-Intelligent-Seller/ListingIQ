@@ -1,36 +1,22 @@
-import { CapabilitiesSection } from "./sections/capabilities-section";
 import { FinalCtaSection } from "./sections/final-cta-section";
 import { HeroSection } from "./sections/hero-section";
-import { HumanHandoffSection } from "./sections/human-handoff-section";
-import { RolesSection } from "./sections/roles-section";
-import { SecuritySection } from "./sections/security-section";
-import { SignalsSection } from "./sections/signals-section";
-import { WorkflowSection } from "./sections/workflow-section";
+import { ProductFeature } from "./sections/product-feature";
+import { TeamSection } from "./sections/team-section";
+import { WhyUsSection } from "./sections/why-us-section";
 import { SiteFooter } from "./site-footer";
 import { SiteHeader } from "./site-header";
+import { VoiceSection } from "./sections/voice-section";
+
 
 export function LandingPage() {
   return (
     <main>
       <SiteHeader />
       <HeroSection />
-
-      <section className="credibility" aria-label="Product strengths">
-        <span>Unified seller intelligence</span>
-        <i />
-        <span>Voice · SMS · Email</span>
-        <i />
-        <span>Role-based workflows</span>
-        <i />
-        <span>CRM-ready</span>
-      </section>
-
-      <CapabilitiesSection />
-      <WorkflowSection />
-      <SignalsSection />
-      <HumanHandoffSection />
-      <RolesSection />
-      <SecuritySection />
+      <ProductFeature />
+      <TeamSection />
+      <VoiceSection />
+      <WhyUsSection />
       <FinalCtaSection />
       <SiteFooter />
     </main>

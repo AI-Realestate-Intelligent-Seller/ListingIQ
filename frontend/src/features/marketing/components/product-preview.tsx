@@ -1,7 +1,4 @@
-import {
-  PREVIEW_LEADS,
-  PREVIEW_METRICS,
-} from "../data/landing-page-data";
+import { PREVIEW_LEADS, PREVIEW_METRICS } from "../data/landing-page-data";
 
 export function ProductPreview() {
   return (
@@ -66,6 +63,7 @@ export function ProductPreview() {
         </div>
       </div>
 
+      {/* Single animated notification — the one orchestrated moment */}
       <div className="float-card float-card-one">
         <div className="float-icon">✓</div>
         <div>
@@ -78,7 +76,7 @@ export function ProductPreview() {
         <span className="wave-dot" />
         <div>
           <strong>Seller replied</strong>
-          <span>“Yes, I’d consider an offer.”</span>
+          <span>&ldquo;Yes, I&apos;d consider an offer.&rdquo;</span>
         </div>
       </div>
 

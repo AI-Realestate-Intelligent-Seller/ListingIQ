@@ -1,376 +1,153 @@
-/* Responsive behavior shared by marketing and authentication routes. */
+/* Responsive behavior for marketing and authentication routes. */
 
-@media (max-width: 1120px) {
-  .hero {
+/* ── 900px and below ─────────────────────────────────────── */
+@media (max-width: 900px) {
+
+  /* ── Nav ── */
+  .lp-nav-links     { display: none; }
+  .lp-nav-actions   { display: none; }
+  .lp-nav-hamburger { display: flex; }
+
+  /* ── Hero ── */
+  .hero-full h1 { font-size: clamp(32px, 8vw, 52px); }
+  .hero-sub     { font-size: 15px; }
+  .hero-actions { flex-direction: column; align-items: center; gap: 14px; }
+  .hero-center  { padding-left: 20px; padding-right: 20px; }
+
+  /* ── Ecosystem ── */
+  .lp-ecosystem .lp-features-inner {
     grid-template-columns: 1fr;
-    padding-top: 140px;
-    text-align: center;
+    gap: 40px;
   }
-  .hero-copy {
-    margin: 0 auto;
+  .lp-ecosystem-copy     { text-align: center; }
+  .lp-ecosystem-copy > p { max-width: 100%; }
+
+  /* ── Team / Voice: stack to single column, hide SVG panels ── */
+  .lp-team-inner  { grid-template-columns: 1fr; min-height: auto; }
+  .lp-team-visual { display: none; }
+  .lp-team-copy {
+    padding: 48px 28px;
+    overflow: visible;
   }
-  .eyebrow, .hero-actions, .hero-proof {
-    justify-content: center;
+  .lp-team-copy h2     { font-size: clamp(22px, 5vw, 32px); }
+  .lp-team-copy > p    { max-width: 100%; font-size: 14px; }
+  .lp-role-pill        { padding: 14px 16px; }
+  .lp-role-pill strong { font-size: 13px; }
+  .lp-role-pill span   { font-size: 12.5px; }
+  .lp-team-cta         { align-self: stretch; }
+  .lp-team-cta.lp-btn  { width: 100%; justify-content: center; }
+
+  /* ── Why ── */
+  .lp-why-inner   { grid-template-columns: 1fr; gap: 48px; }
+  .lp-why-copy h2 { margin-bottom: 28px; }
+
+  /* ── Footer ── */
+  .lp-footer-top   { flex-direction: column; gap: 40px; }
+  .lp-footer-brand { max-width: 100%; }
+  .lp-footer-cols  {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 24px 32px;
   }
-  .product-stage {
-    width: min(800px,100%);
-    margin: 0 auto;
-  }
-  .intro-heading {
-    grid-template-columns: 1fr;
-    gap: 25px;
-  }
-  .capability-card {
-    min-height: 480px;
-  }
-  .capability-art {
-    height: 190px;
-  }
-  .workflow {
-    grid-template-columns: .85fr 1.15fr;
-  }
-  .workflow-content {
-    padding-left: 8%;
-  }
-  .signals {
-    gap: 30px;
-  }
-  .security {
-    gap: 55px;
-  }
+  .lp-footer-col { min-width: 0; }
 }
 
+/* ── 820px and below ─────────────────────────────────────── */
 @media (max-width: 820px) {
-  .site-header {
-    height: 66px;
-  }
-  .nav-wrap {
-    width: calc(100% - 34px);
-  }
-  .desktop-nav, .nav-actions {
-    display:none;
-  }
-  .mobile-nav {
-    display:block;
-    position:relative;
-  }
-  .mobile-nav summary {
-    width:38px;
-    height:38px;
-    display:grid;
-    place-content:center;
-    gap:6px;
-    cursor:pointer;
-    list-style:none;
-  }
-  .mobile-nav summary::-webkit-details-marker {
-    display:none;
-  }
-  .mobile-nav summary span {
-    width:21px;
-    height:1.5px;
-    background:var(--ink);
-    display:block;
-  }
-  .mobile-nav-panel {
-    position:absolute;
-    right:0;
-    top:46px;
-    width:245px;
-    padding:17px;
-    display:grid;
-    gap:5px;
-    border:1px solid #dfe3e8;
-    border-radius:10px;
-    background:#fff;
-    box-shadow:0 20px 50px rgba(12,25,45,.14);
-  }
-  .mobile-nav-panel a {
-    padding:11px;
-    font-size:13px;
-  }
-  .mobile-nav-panel .button {
-    margin-top:5px;
-  }
-  .hero {
-    min-height:auto;
-    padding:120px 20px 65px;
-    gap:30px;
-  }
-  .hero h1 {
-    font-size:51px;
-  }
-  .hero-copy > p {
-    font-size:15px;
-  }
-  .hero-actions {
-    flex-direction:column;
-    gap:17px;
-  }
-  .hero-proof {
-    margin-top:32px;
-  }
+
+  /* ── Product preview mockup ── */
   .product-stage {
-    min-height:420px;
-    transform:scale(.92);
+    min-height: 420px;
+    transform: scale(.92);
   }
   .dashboard-card {
-    height:360px;
-    grid-template-columns:40px 1fr;
+    height: 360px;
+    grid-template-columns: 40px 1fr;
   }
-  .dash-main {
-    padding:18px;
-  }
-  .metric-row > div {
-    min-height:70px;
-  }
-  .lead-row {
-    grid-template-columns:30px 1fr 60px 14px;
-  }
-  .lead-row .status {
-    display:none;
-  }
-  .float-card-three {
-    display:none;
-  }
-  .float-card-one {
-    top:0;
-    right:-5px;
-  }
-  .float-card-two {
-    left:-3px;
-    bottom:0;
-  }
-  .credibility {
-    padding:24px 20px;
-    display:grid;
-    grid-template-columns:1fr 1fr;
-    gap:22px;
-    font-size:8px;
-  }
-  .credibility i {
-    display:none;
-  }
-  .section {
-    padding:90px 22px;
-  }
-  .section h2 {
-    font-size:44px;
-  }
-  .capability-grid {
-    grid-template-columns:1fr;
-    margin-top:48px;
-  }
-  .capability-card {
-    min-height:480px;
-  }
-  .capability-art {
-    height:220px;
-  }
-  .workflow {
-    padding:0;
-    grid-template-columns:1fr;
-  }
-  .workflow-visual {
-    min-height:540px;
-    margin:0;
-  }
-  .workflow-content {
-    padding:85px 22px;
-  }
-  .signals {
-    grid-template-columns:1fr;
-  }
-  .signal-cloud {
-    margin-top:20px;
-    height:480px;
-    transform:scale(.9);
-  }
-  .human-section {
-    grid-template-columns:1fr;
-    gap:55px;
-  }
-  .human-photo {
-    height:500px;
-  }
-  .roles-head {
-    display:block;
-  }
-  .role-grid {
-    grid-template-columns:1fr;
-  }
-  .role-card {
-    min-height:530px;
-    padding:32px;
-  }
-  .role-card h3 {
-    margin-top:155px;
-    font-size:38px;
-  }
-  .security {
-    grid-template-columns:1fr;
-    gap:60px;
-  }
-  .security-image {
-    height:520px;
-  }
-  .security-copy {
-    order:-1;
-  }
-  .final-cta {
-    min-height:540px;
-  }
-  .cta-content > div {
-    flex-direction:column;
-    gap:20px;
-  }
-  .footer-main {
-    grid-template-columns:1fr;
-  }
-  .footer-links {
-    grid-template-columns:repeat(3,1fr);
-  }
-  .footer-bottom {
-    gap:20px;
-  }
-  .auth-page {
-    display:block;
-  }
-  .auth-visual {
-    display:none;
-  }
-  .auth-panel {
-    padding:26px 22px;
-  }
-  .auth-mobile-brand {
-    display:block;
-  }
-  .back-home {
-    display:none;
-  }
-  .auth-form-wrap {
-    padding:65px 0 40px;
-  }
-  .auth-footer {
-    margin-top:auto;
-  }
+  .dash-main   { padding: 18px; }
+  .metric-row > div { min-height: 70px; }
+  .lead-row    { grid-template-columns: 30px 1fr 60px 14px; }
+  .lead-row .status  { display: none; }
+  .float-card-three  { display: none; }
+  .float-card-one    { top: 0; right: -5px; }
+  .float-card-two    { left: -3px; bottom: 0; }
+
+  /* ── Auth ── */
+  .auth-page         { display: block; }
+  .auth-visual       { display: none; }
+  .auth-panel        { padding: 26px 22px; }
+  .auth-mobile-brand { display: block; }
+  .back-home         { display: none; }
+  .auth-form-wrap    { padding: 65px 0 40px; }
+  .auth-footer       { margin-top: auto; }
 }
 
+/* ── 600px and below ─────────────────────────────────────── */
+@media (max-width: 600px) {
+
+  /* ── Hero ── */
+  .hero-full h1 { font-size: 30px; letter-spacing: -.03em; }
+  .hero-sub     { font-size: 14.5px; }
+  .hero-center  { padding: 96px 20px 40px; }
+  .hero-dots    { bottom: 20px; }
+
+  /* ── Section padding ── */
+  .lp-features { padding: 64px 20px; }
+  .lp-why      { padding: 64px 20px; }
+  .lp-cta      { padding: 72px 20px; }
+  .lp-footer   { padding: 56px 20px 24px; }
+
+  /* ── Team ── */
+  .lp-team-copy { padding: 36px 20px 40px; }
+
+  /* ── Footer: 2-column grid ── */
+  .lp-footer-cols {
+    grid-template-columns: 1fr 1fr;
+    gap: 28px 20px;
+  }
+  .lp-footer-bottom {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+  /* ── CTA ── */
+  .lp-cta-btns { flex-direction: column; align-items: center; }
+
+  /* ── Why ── */
+  .lp-why-item p { max-width: 100%; }
+}
+
+/* ── 520px and below ─────────────────────────────────────── */
 @media (max-width: 520px) {
-  .hero h1 {
-    font-size:42px;
-  }
-  .hero-copy > p br {
-    display:none;
-  }
+
+  /* ── Product preview mockup ── */
   .product-stage {
-    width:120%;
-    margin-left:-10%;
-    transform:scale(.82);
-    min-height:365px;
+    width: 120%;
+    margin-left: -10%;
+    transform: scale(.82);
+    min-height: 365px;
   }
-  .float-card {
-    min-width:160px;
-  }
-  .float-card-one {
-    right:10px;
-  }
-  .float-card-two {
-    left:4px;
-  }
-  .section h2 {
-    font-size:38px;
-  }
-  .capability-card {
-    padding:22px;
-  }
-  .signal-cloud {
-    width:112%;
-    margin-left:-6%;
-    transform:scale(.82);
-  }
-  .orbit-two {
-    width:440px;
-    height:440px;
-  }
-  .chip-3 {
-    right:2%;
-  }
-  .workflow-visual {
-    min-height:450px;
-  }
-  .workflow-overlay {
-    left:20px;
-    right:20px;
-    bottom:20px;
-  }
-  .human-photo, .security-image {
-    height:420px;
-  }
-  .photo-note {
-    left:16px;
-    right:16px;
-    bottom:16px;
-    width:auto;
-  }
-  .role-card {
-    min-height:545px;
-    padding:27px;
-  }
-  .role-mini-ui {
-    width:235px;
-  }
-  .role-card h3 {
-    font-size:34px;
-  }
-  .security-list > div {
-    grid-template-columns:33px 1fr;
-    gap:5px;
-  }
-  .security-list p {
-    grid-column:2;
-  }
-  .footer-links {
-    grid-template-columns:1fr 1fr;
-    row-gap:40px;
-  }
-  .footer-bottom {
-    flex-direction:column;
-  }
-  .final-cta::before {
-    width:650px;
-    height:650px;
-  }
-  .field-row {
-    grid-template-columns:1fr;
-  }
-  .invite-summary {
-    grid-template-columns:1fr;
-  }
-  .auth-form-wrap {
-    padding-top:52px;
-  }
-  .auth-form-wrap > h1 {
-    font-size:38px;
-  }
-  .register-note {
-    flex-wrap:wrap;
-  }
-  .simple-auth-page {
-    padding:24px;
-  }
-  .simple-auth-card {
-    padding:28px;
-  }
+  .float-card     { min-width: 160px; }
+  .float-card-one { right: 10px; }
+  .float-card-two { left: 4px; }
+
+  /* ── Auth ── */
+  .field-row        { grid-template-columns: 1fr; }
+  .invite-summary   { grid-template-columns: 1fr; }
+  .auth-form-wrap   { padding-top: 52px; }
+  .auth-form-wrap > h1 { font-size: 38px; }
+  .register-note    { flex-wrap: wrap; }
+  .simple-auth-page { padding: 24px; }
+  .simple-auth-card { padding: 28px; }
 }
 
+/* ── Reduced motion ──────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
-  html {
-    scroll-behavior: auto;
-  }
+  html { scroll-behavior: auto; }
   *, *::before, *::after {
-    animation-duration: .01ms!important;
-    animation-iteration-count: 1!important;
-    transition-duration: .01ms!important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
   }
 }

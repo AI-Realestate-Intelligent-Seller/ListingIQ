@@ -1,55 +1,107 @@
+"use client";
+
+import Image from "next/image";
 import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
 
 import { ArrowIcon } from "@/components/icons/arrow-icon";
+ import { SLIDES } from "../../data/landing-page-data";
 
-import { ProductPreview } from "../product-preview";
+const INTERVAL = 5000;
 
 export function HeroSection() {
-  return (
-    <section className="hero" id="product">
-      <div className="hero-orb hero-orb-one" />
-      <div className="hero-orb hero-orb-two" />
+  const [current, setCurrent] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-      <div className="hero-copy">
-        <div className="eyebrow">
-          <span /> AI seller intelligence for modern brokerages
-        </div>
+  const startTimer = () => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = setInterval(() => {
+      setCurrent((prev) => (prev + 1) % SLIDES.length);
+    }, INTERVAL);
+  };
+
+  useEffect(() => {
+    startTimer();
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const goTo = (index: number) => {
+    setCurrent(index);
+    startTimer(); // reset timer on manual click
+  };
+
+  return (
+    <section className="hero-full" id="product">
+
+      {/* Background image stack — each image fades in/out via opacity */}
+      <div className="hero-bg" aria-hidden="true">
+        {SLIDES.map((slide, i) => (
+          <div
+            key={slide.src}
+            className={`hero-bg-slide${i === current ? " is-active" : ""}`}
+          >
+            <Image
+              src={slide.src}
+              alt={slide.alt}
+              fill
+              priority={i === 0}
+              sizes="100vw"
+              style={{ objectFit: "cover", objectPosition: "center" }}
+            />
+          </div>
+        ))}
+        <div className="hero-bg-overlay" />
+      </div>
+
+      {/* Centered text */}
+      <div className="hero-center">
+        <p className="hero-eyebrow">Listing intelligence · US brokerages</p>
+
         <h1>
-          Know who may sell.
+          Not just leads
           <br />
-          <em>Know what to do next.</em>
+          <span className="hero-accent">Leads that are ready to close.</span>
         </h1>
-        <p>
-          ListingIQ turns fragmented seller signals into prioritized
-          opportunities, natural conversations, and clear agent action—all in
-          one simple platform.
+
+        <p className="hero-sub">
+          Import your leads. Score every contact by property signals.
+          Let AI open the conversation. Hand warm replies to your agents.
         </p>
 
         <div className="hero-actions">
-          <Link className="button button-large" href="/register">
-            Create your account
+          <Link className="button button-large hero-btn-primary" href="/register">
+            Create an account
             <ArrowIcon />
           </Link>
-          <a className="text-link" href="#workflow">
-            <span className="play-icon">▶</span> See how it works
-          </a>
-        </div>
-
-        <div className="hero-proof">
-          <div className="proof-avatars">
-            <span>BF</span>
-            <span>MK</span>
-            <span>+700</span>
-          </div>
-          <p>
-            Built around the real workflows of
-            <br />
-            brokerages, teams, and agents.
-          </p>
+          <button
+            className="hero-btn-ghost"
+            onClick={() =>
+              document
+                .getElementById("why-listingiq")
+                ?.scrollIntoView({ behavior: "smooth", block: "start" })
+            }
+          >
+            Why us?
+          </button>
         </div>
       </div>
 
-      <ProductPreview />
+      {/* Dot indicators */}
+      <div className="hero-dots" aria-label="Slide navigation">
+        {SLIDES.map((_, i) => (
+          <button
+            key={i}
+            type="button"
+            className={`hero-dot${i === current ? " hero-dot-active" : ""}`}
+            onClick={() => goTo(i)}
+            aria-label={`Slide ${i + 1}`}
+          />
+        ))}
+      </div>
+
     </section>
   );
 }
