@@ -28,6 +28,7 @@ from . import address as address_key
 from . import events as lead_events
 from . import reason_suggest
 from . import template as message_template
+from .importer import normalize_phone
 from .service import derive_stage, lead_details, outreach_reason, serialize, split_signals
 
 MAX_CAMPAIGN_SIZE = 200
@@ -45,21 +46,23 @@ CLAIMED_HERE = 'This property already has a conversation in the SMS tab.'
 
 
 class Claims:
-    """Which of a set of properties are already spoken for, and by whom.
+    """Which property/contact pairs are already spoken for, and by whom.
 
     `ours` are properties this brokerage has already texted about — visible to
     the broker in the SMS tab. `theirs` are properties another brokerage got to
     first, reported without naming anyone.
     """
 
-    def __init__(self, ours: set[str], theirs: set[str]):
+    def __init__(self, ours: set[tuple[str, str]], theirs: set[tuple[str, str]]):
         self.ours = ours
         self.theirs = theirs
 
     def reason_for(self, lead: Lead) -> str | None:
-        key = address_key.canonical(lead.property_address)
-        if not key:
+        property_key = address_key.canonical(lead.property_address)
+        phone_key = normalize_phone(lead.phone or '')
+        if not property_key or not phone_key:
             return None
+        key = (property_key, phone_key)
         if key in self.theirs:
             return CLAIMED_ELSEWHERE
         if key in self.ours:
@@ -83,13 +86,14 @@ def _blocking_reason(lead: Lead, claims: Claims = NO_CLAIMS) -> str | None:
 
 
 def claims_on(session: Session, scope: list[int], leads: list[Lead]) -> Claims:
-    """Which of these properties have already been campaigned, by us or others.
+    """Which property/contact pairs were already campaigned, by us or others.
 
-    The claim is on the property, not on the owner: a landlord with six houses
-    can be worked by six brokerages, one each, but no two brokerages text the
-    same owner about the same house. The first brokerage to actually send owns
-    it — an unsent draft reserves nothing, and a thread started by hand from
-    the SMS tab is not a campaign claim either.
+    A property can legitimately have multiple owners or contacts. Therefore an
+    address already contacted at one phone number does not block a different
+    phone number at that address. Only the same normalized property-and-phone
+    pair is claimed. The first brokerage to actually send owns that pair — an
+    unsent draft reserves nothing, and a thread started by hand from the SMS
+    tab is not a campaign claim either.
 
     The claim is read from the outreach messages rather than from the threads.
     A thread's own property_key is only its latest property, so an owner texted
@@ -98,24 +102,33 @@ def claims_on(session: Session, scope: list[int], leads: list[Lead]) -> Claims:
     Messages are history and never move.
 
     This is the one query in the system that deliberately reads across the
-    tenant boundary, and it is careful about what it brings back: property keys
-    and a yes/no, never a brokerage, an account, an owner or a number. A caller
-    can learn that a property is spoken for and nothing about who is working it.
+    tenant boundary. It uses the contact internally to compare the pair, but
+    returns only a blocking reason — never a brokerage, account, owner, or
+    number belonging to another tenant.
     """
-    wanted = {address_key.canonical(lead.property_address) for lead in leads}
-    wanted.discard('')
+    wanted = {
+        (address_key.canonical(lead.property_address), normalize_phone(lead.phone or ''))
+        for lead in leads
+    }
+    wanted = {(property_key, phone) for property_key, phone in wanted if property_key and phone}
     if not wanted:
         return NO_CLAIMS
 
-    rows = (session.query(Message.property_key, Conversation.user_id.in_(scope))
+    property_keys = sorted({property_key for property_key, _ in wanted})
+    rows = (session.query(Message.property_key, Conversation.contact,
+                          Conversation.user_id.in_(scope))
             .join(Conversation, Conversation.id == Message.conversation_id)
-            .filter(Message.property_key.in_(sorted(wanted)),
+            .filter(Message.property_key.in_(property_keys),
                     Message.event_type == 'outreach.initial')
             .distinct()
             .all())
-    ours = {key for key, is_ours in rows if key and is_ours}
-    theirs = {key for key, is_ours in rows if key and not is_ours}
-    # A property both worked is reported as ours: it is the actionable one.
+    normalized_rows = [
+        ((property_key, normalize_phone(contact or '')), is_ours)
+        for property_key, contact, is_ours in rows
+    ]
+    ours = {key for key, is_ours in normalized_rows if key in wanted and is_ours}
+    theirs = {key for key, is_ours in normalized_rows if key in wanted and not is_ours}
+    # A property/contact pair both worked is reported as ours: it is actionable.
     return Claims(ours, theirs - ours)
 
 

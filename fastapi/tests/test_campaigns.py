@@ -4,8 +4,10 @@ import pytest
 
 from datetime import datetime
 
+from app.leads import campaign as campaign_service
 from app.leads import template as message_template
-from app.models import Conversation, Lead
+from app.leads.address import canonical
+from app.models import Conversation, Lead, Message
 from app.sms import service
 
 BROKER_EMAIL = 'ather.shamim@linchpinglobal.net'
@@ -75,6 +77,35 @@ def draft(client, headers, ids):
     response = client.post(f'{CAMPAIGNS_URL}/draft', headers=headers, json={'lead_ids': ids})
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def test_campaign_claim_is_property_and_phone_pair(session, make_user):
+    owner = make_user(BROKER_EMAIL, role='broker')
+    conversation = Conversation(
+        contact='+13125550142', user_id=owner.id,
+        property_address='415 Northview Lane, Hoffman Estates, IL, 60169',
+        property_key=canonical('415 Northview Lane, Hoffman Estates, IL, 60169'),
+    )
+    session.add(conversation)
+    session.flush()
+    session.add(Message(
+        conversation_id=conversation.id, direction='outbound',
+        event_type='outreach.initial', property_key=conversation.property_key,
+    ))
+    session.commit()
+
+    co_owner = Lead(
+        user_id=owner.id, owner_name='Alex Whitfield', phone='+13125559999',
+        property_address='415 Northview Ln, Hoffman Estates IL 60169',
+    )
+    repeated_contact = Lead(
+        user_id=owner.id, owner_name='Dana Whitfield', phone='(312) 555-0142',
+        property_address='415 Northview Ln, Hoffman Estates IL 60169',
+    )
+    claims = campaign_service.claims_on(session, [owner.id], [co_owner, repeated_contact])
+
+    assert claims.reason_for(co_owner) is None
+    assert claims.reason_for(repeated_contact) == campaign_service.CLAIMED_HERE
 
 
 # -- the template ----------------------------------------------------------
@@ -723,9 +754,9 @@ LANDLORD_CSV = (
 )
 
 
-def test_the_same_address_written_differently_is_one_property(
+def test_the_same_address_with_a_different_phone_is_a_separate_contact(
         client, make_user, auth_header, sent_sms):
-    """A lock that only fires on an exact string match would never fire."""
+    """The same house may have multiple owners, each at a different number."""
     make_user(BROKER_EMAIL, role='broker')
     make_rival(make_user)
     mine, theirs = auth_header(BROKER_EMAIL), auth_header(RIVAL)
@@ -740,10 +771,30 @@ def test_the_same_address_written_differently_is_one_property(
     first = draft(client, mine, lead_ids(client, mine))['campaign']['id']
     client.post(f'{CAMPAIGNS_URL}/{first}/send', headers=mine)
 
-    response = client.post(f'{CAMPAIGNS_URL}/draft', headers=theirs,
-                           json={'lead_ids': lead_ids(client, theirs)})
-    assert response.status_code == 400
-    assert 'already contacting this property' in response.json()['detail']
+    rival_draft = draft(client, theirs, lead_ids(client, theirs))
+    assert rival_draft['campaign']['recipients'] == 1
+    assert client.post(f"{CAMPAIGNS_URL}/{rival_draft['campaign']['id']}/send",
+                       headers=theirs).status_code == 200
+    assert len(sent_sms) == 2
+
+
+def test_same_brokerage_can_campaign_same_property_at_two_numbers(
+        client, make_user, auth_header, sent_sms):
+    make_user(BROKER_EMAIL, role='broker')
+    headers = auth_header(BROKER_EMAIL)
+    upload(client, headers,
+           'Owner Name,Phone,Property Address,City,Signals\n'
+           'Dana Whitfield,+13125550142,"415 Northview Lane, Hoffman Estates, IL, 60169",Hoffman Estates,Expired\n'
+           'Alex Whitfield,+13125559999,"415 Northview Ln, Hoffman Estates IL 60169",Hoffman Estates,Expired\n')
+    ids = lead_ids(client, headers)
+    first = draft(client, headers, [ids[0]])['campaign']['id']
+    assert client.post(f'{CAMPAIGNS_URL}/{first}/send', headers=headers).status_code == 200
+
+    second = draft(client, headers, [ids[1]])
+    assert second['campaign']['recipients'] == 1
+    assert client.post(f"{CAMPAIGNS_URL}/{second['campaign']['id']}/send",
+                       headers=headers).status_code == 200
+    assert len(sent_sms) == 2
 
 
 def test_a_landlord_s_other_property_is_free_for_another_brokerage(
