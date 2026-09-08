@@ -1,28 +1,21 @@
 import Link from "next/link";
 
-import { ArrowIcon } from "@/components/icons/arrow-icon";
-
+/* CTA — cream background (breaks the dark-green stats → dark-green footer run) */
 export function FinalCtaSection() {
   return (
-    <section className="final-cta section">
-      <div className="cta-orbit" />
-      <div className="cta-content">
-        <span>THE NEXT CONVERSATION STARTS HERE</span>
-        <h2>
-          Turn seller signals
-          <br />
-          into real opportunities.
-        </h2>
+    <section className="lp-cta" id="contact">
+      <div className="lp-cta-inner">
+        <p className="lp-eyebrow lp-eyebrow-dark">Get started today</p>
+        <h2>Stop managing tools.<br />Start managing leads</h2>
         <p>
-          Give your brokerage a clearer way to discover, qualify, assign, and
-          follow up.
+          AI handles the first touch. Your team closes the deal.
+          No scattered systems. No guesswork. No bad replies.
         </p>
-        <div>
-          <Link className="button button-light button-large" href="/register">
-            Create your account
-            <ArrowIcon />
+        <div className="lp-cta-btns">
+          <Link href="/register" className="lp-btn lp-btn-green">
+            Create a free account
           </Link>
-          <a href="mailto:hello@ListingIQ.ai">Talk to our team</a>
+          
         </div>
       </div>
     </section>

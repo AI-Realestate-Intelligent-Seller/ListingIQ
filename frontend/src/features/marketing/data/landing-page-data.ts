@@ -99,3 +99,13 @@ export const PREVIEW_LEADS = [
     featured: false,
   },
 ] as const;
+
+
+
+export const SLIDES = [
+  { src: "/images/home-exterior.jpg",       alt: "Residential property exterior" },
+  { src: "/images/hero-slide-2.jpg",        alt: "House with green lawn" },
+  { src: "/images/hero-slide-3.jpg",        alt: "Suburban home at dusk" },
+  { src: "/images/hero-slide-4.jpg",        alt: "Bungalow house exterior" },
+  { src: "/images/chicago-neighborhood.jpg",alt: "Chicago residential neighbourhood" },
+];

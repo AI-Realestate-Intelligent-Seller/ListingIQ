@@ -1,5 +1,19 @@
 /* Authentication page and form styles. */
 
+/*
+  Override --blue to brand green so the shared .button component,
+  brand marks, and all var(--blue) references on auth pages
+  automatically use the same green as the landing page.
+  Same pattern as dashboard.css uses for the app shell.
+*/
+.auth-page,
+.auth-panel,
+.simple-auth-page,
+.simple-auth-card {
+  --blue:      #1b5c4a;
+  --blue-dark: #124039;
+}
+
 .auth-page {
   min-height: 100vh;
   display: grid;
@@ -143,7 +157,7 @@
 }
 
 .auth-eyebrow {
-  color: var(--blue);
+  color: #1b5c4a;
   font-size: 9px;
   font-weight: 750;
   letter-spacing: .16em;
@@ -196,8 +210,8 @@
 }
 
 .auth-fields input:focus, .simple-auth-card input:focus {
-  border-color: #5d92e6;
-  box-shadow: 0 0 0 4px rgba(23,104,229,.08);
+  border-color: #1b5c4a;
+  box-shadow: 0 0 0 4px rgba(27, 92, 74, .10);
 }
 
 .label-line {
@@ -206,7 +220,7 @@
 }
 
 .label-line a {
-  color: var(--blue);
+  color: #1b5c4a;
   font-weight: 650;
 }
 
@@ -226,7 +240,7 @@
   padding: 0 10px;
   border: 0;
   background: transparent;
-  color: var(--blue);
+  color: #1b5c4a;
   font-size: 9px;
   font-weight: 700;
   cursor: pointer;
@@ -245,7 +259,7 @@
   width: 15px;
   height: 15px;
   margin: 0;
-  accent-color: var(--blue);
+  accent-color: #1b5c4a;
 }
 
 .terms-check a {
@@ -282,7 +296,7 @@
 }
 
 .auth-switch a {
-  color: var(--blue);
+  color: #1b5c4a;
   font-weight: 700;
 }
 
@@ -363,10 +377,10 @@
 .auth-notice {
   margin: 18px 0;
   padding: 12px 14px;
-  border: 1px solid #b8d4fb;
+  border: 1px solid #a8cfc0;
   border-radius: 8px;
-  background: #eef5ff;
-  color: #174f9e;
+  background: #eaf3ef;
+  color: #124039;
   font-size: 12px;
   line-height: 1.5;
 }
