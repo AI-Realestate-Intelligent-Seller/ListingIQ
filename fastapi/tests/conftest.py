@@ -25,8 +25,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app import db  # noqa: E402
 from app.auth import hash_password  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import (AiRun, Booking, Campaign, Conversation, Invitation, Lead,  # noqa: E402
-                        Message, User)
+from app.models import (AiRun, Booking, Campaign, Conversation, FeatureFlag, Invitation, Lead,  # noqa: E402
+                        Message, PlatformAuditLog, User)
 
 
 @pytest.fixture(scope='session', autouse=True)
@@ -42,6 +42,8 @@ def _database():
 def clean_tables():
     session = db.SessionLocal()
     try:
+        session.query(PlatformAuditLog).delete()
+        session.query(FeatureFlag).delete()
         session.query(Lead).delete()
         session.query(Message).delete()
         session.query(Conversation).delete()

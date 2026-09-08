@@ -11,6 +11,7 @@ import "../styles/leads.css";
 import "../styles/followups.css";
 import "../styles/campaigns.css";
 import "../styles/responsive.css";
+import "../styles/platform-admin.css";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",

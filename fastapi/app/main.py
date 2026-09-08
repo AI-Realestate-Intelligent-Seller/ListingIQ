@@ -2,7 +2,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from .routes import auth, calendar, messages, conversations
-from .routes import webhooks, team, sms, leads, followups, campaigns, assignments
+from .routes import webhooks, team, sms, leads, followups, campaigns, assignments, platform_admin
 from .routes import ai
 from .logger import setup_logging, set_request_context
 
@@ -46,6 +46,7 @@ app.include_router(messages.router, prefix="/api/v1/messages", tags=["messages"]
 app.include_router(conversations.router, prefix="/api/v1/conversations", tags=["conversations"])
 app.include_router(webhooks.router, prefix="/api/v1/webhooks", tags=["webhooks"])
 app.include_router(ai.router, prefix="/api/v1/ai", tags=["ai"])
+app.include_router(platform_admin.router, prefix="/api/v1/platform-admin", tags=["platform-admin"])
 
 
 @app.on_event("startup")

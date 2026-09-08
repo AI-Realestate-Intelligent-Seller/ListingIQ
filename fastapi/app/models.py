@@ -23,6 +23,31 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     assigned_broker = relationship('User', remote_side=[id], foreign_keys=[assigned_broker_id])
 
+
+class FeatureFlag(Base):
+    """A platform-owned product switch, optionally scoped to one brokerage."""
+    __tablename__ = 'feature_flags'
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String(100), nullable=False, index=True)
+    description = Column(String(500), nullable=True)
+    enabled = Column(Boolean, nullable=False, default=False)
+    brokerage_id = Column(String(255), nullable=True, index=True)
+    updated_by = Column(Integer, ForeignKey('users.id'), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PlatformAuditLog(Base):
+    """Append-only record of privileged internal actions."""
+    __tablename__ = 'platform_audit_logs'
+    id = Column(Integer, primary_key=True, index=True)
+    actor_id = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)
+    action = Column(String(100), nullable=False, index=True)
+    target_type = Column(String(50), nullable=False)
+    target_id = Column(String(255), nullable=True)
+    detail = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
 class Invitation(Base):
     __tablename__ = 'invitations'
     id = Column(Integer, primary_key=True, index=True)

@@ -49,7 +49,7 @@ export function AuthForm({ mode }: AuthFormProps) {
       const auth = await login(buildLoginPayload(formData));
       const keepSignedIn = formData.get("remember") === "on";
       saveAuthSession(auth, keepSignedIn ? "local" : "session");
-      router.replace(`/dashboard/${auth.user.role}`);
+      router.replace(auth.user.role === "platform_admin" ? "/platform-admin" : `/dashboard/${auth.user.role}`);
     } catch (error) {
       setErrorMessage(
         error instanceof Error

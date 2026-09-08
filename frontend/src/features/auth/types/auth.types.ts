@@ -1,6 +1,6 @@
 export type AuthMode = "login" | "register";
 
-export type UserRole = "hob" | "broker" | "agent";
+export type UserRole = "platform_admin" | "hob" | "broker" | "agent";
 
 export type AuthUser = {
   id: number;
@@ -45,7 +45,7 @@ export type MessageResponse = {
   message: string;
 };
 
-export type InvitableRole = Exclude<UserRole, "hob">;
+export type InvitableRole = "broker" | "agent";
 
 /** Response of POST /team/invitations — deliberately free of the raw token. */
 export type InvitationCreatedResponse = {

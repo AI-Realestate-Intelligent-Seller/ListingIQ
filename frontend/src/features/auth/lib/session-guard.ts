@@ -47,7 +47,9 @@ export function endSession(): void {
 function secondsUntilExpiry(accessToken: string): number {
   try {
     const [, payload] = accessToken.split(".");
-    const claims = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    const claims = JSON.parse(atob(padded));
     return Number(claims.exp) * 1000 - Date.now();
   } catch {
     return 0;

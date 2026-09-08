@@ -203,6 +203,10 @@ export function DashboardView() {
       router.replace("/login");
       return;
     }
+    if (session.user.role === "platform_admin") {
+      router.replace("/platform-admin");
+      return;
+    }
     if (params.role && params.role !== session.user.role) {
       router.replace(`/dashboard/${session.user.role}`);
       return;

@@ -56,6 +56,8 @@ def get_current_user(
     user = session.query(User).filter(User.id == int(user_id)).first()
     if not user:
         raise HTTPException(status_code=401, detail='User not found')
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail='This account has been suspended. Contact support.')
     # set logging context
     set_request_context(user_id=user.id)
     return user
@@ -102,6 +104,8 @@ def login(form: UserCreate, session: Session = Depends(get_db)):
     user = session.query(User).filter(User.email == form.email).first()
     if not user or not verify_password(form.password, user.hashed_password):
         raise HTTPException(status_code=401, detail='Invalid credentials')
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail='This account has been suspended. Contact support.')
 
     token = create_access_token({"user_id": user.id, "role": user.role})
     refresh_token = create_access_token(
