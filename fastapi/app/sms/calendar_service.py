@@ -10,7 +10,7 @@ from datetime import datetime, time as clock_time, timedelta, timezone
 from uuid import uuid4
 
 from sqlalchemy.exc import IntegrityError
-
+from ..routes.websocket import broadcast_calendar_event_sync
 try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover
@@ -18,7 +18,7 @@ except ImportError:  # pragma: no cover
 
 from ..core.config import settings
 from ..logger import get_logger
-from ..models import Booking
+from ..models import Booking,BookingReminder
 
 logger = get_logger(__name__)
 
@@ -103,42 +103,151 @@ def availability(session, user_id: int) -> dict:
     }
 
 
-def create_booking(session, user_id: int, phone: str, name: str, title: str,
-                   start_at, end_at) -> dict:
-    start = _parse(start_at, 'start_at')
-    end = _parse(end_at, 'end_at')
-    if end <= start:
-        raise ValueError('end_at must be later than start_at')
-    if (end - start).total_seconds() > 4 * 60 * 60:
-        raise ValueError('a meeting cannot be longer than four hours')
+def create_booking(
+    session,
+    user_id: int,
+    phone: str,
+    name: str,
+    title: str,
+    start_at,
+    end_at,
+) -> dict:
+    """
+    Create a booking and notify the connected
+    calendar through WebSocket.
+    """
 
-    # Collision check inside the transaction that inserts the row.
-    overlap = (session.query(Booking)
-               .filter(Booking.user_id == user_id,
-                       Booking.start_at < end.replace(tzinfo=None),
-                       Booking.end_at > start.replace(tzinfo=None))
-               .first())
+    # Parse start/end time
+
+
+    start = _parse(start_at, "start_at")
+    end = _parse(end_at, "end_at")
+
+    
+    # Validate time
+ 
+
+    if end <= start:
+        raise ValueError(
+            "end_at must be later than start_at"
+        )
+
+    # Maximum meeting duration = 4 hours
+    if (end - start).total_seconds() > 4 * 60 * 60:
+        raise ValueError(
+            "a meeting cannot be longer than four hours"
+        )
+
+    overlap = (
+        session.query(Booking)
+        .filter(
+            Booking.user_id == user_id,
+            Booking.start_at < end.replace(tzinfo=None),
+            Booking.end_at > start.replace(tzinfo=None),
+        )
+        .first()
+    )
+
     if overlap:
-        raise SlotTakenError('That time overlaps an existing booking')
+        raise SlotTakenError(
+            "That time overlaps an existing booking"
+        )
+
+    # Create booking
+   
 
     booking = Booking(
         user_id=user_id,
         phone=phone,
         name=name or None,
-        title=title or 'Property consultation',
+        title=title or "Property consultation",
         start_at=start.replace(tzinfo=None),
         end_at=end.replace(tzinfo=None),
         join_token=uuid4().hex,
         created_at=datetime.utcnow(),
     )
+
     session.add(booking)
+
+
+# Get the booking ID without committing yet
+    session.flush()
+
+
+# Create booking reminder
+
+    now = datetime.utcnow()
+
+    reminders = [
+    (
+        "30_minutes",
+        start - timedelta(minutes=30),
+    ),
+    (
+        "10_minutes",
+        start - timedelta(minutes=10),
+    ),
+]
+
+    for reminder_type, scheduled_for in reminders:
+      scheduled_for_naive = scheduled_for.replace(tzinfo=None)
+
+    # Don't create reminders whose scheduled time has already passed
+      if scheduled_for_naive > now:
+        reminder = BookingReminder(
+            booking_id=booking.id,
+            user_id=user_id,
+            reminder_type=reminder_type,
+            scheduled_for=scheduled_for_naive,
+            status="pending",
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+
+        session.add(reminder)
+
+
+
+    # Save booking
+
+
     try:
         session.commit()
     except IntegrityError:
         session.rollback()
-        raise SlotTakenError('That time overlaps an existing booking')
+        raise SlotTakenError(
+            "That time overlaps an existing booking"
+        )
+
+
+    # Refresh booking from database
+
+
     session.refresh(booking)
-    return serialize(booking)
+
+
+    # Convert booking to API format
+
+
+    booking_data = serialize(booking)
+
+    # SEND WEBSOCKET EVENT
+    
+
+    broadcast_calendar_event_sync(
+        user_id=user_id,
+        event_type="booking_created",
+        booking=booking_data,
+    )
+
+    logger.info(
+        "Calendar WebSocket event scheduled: "
+        "booking_id=%s user_id=%s",
+        booking.id,
+        user_id,
+    )
+
+    return booking_data
 
 
 def serialize(booking: Booking) -> dict:
@@ -192,3 +301,25 @@ def list_bookings(session, user_id: int) -> list:
 def booking_by_token(session, token: str) -> dict | None:
     booking = session.query(Booking).filter(Booking.join_token == token).first()
     return serialize(booking) if booking else None
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

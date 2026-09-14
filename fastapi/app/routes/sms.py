@@ -11,7 +11,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
-
+from pydantic import BaseModel
 from ..logger import get_logger
 from ..models import Conversation, Lead, Message, User
 from ..tenancy import brokerage_user_ids
@@ -292,3 +292,48 @@ def delete_conversation(conversation_id: int, current_user: User = Depends(get_c
     session.delete(conversation)
     session.commit()
     return {'ok': True}
+
+
+
+class FakeBookingCreate(BaseModel):
+    phone: str
+    name: str
+    title: str = "Fake Test Meeting"
+    start_at: str
+    end_at: str
+
+@router.post('/calendar/bookings')
+def create_fake_booking(
+    payload: FakeBookingCreate,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+):
+    """
+    Create a test/fake booking for the currently authenticated user.
+
+    The user_id is taken from the JWT and cannot be supplied by the client.
+    """
+    _require_sms_access(current_user)
+
+    try:
+        booking = calendar_service.create_booking(
+            session=session,
+            user_id=current_user.id,
+            phone=payload.phone,
+            name=payload.name,
+            title=payload.title,
+            start_at=payload.start_at,
+            end_at=payload.end_at,
+        )
+    except calendar_service.SlotTakenError as error:
+        raise HTTPException(
+            status_code=409,
+            detail=str(error),
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        )
+
+    return booking

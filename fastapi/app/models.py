@@ -1,6 +1,15 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey
+from sqlalchemy import (
+    Column,
+    Integer,
+    String,
+    Text,
+    DateTime,
+    Boolean,
+    ForeignKey,
+    Index,
+)
 from sqlalchemy.orm import relationship
-from datetime import datetime
+from datetime import datetime, timezone
 from .db import Base
 
 class User(Base):
@@ -17,6 +26,7 @@ class User(Base):
     is_verified = Column(Boolean, default=False)
     is_active = Column(Boolean, default=True)
     role = Column(String(50), default='user')
+    timezone = Column(String(100),nullable=True,)
     # Agents are assigned to one Area Broker by the HOB who invites them.
     assigned_broker_id = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)
     google_refresh_token = Column(Text, nullable=True)  # encrypted
@@ -258,3 +268,201 @@ class AiRun(Base):
     prompt = Column(Text)
     result = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PushSubscription(Base):
+    __tablename__ = "push_subscriptions"
+
+    id = Column(Integer, primary_key=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    device_id = Column(
+        String(100),
+        nullable=False,
+        index=True,
+    )
+
+    endpoint = Column(
+        Text,
+        nullable=False,
+        unique=True,
+    )
+
+    p256dh = Column(Text, nullable=False)
+    auth = Column(Text, nullable=False)
+
+    is_active = Column(
+        Boolean,
+        default=True,
+        nullable=False,
+    )
+class BookingReminder(Base):
+    __tablename__ = "booking_reminders"
+
+    id = Column(
+        Integer,
+        primary_key=True,
+    )
+
+    # Keep
+    booking_id = Column(
+        Integer,
+        ForeignKey(
+            "bookings.id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+    )
+
+    # Keep
+    user_id = Column(
+        Integer,
+        ForeignKey(
+            "users.id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+    )
+
+    reminder_type = Column(
+        String(50),
+        nullable=False,
+    )
+
+    # REMOVE individual index=True
+    scheduled_for = Column(
+        DateTime,
+        nullable=False,
+    )
+
+    # REMOVE individual index=True
+    status = Column(
+        String(20),
+        nullable=False,
+        default="pending",
+    )
+
+    sent_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    booking = relationship("Booking")
+    user = relationship("User")
+
+    # IMPORTANT INDEX FOR YOUR SCHEDULER QUERY
+    __table_args__ = (
+        Index(
+            "ix_booking_reminders_status_scheduled_for",
+            "status",
+            "scheduled_for",
+        ),
+    )
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    # Primary key already indexed.
+    id = Column(
+        Integer,
+        primary_key=True,
+    )
+
+    # Keep: useful for getting a user's notifications
+    user_id = Column(
+        Integer,
+        ForeignKey(
+            "users.id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+    )
+
+    # Keep if notifications are looked up by booking
+    booking_id = Column(
+        Integer,
+        ForeignKey(
+            "bookings.id",
+            ondelete="CASCADE",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    # unique=True already provides lookup support.
+    # Remove index=True.
+    reminder_id = Column(
+        Integer,
+        ForeignKey(
+            "booking_reminders.id",
+            ondelete="SET NULL",
+        ),
+        nullable=False,
+        unique=True,
+    )
+
+    type = Column(
+        String(50),
+        nullable=False,
+    )
+
+    title = Column(
+        String(255),
+        nullable=False,
+    )
+
+    message = Column(
+        Text,
+        nullable=False,
+    )
+
+    # Keep for now because you may query unread notifications.
+    is_read = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        index=True,
+    )
+
+    read_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    action_url = Column(
+        String(500),
+        nullable=True,
+    )
+
+    # Keep if notification history is ordered by created time.
+    created_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
+
+    user = relationship("User")
+    booking = relationship("Booking")
+    reminder = relationship("BookingReminder")
+    

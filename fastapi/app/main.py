@@ -5,10 +5,17 @@ from .routes import auth, calendar, messages, conversations
 from .routes import webhooks, team, sms, leads, followups, campaigns, assignments, platform_admin
 from .routes import ai
 from .logger import setup_logging, set_request_context
+from .routes.websocket import router as websocket_router
+from app.routes.push import router as push_router
+from app.reminder.worker import start_reminder_worker
+
+
+
 
 app = FastAPI(title="ListingIQ API")
 
 setup_logging()
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -47,14 +54,15 @@ app.include_router(conversations.router, prefix="/api/v1/conversations", tags=["
 app.include_router(webhooks.router, prefix="/api/v1/webhooks", tags=["webhooks"])
 app.include_router(ai.router, prefix="/api/v1/ai", tags=["ai"])
 app.include_router(platform_admin.router, prefix="/api/v1/platform-admin", tags=["platform-admin"])
-
-
+app.include_router(push_router)
+app.include_router(websocket_router)
 @app.on_event("startup")
 def startup_event():
     init_db()
     from .sms.followup_scheduler import start_followup_scheduler
     start_followup_scheduler()
     _warm_knowledge_base()
+    start_reminder_worker()
 
 
 def _warm_knowledge_base():
