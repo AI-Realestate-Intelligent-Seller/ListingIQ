@@ -1,0 +1,1 @@
+"""BatchData PAYG platform integration."""

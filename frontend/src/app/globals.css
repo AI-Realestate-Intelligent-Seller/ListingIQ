@@ -1,1 +1,30 @@
 @import "tailwindcss";
+
+/* PropertyRadar follows the Internal Console components and palette. */
+.pr-workspace { display: grid; gap: 20px; min-width: 0; }
+.pr-card-heading, .pr-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.pr-card-heading h2 { font-size: 25px; margin: 6px 0 12px; }
+.pr-card-heading a { color: inherit; text-decoration: none; }
+.pr-integration-card { max-width: 920px; }
+.pr-integration-card > p { margin: 12px 0 22px; }
+.pr-summary-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.pr-summary-list dt { font-size: 12px; color: #64748b; }
+.pr-summary-list dd { margin: 8px 0 20px; font-size: 14px; }
+.pr-tabs { display: flex; gap: 6px; overflow-x: auto; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; }
+.pr-tabs button { white-space: nowrap; border: 0; background: transparent; padding: 10px 12px; border-radius: 8px; color: #64748b; cursor: pointer; }
+.pr-tabs button.active { background: #eef2ff; color: #4338ca; }
+.pr-fields, .pr-categories { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 18px 0 26px; }
+.pr-form label { display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: #475569; }
+.pr-form input:not([type=checkbox]), .pr-form select { width: 100%; border: 1px solid #dbe2ea; background: white; padding: 11px 12px; border-radius: 8px; min-width: 0; }
+.pr-form label.pr-check, .pr-check { display: flex; flex-direction: row; align-items: center; gap: 9px; font-size: 14px; }
+.pr-check input { accent-color: #4f46e5; width: 17px; height: 17px; flex: 0 0 auto; }
+.pr-usage { margin: 16px 0; }
+.pr-usage strong { font-size: 22px !important; }
+.pr-workspace .platform-card p { color: #64748b; line-height: 1.6; margin: 12px 0; overflow-wrap: anywhere; }
+.pr-workspace pre { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 680px; max-height: 320px; overflow: auto; font-size: 12px; background: #f8fafc; padding: 12px; border-radius: 8px; }
+.pr-preview { margin-top: 20px; }
+.pr-records { min-width: 0; display: grid; gap: 14px; }
+.pr-empty { padding: 24px; color: #64748b; }
+.pr-workspace button:disabled { opacity: .5; cursor: not-allowed; }
+@media (max-width: 800px) { .pr-fields, .pr-categories { grid-template-columns: repeat(2, minmax(0, 1fr)); } .pr-summary-list { grid-template-columns: 1fr; } }
+@media (max-width: 480px) { .pr-fields, .pr-categories { grid-template-columns: 1fr; } }
