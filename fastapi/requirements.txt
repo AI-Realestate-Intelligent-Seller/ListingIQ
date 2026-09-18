@@ -30,5 +30,5 @@ httpx==0.24.1
 
 
 #Calender
-pywebpush==2.5.0
+pywebpush==2.0.3
 tzdata==2026.4
