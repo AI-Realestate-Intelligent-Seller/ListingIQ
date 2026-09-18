@@ -25,3 +25,10 @@ pymupdf==1.24.14  # PDF extraction for Bobbie's knowledge base
 # Testing
 pytest==7.4.4
 httpx==0.24.1
+
+
+
+
+#Calender
+pywebpush==2.5.0
+tzdata==2026.4
