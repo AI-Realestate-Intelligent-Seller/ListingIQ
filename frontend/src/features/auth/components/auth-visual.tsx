@@ -52,9 +52,6 @@ export function AuthVisual({ mode }: AuthVisualProps) {
           </div>
         </div>
 
-        <small className="photo-credit">
-          Photo by Binyamin Mellish · Pexels
-        </small>
       </div>
     </section>
   );
