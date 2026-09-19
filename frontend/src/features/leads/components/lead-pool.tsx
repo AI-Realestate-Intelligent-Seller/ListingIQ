@@ -123,8 +123,10 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
   const [detailId, setDetailId] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [notice, setNotice] = useState("");
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
 
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const dragDepthRef = useRef(0);
   const router = useRouter();
   const token = useMemo(() => readAuthSession()?.access_token ?? "", []);
 
@@ -274,12 +276,15 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
     );
   }
 
-  /** Choosing a file only opens the options; nothing is written until confirmed. */
-  async function handleFileChosen(event: React.ChangeEvent<HTMLInputElement>): Promise<void> {
-    const file = event.target.files?.[0];
-    // Reset immediately so re-choosing the same file still fires a change event.
-    event.target.value = "";
+  /** Choosing or dropping a file only opens the options; nothing is written until confirmed. */
+  async function prepareImport(file: File | undefined): Promise<void> {
     if (!file) return;
+
+    const extension = file.name.toLowerCase().split(".").pop();
+    if (extension !== "csv" && extension !== "xlsx") {
+      setErrorMessage("Upload a .csv or .xlsx file.");
+      return;
+    }
 
     setPendingFile(file);
     setPreview(null);
@@ -291,6 +296,43 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
       setPendingFile(null);
       handleApiError(error, "The file could not be read.");
     }
+  }
+
+  async function handleFileChosen(event: React.ChangeEvent<HTMLInputElement>): Promise<void> {
+    const file = event.target.files?.[0];
+    // Reset immediately so re-choosing the same file still fires a change event.
+    event.target.value = "";
+    await prepareImport(file);
+  }
+
+  function handleDragEnter(event: React.DragEvent<HTMLDivElement>): void {
+    event.preventDefault();
+    event.stopPropagation();
+    if (isImporting || pendingFile !== null) return;
+    dragDepthRef.current += 1;
+    setIsDraggingFile(true);
+  }
+
+  function handleDragLeave(event: React.DragEvent<HTMLDivElement>): void {
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setIsDraggingFile(false);
+  }
+
+  function handleDragOver(event: React.DragEvent<HTMLDivElement>): void {
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = isImporting || pendingFile !== null ? "none" : "copy";
+  }
+
+  async function handleDrop(event: React.DragEvent<HTMLDivElement>): Promise<void> {
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current = 0;
+    setIsDraggingFile(false);
+    if (isImporting || pendingFile !== null) return;
+    await prepareImport(event.dataTransfer.files?.[0]);
   }
 
   /** Re-runs the dry run when the broker corrects a column. */
@@ -646,7 +688,15 @@ const availableCities =
                 (isFiltered ? ` · ${leadsToShow.length} shown` : "")}
           </p>
         </div>
-        <div className="leads-header-actions">
+        <div
+          className={`leads-import-dropzone${isDraggingFile ? " dragging" : ""}${
+            isImporting || pendingFile !== null ? " disabled" : ""
+          }`}
+          onDragEnter={handleDragEnter}
+          onDragLeave={handleDragLeave}
+          onDragOver={handleDragOver}
+          onDrop={(event) => void handleDrop(event)}
+        >
           <input
             ref={fileRef}
             type="file"
@@ -654,13 +704,17 @@ const availableCities =
             className="sr-only"
             onChange={handleFileChosen}
           />
+          <div className="leads-import-dropzone-copy">
+            <strong>{isDraggingFile ? "Drop file to preview" : "Drag & drop CSV or Excel"}</strong>
+            <span>.csv or .xlsx</span>
+          </div>
           <button
             className="button"
             type="button"
             onClick={() => fileRef.current?.click()}
             disabled={isImporting || pendingFile !== null}
           >
-            {isImporting ? "Importing…" : "↑ Import CSV or Excel"}
+            {isImporting ? "Importing…" : "Choose file"}
           </button>
         </div>
       </header>
