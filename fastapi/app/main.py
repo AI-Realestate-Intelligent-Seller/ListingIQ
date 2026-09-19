@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from .logger import set_request_context, setup_logging
@@ -19,6 +20,7 @@ from .routes import (
     sms,
     team,
     webhooks,
+    location,
 )
 
 from .routes.websocket import router as websocket_router
@@ -70,6 +72,7 @@ app.include_router(messages.router, prefix="/api/v1/messages", tags=["messages"]
 app.include_router(
     conversations.router, prefix="/api/v1/conversations", tags=["conversations"]
 )
+app.include_router(location.router, prefix="/api/v1/location", tags=["location"])
 app.include_router(webhooks.router, prefix="/api/v1/webhooks", tags=["webhooks"])
 app.include_router(ai.router, prefix="/api/v1/ai", tags=["ai"])
 app.include_router(platform_admin.router, prefix="/api/v1/platform-admin", tags=["platform-admin"])

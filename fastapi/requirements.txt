@@ -32,3 +32,6 @@ httpx==0.24.1
 #Calender
 pywebpush==2.0.3
 tzdata==2026.4
+
+#lead pool location Filter
+scipy==1.17.1
