@@ -82,11 +82,11 @@
 
 /* Working tabs own their scrolling. The dashboard shell stays still while the
    conversation/campaign collection moves inside its allotted panel. */
-.dashboard-main-followups,
-.dashboard-main-campaigns {
+.dashboard-main-followups {
   overflow: hidden;
   padding-bottom: 28px;
 }
+.dashboard-main-campaigns { overflow-y: auto; padding-bottom: 28px; }
 .dashboard-header { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
 .dashboard-header span, .dashboard-panel > div > span { color: var(--blue); font-size: 10px; font-weight: 700; letter-spacing: .16em; }
 .dashboard-header .view-title { margin: 8px 0 4px; }

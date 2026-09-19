@@ -5,7 +5,20 @@
 .leads-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .leads-header .view-title { margin: 6px 0 3px; }
 .leads-header p { margin: 0; color: var(--muted); font-size: 13px; }
-.leads-header-actions { display: flex; gap: 10px; flex-shrink: 0; }
+.leads-import-dropzone {
+  min-width: 330px; display: flex; align-items: center; gap: 16px; padding: 10px 10px 10px 14px;
+  border: 1px dashed var(--line-strong); border-radius: 11px; background: var(--surface);
+  transition: border-color .15s, background .15s, box-shadow .15s;
+}
+.leads-import-dropzone.dragging {
+  border-color: var(--blue); background: var(--accent-soft);
+  box-shadow: 0 0 0 3px rgba(18, 112, 89, .12);
+}
+.leads-import-dropzone.disabled { opacity: .65; }
+.leads-import-dropzone-copy { min-width: 0; display: grid; gap: 2px; }
+.leads-import-dropzone-copy strong { color: var(--ink); font-size: 12.5px; white-space: nowrap; }
+.leads-import-dropzone-copy span { color: var(--muted); font-size: 11px; }
+.leads-import-dropzone .button { min-height: 38px; margin-left: auto; white-space: nowrap; }
 .leads-title-row { display: flex; align-items: center; gap: 18px; }
 .leads-title-row .leads-location { width: clamp(300px, 38vw, 520px); margin-top: 3px; }
 
@@ -285,6 +298,7 @@
 /* -- responsive ------------------------------------------------------------ */
 @media (max-width: 900px) {
   .leads-header { flex-direction: column; }
+  .leads-import-dropzone { width: 100%; min-width: 0; }
   .leads-title-row { width: 100%; align-items: stretch; flex-direction: column; gap: 10px; }
   .leads-title-row .leads-location { width: 100%; margin-top: 0; }
   /* Lead Pool keeps desktop parity on narrow screens. The existing wrapper
@@ -294,6 +308,8 @@
 }
 
 @media (max-width: 620px) {
+  .leads-import-dropzone { align-items: stretch; flex-direction: column; gap: 9px; }
+  .leads-import-dropzone .button { width: 100%; margin-left: 0; }
   .leads-toolbar {
     margin: 16px 0 12px;
     grid-template-columns: 1fr;
