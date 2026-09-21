@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState,useReducer } from "react";
 
 import { useRouter } from "next/navigation";
 
@@ -33,6 +33,23 @@ import {
   locationCount,
   type LocationSelection,
 } from "./location-filter";
+
+import {
+  EMPTY_LOCATION_OPTIONS,
+  locationFilterReducer,
+  EMPTY_LOCATION_FILTER,
+  type LocationOptions,
+} from "./lead-filterComponents"
+import { getFilterData, getZipCodes, getAllZipCodes, getCities, getByCity, getByZip, resolveLocation} from "@/lib/location/getstates";
+import {
+  toStringArray,
+  parseAddress,
+  LocationCombo,
+  PIN_ICON,
+  ZIP_ICON,
+  CITY_ICON,
+} from "./lead-filterComponents";
+
 
 const EMPTY_POOL: LeadPoolResponse = {
   leads: [],
@@ -106,10 +123,26 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
   const [detailId, setDetailId] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [notice, setNotice] = useState("");
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
 
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const dragDepthRef = useRef(0);
   const router = useRouter();
   const token = useMemo(() => readAuthSession()?.access_token ?? "", []);
+
+    // ── location filter ────────────────────────────────────────────────────
+  // Selected values (state/city/zip/matches/isResolving) live in one reducer.
+  // Dropdown option lists live in one merge-updated object. Together these
+  // replace the previous nine separate useState hooks.
+  const [locationFilter, dispatchLocation] = useReducer(locationFilterReducer, EMPTY_LOCATION_FILTER);
+  const [locationOptions, setLocationOptions] = useState<LocationOptions>(EMPTY_LOCATION_OPTIONS);
+
+  function patchOptions(patch: Partial<LocationOptions>) {
+    setLocationOptions((current) => ({ ...current, ...patch }));
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+
 
   const handleApiError = useCallback(
     (error: unknown, fallback: string) => {
@@ -128,19 +161,29 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
     async (signal?: AbortSignal) => {
       if (!token) return;
       try {
+        console.log("location",locationFilter.state)
+        const stateCode = locationFilter.state ? locationFilter.state.split(",")[1]?.trim() : "";
         setPool(
           await fetchLeadPool(
-            {
-              search,
-              signals: activeSignals,
-              stage,
-              states: location.states,
-              cities: location.cities,
-              zips: location.zips,
-            },
-            token,
-            signal,
-          ),
+  {
+    search,
+    signals: activeSignals,
+    stage,
+   states: stateCode
+        ? [stateCode]
+        : [],
+    // For a geocoded place/alias, filter by the canonical ZIP(s) returned by
+    // the resolver. Do not send raw text such as "Brington" as a database city.
+    cities: locationFilter.matches.length === 0 && locationFilter.city
+      ? [locationFilter.city]
+      : [],
+    zips: locationFilter.zip
+      ? [locationFilter.zip]
+      : [...new Set(locationFilter.matches.map((item) => item.zip).filter(Boolean))],
+  },
+  token,
+  signal,
+),
         );
         setErrorMessage("");
       } catch (error) {
@@ -149,7 +192,7 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
         setIsLoading(false);
       }
     },
-    [token, search, activeSignals, stage, location, handleApiError],
+    [token, search, activeSignals, stage, locationFilter.state, locationFilter.city, locationFilter.zip, locationFilter.matches, handleApiError],
   );
 
   // Filters live on the server, so briefly coalesce changes before refetching.
@@ -162,7 +205,56 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
     };
   }, [refresh]);
 
-  const visibleIds = pool.leads.map((lead) => lead.id);
+  // Covers every filter — search, stage, signals, AND every piece of the
+  // location reducer (state/city/zip/matches). Not location-only. This is
+  // the one definition of "a filter is active"; nothing else re-derives it.
+  const islocationFiltered = Boolean(
+      locationFilter.state ||
+      locationFilter.city ||
+      locationFilter.zip ||
+      locationFilter.matches.length,
+  );
+
+  // Only the LOCATION portion of filtering happens here (state/city/zip
+  // resolved matches, checked against parseAddress on each lead). This does
+  // NOT need to check isFiltered internally: when no location filter is
+  // active it already returns pool.leads unchanged (same reference, not a
+  // copy) via the early return below.
+  const filteredLeads = useMemo(() => {
+    const { state, zip, matches } = locationFilter;
+    if (!state && !zip && matches.length === 0) return pool.leads;
+
+    const stateCode = state ? state.split(",")[1]?.trim() : "";
+ console.log(pool.leads)
+    return pool.leads.filter((lead) => {
+      const { city, state: leadState, zip: leadZip } = parseAddress(lead.property_address);
+
+      if (stateCode && leadState !== stateCode) return false;
+      if (zip && leadZip !== zip) return false;
+
+      // Free-typed city search may have resolved to several {city, state, zip}
+      // matches (e.g. all 22 Charlestons). A lead passes if it fits ANY of them.
+      if (matches.length > 0) {
+        const matchesAny = matches.some(
+          (loc) =>
+            (loc.zip && loc.zip === leadZip) ||
+            (loc.city && loc.state && loc.city === city && loc.state === leadState),
+        );
+        if (!matchesAny) return false;
+      }
+
+      return true;
+    });
+  }, [pool.leads,locationFilter]);
+
+  // What actually gets rendered. Not a new array — just a reference to
+  // whichever of the two already-computed arrays applies. When isFiltered is
+  // false, pool.leads is shown directly; when true, the location-filtered
+  // result is shown. No third copy, and no "fall back to everything" branch
+  // hiding inside filteredLeads itself.
+  const leadsToShow = islocationFiltered ? filteredLeads : pool.leads;
+
+  const visibleIds = leadsToShow.map((lead) => lead.id);
   const selectedVisible = selected.filter((id) => visibleIds.includes(id));
   const allSelected = visibleIds.length > 0 && selectedVisible.length === visibleIds.length;
 
@@ -184,12 +276,15 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
     );
   }
 
-  /** Choosing a file only opens the options; nothing is written until confirmed. */
-  async function handleFileChosen(event: React.ChangeEvent<HTMLInputElement>): Promise<void> {
-    const file = event.target.files?.[0];
-    // Reset immediately so re-choosing the same file still fires a change event.
-    event.target.value = "";
+  /** Choosing or dropping a file only opens the options; nothing is written until confirmed. */
+  async function prepareImport(file: File | undefined): Promise<void> {
     if (!file) return;
+
+    const extension = file.name.toLowerCase().split(".").pop();
+    if (extension !== "csv" && extension !== "xlsx") {
+      setErrorMessage("Upload a .csv or .xlsx file.");
+      return;
+    }
 
     setPendingFile(file);
     setPreview(null);
@@ -201,6 +296,43 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
       setPendingFile(null);
       handleApiError(error, "The file could not be read.");
     }
+  }
+
+  async function handleFileChosen(event: React.ChangeEvent<HTMLInputElement>): Promise<void> {
+    const file = event.target.files?.[0];
+    // Reset immediately so re-choosing the same file still fires a change event.
+    event.target.value = "";
+    await prepareImport(file);
+  }
+
+  function handleDragEnter(event: React.DragEvent<HTMLDivElement>): void {
+    event.preventDefault();
+    event.stopPropagation();
+    if (isImporting || pendingFile !== null) return;
+    dragDepthRef.current += 1;
+    setIsDraggingFile(true);
+  }
+
+  function handleDragLeave(event: React.DragEvent<HTMLDivElement>): void {
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setIsDraggingFile(false);
+  }
+
+  function handleDragOver(event: React.DragEvent<HTMLDivElement>): void {
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = isImporting || pendingFile !== null ? "none" : "copy";
+  }
+
+  async function handleDrop(event: React.DragEvent<HTMLDivElement>): Promise<void> {
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current = 0;
+    setIsDraggingFile(false);
+    if (isImporting || pendingFile !== null) return;
+    await prepareImport(event.dataTransfer.files?.[0]);
   }
 
   /** Re-runs the dry run when the broker corrects a column. */
@@ -316,7 +448,221 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
     });
   }
 
-  const isFiltered = Boolean(search.trim() || stage || activeSignals.length || locationCount(location));
+  // Free-typed city search. The user may type a place that isn't a real city
+  // (a neighbourhood, subdivision, etc.), so instead of matching it against
+  // the known-cities list we hand the raw text to resolveLocation() and use
+  // whatever it resolves to, to drive the filter.
+  //
+  // A query can be genuinely ambiguous — "Charleston" exists in ~22 states —
+  // so resolveLocation() may return several rows for one query. We keep all
+  // of them (locationFilter.matches); the filter below matches a lead
+  // against ANY of the resolved locations.
+  const handleCitySearch = useCallback(
+    async (query: string) => {
+      dispatchLocation({ type: "RESOLVE_START" });
+      setErrorMessage("");
+      try {
+        const selectedStateName = locationFilter.state
+          ? locationFilter.state.split(",")[0].trim()
+          : undefined;
+
+        const result = await resolveLocation(query, selectedStateName);
+
+       if (result?.found && result.data && result.data.length > 0) {
+  const matches = result.data.map((item) => ({
+    city: item.city,
+    state: item.state_code ?? item.state,
+    zip: item.zip,
+  }));
+
+  patchOptions({
+    states: [
+      ...new Set(
+        result.data.map((item) =>
+          item.state_code
+            ? `${item.state},${item.state_code}`
+            : item.state
+        )
+      ),
+    ],
+
+    cities: [
+      ...new Set(
+        result.data.map((item) => item.city)
+      ),
+    ],
+
+    zips: [
+      ...new Set(
+        result.data
+          .map((item) => item.zip)
+          .filter(Boolean)
+      ),
+    ],
+  });
+
+  dispatchLocation({
+    type: "RESOLVE_SUCCESS",
+    city: query,
+    matches,
+  });
+}
+           else {
+          setErrorMessage(`No match found for "${query}".`);
+          dispatchLocation({ type: "RESOLVE_FAILURE" });
+        }
+      } catch (error) {
+        dispatchLocation({ type: "RESOLVE_FAILURE" });
+        handleApiError(error, "Could not resolve that location.");
+      }
+    },
+    [handleApiError, locationFilter.state],
+  );
+
+  // Load states + cities once on mount.
+  useEffect(() => {
+  getFilterData()
+    .then((data) => {
+      patchOptions({
+        allStates: toStringArray(data.states),
+        allCities: toStringArray(data.cities),
+      });
+    })
+    .catch(() => patchOptions({ allStates: [], allCities: [] }));
+}, []);
+
+  // When state changes, narrow the zip list to that state.
+  useEffect(() => {
+    if (!locationFilter.state) return;
+    const stateName = locationFilter.state.split(",")[0];
+    getZipCodes(stateName)
+      .then((data) => patchOptions({ zips: toStringArray(data) }))
+      .catch(() => patchOptions({ zips: [] }));
+  }, [locationFilter.state]);
+
+  // Narrow the city list when state and/or zip is selected.
+  useEffect(() => {
+    if (!locationFilter.state && !locationFilter.zip) return;
+    const stateName = locationFilter.state ? locationFilter.state.split(",")[0] : undefined;
+    getCities({
+      state: stateName,
+      zipcode: locationFilter.zip || undefined,
+    })
+      .then((data) => patchOptions({ cities: toStringArray(data) }))
+      .catch(() => patchOptions({ cities: [] }));
+  }, [locationFilter.state, locationFilter.zip]);
+  
+  // Load the full zip list once, on first interaction with the zip field.
+  const loadZips = useCallback(() => {
+    if (locationOptions.allZips.length > 0) return;
+    getAllZipCodes()
+      .then((data) => patchOptions({ allZips: toStringArray(data) }))
+      .catch(() => patchOptions({ allZips: [] }));
+  }, [locationOptions.allZips]);
+
+  // Narrows states + zips when a city is picked. getByCity() is a case-
+// insensitive exact match, so ambiguous cities (Charleston, ~22 states)
+// come back with every matching state/zip already — no extra filtering here.
+// Clearing city empties these, and the fallbacks below drop back to
+// allStates/allZips — that IS the "show everything" reset, nothing extra needed.
+useEffect(() => {
+  // City was cleared.
+  if (!locationFilter.city) {
+    // If a state is still selected, restore ALL cities + ZIPs for that state.
+    if (locationFilter.state) {
+      const stateName = locationFilter.state.split(",")[0].trim();
+
+      Promise.all([
+        getCities({ state: stateName }),
+        getZipCodes(stateName),
+      ])
+        .then(([citiesData, zipsData]) => {
+          patchOptions({
+            cities: toStringArray(citiesData),
+            zips: toStringArray(zipsData),
+          });
+        })
+        .catch(() => {
+          patchOptions({
+            cities: [],
+            zips: [],
+          });
+        });
+
+      return;
+    }
+
+    // If only ZIP is selected, let ZIP -> city/state logic handle it.
+    if (locationFilter.zip) {
+      return;
+    }
+
+    // Nothing selected: go back to full lists.
+    patchOptions({
+      states: [],
+      cities: [],
+      zips: [],
+    });
+
+    return;
+  }
+
+  // A geocoded/free-typed place already has canonical results.
+  // Do not overwrite them using exact CSV city matching.
+  if (locationFilter.matches.length > 0) {
+    return;
+  }
+
+  // Normal exact city selection.
+  getByCity(locationFilter.city)
+    .then((data) => {
+      patchOptions({
+        states: toStringArray(data.states),
+        zips: toStringArray(data.zipcodes ?? []),
+      });
+    })
+    .catch(() => {
+      patchOptions({
+        states: [],
+        zips: [],
+      });
+    });
+}, [
+  locationFilter.city,
+  locationFilter.state,
+  locationFilter.zip,
+  locationFilter.matches.length,
+]);
+  // ZIP -> State + City. This completes the dependency graph in the other
+  // direction, instead of only supporting State -> ZIP/City.
+  useEffect(() => {
+    if (!locationFilter.zip) return;
+
+    getByZip(locationFilter.zip)
+      .then((data) => {
+        patchOptions({
+          states: toStringArray(data.states),
+          cities: toStringArray(data.cities),
+          zips: toStringArray(data.zipcodes ?? []),
+        });
+      })
+      .catch(() => patchOptions({ states: [], cities: [] }));
+  }, [locationFilter.zip]);
+
+  const availableStates =
+    locationFilter.city || locationFilter.zip
+      ? locationOptions.states
+      : locationOptions.allStates;
+
+const availableZip =
+  locationFilter.state || locationFilter.city ? locationOptions.zips : locationOptions.allZips;
+
+const availableCities =
+  locationFilter.state || locationFilter.zip ? locationOptions.cities : locationOptions.allCities;
+
+  console.log(availableStates)
+
+    const isFiltered = Boolean(stage || activeSignals.length || islocationFiltered);
   const stageLabels = Object.fromEntries(pool.stage_catalog.map((item) => [item.key, item.label]));
 
   return (
@@ -326,22 +672,31 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
           <span className="sms-eyebrow">PROSPECTING</span>
           <div className="leads-title-row">
             <h1 className="view-title">Lead Pool</h1>
-            <LocationFilter
+             <LocationFilter
               facets={pool.locations}
               selection={location}
               onChange={setLocation}
               advancedSearch={search}
               onAdvancedSearchChange={setSearch}
             />
+          
           </div>
           <p>
             {pool.facets.total === 0
               ? "Import a CSV or Excel file to start building your pool."
               : `${pool.facets.total} ${pool.facets.total === 1 ? "lead" : "leads"} in your market area` +
-                (isFiltered ? ` · ${pool.leads.length} shown` : "")}
+                (isFiltered ? ` · ${leadsToShow.length} shown` : "")}
           </p>
         </div>
-        <div className="leads-header-actions">
+        <div
+          className={`leads-import-dropzone${isDraggingFile ? " dragging" : ""}${
+            isImporting || pendingFile !== null ? " disabled" : ""
+          }`}
+          onDragEnter={handleDragEnter}
+          onDragLeave={handleDragLeave}
+          onDragOver={handleDragOver}
+          onDrop={(event) => void handleDrop(event)}
+        >
           <input
             ref={fileRef}
             type="file"
@@ -349,13 +704,17 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
             className="sr-only"
             onChange={handleFileChosen}
           />
+          <div className="leads-import-dropzone-copy">
+            <strong>{isDraggingFile ? "Drop file to preview" : "Drag & drop CSV or Excel"}</strong>
+            <span>.csv or .xlsx</span>
+          </div>
           <button
             className="button"
             type="button"
             onClick={() => fileRef.current?.click()}
             disabled={isImporting || pendingFile !== null}
           >
-            {isImporting ? "Importing…" : "↑ Import CSV or Excel"}
+            {isImporting ? "Importing…" : "Choose file"}
           </button>
         </div>
       </header>
@@ -375,6 +734,36 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
               ))}
           </select>
         </label>
+        <LocationCombo
+  icon={PIN_ICON}
+  ariaLabel="Filter by state"
+  placeholder="State…"
+  options={availableStates}
+  selected={locationFilter.state}
+  onSelect={(value) => dispatchLocation({ type: "SET_STATE", value })}
+  onClear={() => dispatchLocation({ type: "CLEAR_STATE" })}
+/>
+        <LocationCombo
+          icon={CITY_ICON}
+          ariaLabel="Filter by city"
+          placeholder={locationFilter.isResolving ? "Searching…" : "City… (press Enter for places)"}
+          options={availableCities}
+          selected={locationFilter.city}
+          onSelect={handleCitySearch}
+          onClear={() => dispatchLocation({ type: "CLEAR_CITY" })}
+          onSubmit={handleCitySearch}
+        />
+
+        <LocationCombo
+          icon={ZIP_ICON}
+          ariaLabel="Filter by ZIP code"
+          placeholder="ZIP…"
+          options={availableZip}
+          selected={locationFilter.zip}
+          onSelect={(value) => dispatchLocation({ type: "SET_ZIP", value })}
+          onClear={() => dispatchLocation({ type: "CLEAR_ZIP" })}
+          onClick={() => loadZips()}
+        />
 
         <div className="leads-signal-filters" role="group" aria-label="Filter by signal">
           {pool.signal_catalog
@@ -399,7 +788,8 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
                 setSearch("");
                 setStage("");
                 setActiveSignals([]);
-                setLocation(NO_LOCATION);
+               
+                dispatchLocation({ type: "CLEAR_ALL" });
               }}
             >
               Clear filters
@@ -479,7 +869,7 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
             </tr>
           </thead>
           <tbody>
-            {pool.leads.map((lead) => {
+           {leadsToShow.map((lead) => {
               const isChecked = selected.includes(lead.id);
               return (
                 <tr key={lead.id} className={isChecked ? "selected" : undefined}>
@@ -492,7 +882,11 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
                     />
                   </td>
                   <td>
-                    <button type="button" className="leads-owner" onClick={() => setDetailId(lead.id)}>
+                    <button
+                      type="button"
+                      className="leads-owner"
+                      onClick={() => setDetailId(lead.id)}
+                    >
                       {lead.owner_name || lead.phone || "Unnamed owner"}
                     </button>
                     <span className="leads-address">
@@ -506,7 +900,9 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
                         <span className="leads-none">—</span>
                       ) : (
                         lead.signals.map((signal) => (
-                          <span key={signal.key} className="leads-signal">{signal.label}</span>
+                          <span key={signal.key} className="leads-signal">
+                            {signal.label}
+                          </span>
                         ))
                       )}
                     </span>
@@ -520,20 +916,6 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
                     </span>
                   </td>
                   <td className="leads-activity">{relativeTime(lead.last_activity_at)}</td>
-                  <td className="leads-phone-cell">
-                    {lead.phone_numbers.length > 0 ? (
-                      <span className="leads-phone-list">
-                        {lead.phone_numbers.map((number) => (
-                          <span className="leads-phone-entry" key={number.phone}>
-                            <a href={`tel:${number.phone}`}>{number.phone}</a>
-                            {number.dnc ? <span className="leads-phone-dnc">DNC</span> : null}
-                          </span>
-                        ))}
-                      </span>
-                    ) : (
-                      <span className="leads-none">No number</span>
-                    )}
-                  </td>
                   <td className="leads-row-actions">
                     <button
                       type="button"
@@ -561,7 +943,7 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
         </table>
 
         {isLoading ? <p className="sms-muted">Loading leads…</p> : null}
-        {!isLoading && pool.leads.length === 0 ? (
+        {!isLoading && leadsToShow.length === 0 ? (
           <div className="leads-empty">
             <div aria-hidden="true">◎</div>
             <h3>{pool.facets.total === 0 ? "No leads yet" : "Nothing matches those filters"}</h3>

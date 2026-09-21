@@ -18,8 +18,8 @@ import { AssignmentsView } from "@/features/assignments/components/assignments-v
 import { AgentLeadsView } from "@/features/assignments/components/agent-leads-view";
 import { getAgentOverview, getBrokerOverview, getMyBroker } from "@/features/assignments/api/assignments-api";
 import type { AgentOverview, BrokerOverview } from "@/features/assignments/types/assignments.types";
-
-type DashboardTab = "overview" | "directory" | "assignments" | "leads" | "campaigns" | "followups";
+import { CalendarContainer } from "@/features/calendar/calendar-container";
+type DashboardTab = "overview" | "directory" | "assignments" | "leads" | "campaigns" | "followups"|"calendar";
 
 type InviteDropdownProps = {
   name: string;
@@ -46,7 +46,7 @@ function InviteDropdown({ name, label, value, placeholder = "Select", options,
     window.addEventListener("pointerdown", close);
     return () => window.removeEventListener("pointerdown", close);
   }, [open]);
-
+ 
   return (
     <div className={`invite-dropdown${open ? " open" : ""}`} ref={rootRef}>
       <input type="hidden" name={name} value={value} />
@@ -90,6 +90,7 @@ function formatResponseTime(seconds: number | null): string {
   if (seconds < 3600) return `${Math.round(seconds / 60)} min`;
   return `${(seconds / 3600).toFixed(1)} hr`;
 }
+
 
 function assignmentDonut(overview: AgentOverview): string {
   if (!overview.assigned_leads) return "conic-gradient(#e5e7e2 0 100%)";
@@ -499,6 +500,27 @@ export function DashboardView() {
               <span>Team Management</span>
             </button>
           ) : null}
+
+   {user.role === "agent" ? (
+  <button
+    type="button"
+    role="tab"
+    aria-selected={view === "calendar"}
+    className={view === "calendar" ? "active" : undefined}
+    onClick={() => openTab("calendar")}
+  >
+    <svg
+      className="dashboard-nav-icon"
+      viewBox="0 0 20 20"
+      aria-hidden="true"
+    >
+      <rect x="3" y="4.5" width="14" height="13" rx="2" />
+      <path d="M6.5 2.5v4M13.5 2.5v4M3 8.5h14" />
+    </svg>
+
+    <span>Calendar</span>
+  </button>
+) : null}
         </nav>
         <button type="button" onClick={logout}>Log out</button>
       </aside>
@@ -620,7 +642,8 @@ export function DashboardView() {
             campaignId={followUpCampaignId}
           />
         ) : null}
-
+        
+      {view === "calendar" ? <CalendarContainer /> : null}
         {view === "overview" ? (
         <>
         <section className="dashboard-panel">
