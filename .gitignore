@@ -34,4 +34,4 @@ fastapi/listingiq.db*
 
 # Zip backups
 *.zip
-EOF
+EOFfastapi/storage/
