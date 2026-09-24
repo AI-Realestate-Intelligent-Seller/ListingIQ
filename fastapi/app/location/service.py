@@ -242,6 +242,25 @@ def get_by_city(city_name: str) -> Dict[str, List]:
     }
 
 
+def get_by_county(county_name: str, state: Optional[str] = None) -> Dict[str, List]:
+    """Return every ZIP centroid belonging to an exact county name."""
+    target_county = county_name.strip().lower()
+    if target_county.endswith(' county'):
+        target_county = target_county[:-7].strip()
+    target_state = (state or '').strip().lower()
+    matched_zips: List[Dict[str, str]] = []
+    matched_states: Set[str] = set()
+    for record in zip_to_data.values():
+        if record['county'].strip().lower() != target_county:
+            continue
+        if target_state and target_state not in {
+                record['state'].lower(), record['state_code'].lower()}:
+            continue
+        matched_zips.append(record)
+        matched_states.add(f"{record['state']},{record['state_code']}")
+    return {'states': sorted(matched_states), 'zipcodes': matched_zips}
+
+
 
 
 def get_by_zip(zipcode: str) -> Dict[str, List]:
@@ -289,5 +308,4 @@ def get_cities(
         })
 
     return []
-
 

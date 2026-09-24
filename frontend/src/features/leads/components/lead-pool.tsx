@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState,useReducer } from "react";
 
 import { useRouter } from "next/navigation";
+import dynamic from "next/dynamic";
 
 import { readAuthSession } from "@/features/auth/lib/auth-storage";
 import { endSession } from "@/features/auth/lib/session-guard";
@@ -19,18 +20,20 @@ import {
   repreviewImport,
 } from "../api/leads-api";
 import type {
+  AreaGeometry,
   ImportPreview,
   Lead,
   LeadDetail,
   LeadPoolResponse,
   LeadStage,
+  MapBounds,
+  MapPoint,
 } from "../types/leads.types";
 import { ImportDialog } from "./import-dialog";
 import { LeadDetailDrawer } from "./lead-detail-drawer";
 import {
   LocationFilter,
   NO_LOCATION,
-  locationCount,
   type LocationSelection,
 } from "./location-filter";
 
@@ -40,7 +43,7 @@ import {
   EMPTY_LOCATION_FILTER,
   type LocationOptions,
 } from "./lead-filterComponents"
-import { getFilterData, getZipCodes, getAllZipCodes, getCities, getByCity, getByZip, resolveLocation} from "@/lib/location/getstates";
+import { getFilterData, getLocationBounds, getBoundary, getBoundsFromGeometry, getZipCodes, getAllZipCodes, getCities, getByCity, getByCounty, getByZip, resolveLocation} from "@/lib/location/getstates";
 import {
   toStringArray,
   parseAddress,
@@ -53,11 +56,17 @@ import {
 
 const EMPTY_POOL: LeadPoolResponse = {
   leads: [],
+  map: { mappable_count: 0, pending_count: 0, failed_count: 0 },
   facets: { total: 0, signals: {}, stages: {} },
   locations: { states: [], cities: [], zips: [] },
   signal_catalog: [],
   stage_catalog: [],
 };
+
+const LeadMap = dynamic(
+  () => import("./lead-map").then((module) => module.LeadMap),
+  { ssr: false, loading: () => <div className="leads-map-loading">Loading map…</div> },
+);
 
 /** Stages carry meaning, so each gets its own colour rather than one grey chip. */
 const STAGE_CLASS: Record<LeadStage, string> = {
@@ -124,6 +133,13 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
   const [errorMessage, setErrorMessage] = useState("");
   const [notice, setNotice] = useState("");
   const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const [showMap, setShowMap] = useState(false);
+  const [draftMapBounds, setDraftMapBounds] = useState<MapBounds | null>(null);
+  const [mapBounds, setMapBounds] = useState<MapBounds | null>(null);
+  const [mapPolygon, setMapPolygon] = useState<MapPoint[] | null>(null);
+  const [fitMapToken, setFitMapToken] = useState(0);
+  const [searchAreaBounds, setSearchAreaBounds] = useState<MapBounds | null>(null);
+  const [searchAreaPolygon, setSearchAreaPolygon] = useState<AreaGeometry | null>(null);
 
   const fileRef = useRef<HTMLInputElement | null>(null);
   const dragDepthRef = useRef(0);
@@ -161,12 +177,12 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
     async (signal?: AbortSignal) => {
       if (!token) return;
       try {
-        console.log("location",locationFilter.state)
         const stateCode = locationFilter.state ? locationFilter.state.split(",")[1]?.trim() : "";
         setPool(
           await fetchLeadPool(
   {
     search,
+    addresses: locationFilter.addressQuery ? [locationFilter.addressQuery] : [],
     signals: activeSignals,
     stage,
    states: stateCode
@@ -174,12 +190,18 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
         : [],
     // For a geocoded place/alias, filter by the canonical ZIP(s) returned by
     // the resolver. Do not send raw text such as "Brington" as a database city.
-    cities: locationFilter.matches.length === 0 && locationFilter.city
-      ? [locationFilter.city]
-      : [],
-    zips: locationFilter.zip
-      ? [locationFilter.zip]
-      : [...new Set(locationFilter.matches.map((item) => item.zip).filter(Boolean))],
+    cities: locationFilter.cityKeys.length > 0
+      ? locationFilter.cityKeys
+      : locationFilter.matches.length === 0 && locationFilter.city
+        ? [locationFilter.city]
+        : [],
+    zips: locationFilter.zips.length > 0
+      ? locationFilter.zips
+      : locationFilter.cityKeys.length > 0 || locationFilter.addressQuery
+        ? []
+        : [...new Set(locationFilter.matches.map((item) => item.zip).filter(Boolean))],
+    bounds: mapBounds ?? undefined,
+    polygon: mapPolygon ?? undefined,
   },
   token,
   signal,
@@ -192,7 +214,7 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
         setIsLoading(false);
       }
     },
-    [token, search, activeSignals, stage, locationFilter.state, locationFilter.city, locationFilter.zip, locationFilter.matches, handleApiError],
+    [token, search, activeSignals, stage, locationFilter.state, locationFilter.city, locationFilter.cityKeys, locationFilter.addressQuery, locationFilter.zips, locationFilter.matches, mapBounds, mapPolygon, handleApiError],
   );
 
   // Filters live on the server, so briefly coalesce changes before refetching.
@@ -211,7 +233,8 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
   const islocationFiltered = Boolean(
       locationFilter.state ||
       locationFilter.city ||
-      locationFilter.zip ||
+      locationFilter.addressQuery ||
+      locationFilter.zips.length ||
       locationFilter.matches.length,
   );
 
@@ -221,20 +244,19 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
   // active it already returns pool.leads unchanged (same reference, not a
   // copy) via the early return below.
   const filteredLeads = useMemo(() => {
-    const { state, zip, matches } = locationFilter;
-    if (!state && !zip && matches.length === 0) return pool.leads;
+    const { state, zips, matches, addressQuery } = locationFilter;
+    if (!state && zips.length === 0 && matches.length === 0) return pool.leads;
 
     const stateCode = state ? state.split(",")[1]?.trim() : "";
- console.log(pool.leads)
     return pool.leads.filter((lead) => {
       const { city, state: leadState, zip: leadZip } = parseAddress(lead.property_address);
 
       if (stateCode && leadState !== stateCode) return false;
-      if (zip && leadZip !== zip) return false;
+      if (zips.length > 0 && !zips.includes(leadZip)) return false;
 
       // Free-typed city search may have resolved to several {city, state, zip}
       // matches (e.g. all 22 Charlestons). A lead passes if it fits ANY of them.
-      if (matches.length > 0) {
+      if (matches.length > 0 && !addressQuery) {
         const matchesAny = matches.some(
           (loc) =>
             (loc.zip && loc.zip === leadZip) ||
@@ -465,6 +487,76 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
         const selectedStateName = locationFilter.state
           ? locationFilter.state.split(",")[0].trim()
           : undefined;
+        const selectedStateCode = locationFilter.state
+          ? locationFilter.state.split(",")[1]?.trim()
+          : undefined;
+
+        // Prefer the complete local city index for exact city names. A place
+        // geocoder commonly returns one representative point/ZIP, which would
+        // incorrectly drop leads in a city's other ZIPs after the API refresh.
+        const exactCity = await getByCity(query);
+        type ExactCityRecord = {
+          city: string;
+          state_code?: string;
+          state: string;
+          zip: string;
+        };
+        const exactRecords: ExactCityRecord[] = Array.isArray(exactCity.zipcodes)
+          ? (exactCity.zipcodes as ExactCityRecord[]).filter((item) =>
+              !selectedStateCode || item.state_code === selectedStateCode,
+            )
+          : [];
+        if (exactRecords.length > 0) {
+          const exactCityKeys = [...new Set(exactRecords.map((item) => {
+            const cityKey = item.city
+              .trim()
+              .toLowerCase()
+              .replace(/^(?:city|town|village|township|borough|municipality)\s+of\s+/, "")
+              .replace(/[^a-z0-9]+/g, " ")
+              .trim();
+            return `${cityKey}|${item.state_code ?? ""}`;
+          }))];
+          const matches = exactRecords.map((item) => ({
+            city: item.city,
+            state: item.state_code ?? item.state,
+            zip: item.zip,
+          }));
+          patchOptions({
+            states: [...new Set(exactRecords.map((item) =>
+              item.state_code ? `${item.state},${item.state_code}` : item.state,
+            ))],
+            cities: [...new Set(exactRecords.map((item) => item.city))],
+            zips: [...new Set(exactRecords.map((item) => item.zip))],
+          });
+          dispatchLocation({
+            type: "RESOLVE_SUCCESS",
+            city: query,
+            matches,
+            cityKeys: exactCityKeys,
+          });
+          return;
+        }
+
+        const exactCounty = await getByCounty(query, selectedStateName);
+        const countyRecords: ExactCityRecord[] = Array.isArray(exactCounty.zipcodes)
+          ? exactCounty.zipcodes as ExactCityRecord[]
+          : [];
+        if (countyRecords.length > 0) {
+          const matches = countyRecords.map((item) => ({
+            city: item.city,
+            state: item.state_code ?? item.state,
+            zip: item.zip,
+          }));
+          patchOptions({
+            states: [...new Set(countyRecords.map((item) =>
+              item.state_code ? `${item.state},${item.state_code}` : item.state,
+            ))],
+            cities: [...new Set(countyRecords.map((item) => item.city))].sort(),
+            zips: [...new Set(countyRecords.map((item) => item.zip))].sort(),
+          });
+          dispatchLocation({ type: "RESOLVE_SUCCESS", city: query, matches });
+          return;
+        }
 
         const result = await resolveLocation(query, selectedStateName);
 
@@ -505,6 +597,9 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
     type: "RESOLVE_SUCCESS",
     city: query,
     matches,
+    addressQuery: /(?:^\d+\s|\b(?:street|st|road|rd|avenue|ave|boulevard|blvd|lane|ln|drive|dr|court|ct|highway|hwy)\b)/i.test(query)
+      ? query
+      : undefined,
   });
 }
            else {
@@ -542,15 +637,17 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
 
   // Narrow the city list when state and/or zip is selected.
   useEffect(() => {
-    if (!locationFilter.state && !locationFilter.zip) return;
+    if (!locationFilter.state && locationFilter.zips.length === 0) return;
     const stateName = locationFilter.state ? locationFilter.state.split(",")[0] : undefined;
-    getCities({
-      state: stateName,
-      zipcode: locationFilter.zip || undefined,
-    })
-      .then((data) => patchOptions({ cities: toStringArray(data) }))
+    const requests = locationFilter.zips.length > 0
+      ? locationFilter.zips.map((zipcode) => getCities({ state: stateName, zipcode }))
+      : [getCities({ state: stateName })];
+    Promise.all(requests)
+      .then((results) => patchOptions({
+        cities: [...new Set(results.flatMap((data) => toStringArray(data)))].sort(),
+      }))
       .catch(() => patchOptions({ cities: [] }));
-  }, [locationFilter.state, locationFilter.zip]);
+  }, [locationFilter.state, locationFilter.zips]);
   
   // Load the full zip list once, on first interaction with the zip field.
   const loadZips = useCallback(() => {
@@ -593,18 +690,21 @@ useEffect(() => {
     }
 
     // If only ZIP is selected, let ZIP -> city/state logic handle it.
-    if (locationFilter.zip) {
+    if (locationFilter.zips.length > 0) {
       return;
     }
 
-    // Nothing selected: go back to full lists.
-    patchOptions({
-      states: [],
-      cities: [],
-      zips: [],
-    });
+    // Nothing selected: go back to full lists on the next task so this effect
+    // does not synchronously cascade another render.
+    const resetTimer = window.setTimeout(() => {
+      patchOptions({
+        states: [],
+        cities: [],
+        zips: [],
+      });
+    }, 0);
 
-    return;
+    return () => window.clearTimeout(resetTimer);
   }
 
   // A geocoded/free-typed place already has canonical results.
@@ -630,27 +730,26 @@ useEffect(() => {
 }, [
   locationFilter.city,
   locationFilter.state,
-  locationFilter.zip,
+  locationFilter.zips,
   locationFilter.matches.length,
 ]);
   // ZIP -> State + City. This completes the dependency graph in the other
   // direction, instead of only supporting State -> ZIP/City.
   useEffect(() => {
-    if (!locationFilter.zip) return;
+    if (locationFilter.zips.length === 0) return;
 
-    getByZip(locationFilter.zip)
-      .then((data) => {
+    Promise.all(locationFilter.zips.map((zip) => getByZip(zip)))
+      .then((results) => {
         patchOptions({
-          states: toStringArray(data.states),
-          cities: toStringArray(data.cities),
-          zips: toStringArray(data.zipcodes ?? []),
+          states: [...new Set(results.flatMap((data) => toStringArray(data.states)))].sort(),
+          cities: [...new Set(results.flatMap((data) => toStringArray(data.cities)))].sort(),
         });
       })
       .catch(() => patchOptions({ states: [], cities: [] }));
-  }, [locationFilter.zip]);
+  }, [locationFilter.zips]);
 
   const availableStates =
-    locationFilter.city || locationFilter.zip
+    locationFilter.city || locationFilter.zips.length > 0
       ? locationOptions.states
       : locationOptions.allStates;
 
@@ -658,11 +757,105 @@ const availableZip =
   locationFilter.state || locationFilter.city ? locationOptions.zips : locationOptions.allZips;
 
 const availableCities =
-  locationFilter.state || locationFilter.zip ? locationOptions.cities : locationOptions.allCities;
+  locationFilter.state || locationFilter.zips.length > 0 ? locationOptions.cities : locationOptions.allCities;
 
-  console.log(availableStates)
+const comboStateName = locationFilter.state.split(",")[0]?.trim() || null;
+const searchStateCode =
+  location.states.length === 1 && location.cities.length === 0 && location.zips.length === 0
+    ? location.states[0].trim().toUpperCase()
+    : null;
+const searchStateName = searchStateCode
+  ? locationOptions.allStates
+      .find((item) => item.split(",")[1]?.trim().toUpperCase() === searchStateCode)
+      ?.split(",")[0]
+      ?.trim() || null
+  : null;
+const fallbackStateAreaName =
+  comboStateName &&
+  !locationFilter.city &&
+  locationFilter.zips.length === 0 &&
+  locationFilter.matches.length === 0
+    ? comboStateName
+    : searchStateName;
 
-    const isFiltered = Boolean(stage || activeSignals.length || islocationFiltered);
+useEffect(() => {
+  const hasLocationArea = Boolean(
+    locationFilter.zips.length > 0 || locationFilter.city || fallbackStateAreaName,
+  );
+  if (!hasLocationArea) {
+    const clearTimer = window.setTimeout(() => {
+      setSearchAreaBounds(null);
+      setSearchAreaPolygon(null);
+    }, 0);
+    return () => window.clearTimeout(clearTimer);
+  }
+
+  let cancelled = false;
+  const loadAreaRecords = async (): Promise<unknown[]> => {
+    if (locationFilter.zips.length > 0) {
+      const results = await Promise.all(locationFilter.zips.map((zip) => getByZip(zip)));
+      return results.flatMap((data) => Array.isArray(data.zipcodes) ? data.zipcodes : []);
+    }
+
+    if (locationFilter.city) {
+      const resolvedZipCodes = [...new Set(
+        locationFilter.matches.map((item) => item.zip).filter(Boolean),
+      )];
+      if (resolvedZipCodes.length > 0) {
+        const resolvedMatches = await Promise.all(
+          resolvedZipCodes.map((zipCode) => getByZip(zipCode)),
+        );
+        return resolvedMatches.flatMap((item) =>
+          Array.isArray(item.zipcodes) ? item.zipcodes : [],
+        );
+      }
+
+      const cityData = await getByCity(locationFilter.city);
+      if (Array.isArray(cityData.zipcodes) && cityData.zipcodes.length > 0) {
+        return cityData.zipcodes;
+      }
+      return [];
+    }
+
+    return fallbackStateAreaName ? getZipCodes(fallbackStateAreaName) : [];
+  };
+
+  void loadAreaRecords()
+    .then(async (data) => {
+      if (cancelled) return;
+
+      const zipCodes = Array.isArray(data)
+        ? data
+            .map((item) => (item as { zip?: string })?.zip)
+            .filter((zip): zip is string => Boolean(zip))
+        : [];
+
+      const geometry = zipCodes.length > 0 ? await getBoundary(zipCodes) : null;
+      if (cancelled) return;
+
+      if (geometry) {
+        setSearchAreaBounds(getBoundsFromGeometry(geometry));
+        setSearchAreaPolygon(geometry);
+        return;
+      }
+
+      // No real boundary on file (e.g. state-level fallback) - fall back to
+      // the centroid bounding box / hull so the map still frames the area.
+      setSearchAreaBounds(getLocationBounds(data));
+      setSearchAreaPolygon(null);
+    })
+    .catch(() => {
+      if (!cancelled) {
+        setSearchAreaBounds(null);
+        setSearchAreaPolygon(null);
+      }
+    });
+  return () => {
+    cancelled = true;
+  };
+}, [fallbackStateAreaName, locationFilter.city, locationFilter.zips, locationFilter.matches]);
+
+    const isFiltered = Boolean(stage || activeSignals.length || islocationFiltered || mapBounds || mapPolygon);
   const stageLabels = Object.fromEntries(pool.stage_catalog.map((item) => [item.key, item.label]));
 
   return (
@@ -746,12 +939,13 @@ const availableCities =
         <LocationCombo
           icon={CITY_ICON}
           ariaLabel="Filter by city"
-          placeholder={locationFilter.isResolving ? "Searching…" : "City… (press Enter for places)"}
+          placeholder={locationFilter.isResolving ? "Searching…" : "City, street or county…"}
           options={availableCities}
           selected={locationFilter.city}
           onSelect={handleCitySearch}
           onClear={() => dispatchLocation({ type: "CLEAR_CITY" })}
           onSubmit={handleCitySearch}
+          optionLimit={locationFilter.state || locationFilter.zips.length > 0 ? undefined : 50}
         />
 
         <LocationCombo
@@ -759,10 +953,14 @@ const availableCities =
           ariaLabel="Filter by ZIP code"
           placeholder="ZIP…"
           options={availableZip}
-          selected={locationFilter.zip}
+          selected={locationFilter.zips}
           onSelect={(value) => dispatchLocation({ type: "SET_ZIP", value })}
-          onClear={() => dispatchLocation({ type: "CLEAR_ZIP" })}
+          onClear={(value) => {
+            if (value) dispatchLocation({ type: "REMOVE_ZIP", value });
+            else dispatchLocation({ type: "CLEAR_ZIPS" });
+          }}
           onClick={() => loadZips()}
+          optionLimit={locationFilter.state || locationFilter.city ? undefined : 50}
         />
 
         <div className="leads-signal-filters" role="group" aria-label="Filter by signal">
@@ -788,6 +986,8 @@ const availableCities =
                 setSearch("");
                 setStage("");
                 setActiveSignals([]);
+                setMapBounds(null);
+                setMapPolygon(null);
                
                 dispatchLocation({ type: "CLEAR_ALL" });
               }}
@@ -797,6 +997,85 @@ const availableCities =
           ) : null}
         </div>
       </div>
+
+      <div className="leads-viewbar">
+        <div className="leads-view-toggle" role="group" aria-label="Map visibility">
+          <button
+            type="button"
+            className={showMap ? "on" : undefined}
+            aria-pressed={showMap}
+            onClick={() => setShowMap((visible) => !visible)}
+          >
+            {showMap ? "Hide map" : "Show map"}
+          </button>
+        </div>
+        {showMap ? (
+          <div className="leads-map-actions">
+            <span className={mapBounds || mapPolygon ? "leads-map-count active" : "leads-map-count"}>
+              {mapPolygon
+                ? `${leadsToShow.length} ${leadsToShow.length === 1 ? "lead" : "leads"} in polygon`
+                : mapBounds
+                ? `${leadsToShow.length} ${leadsToShow.length === 1 ? "lead" : "leads"} in map area`
+                : `${pool.map.mappable_count} mapped ${pool.map.mappable_count === 1 ? "lead" : "leads"}`}
+            </span>
+            {pool.map.pending_count > 0 ? (
+              <span className="leads-map-waiting">{pool.map.pending_count} waiting for geocoding</span>
+            ) : null}
+            <button
+              type="button"
+              className="sms-button-secondary"
+              disabled={!draftMapBounds}
+              onClick={() => {
+                if (!draftMapBounds) return;
+                setMapPolygon(null);
+                setMapBounds(draftMapBounds);
+              }}
+            >
+              Apply map area
+            </button>
+            {mapBounds ? (
+              <button type="button" className="leads-clear" onClick={() => setMapBounds(null)}>
+                Clear map filter
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="leads-clear"
+              onClick={() => setFitMapToken((value) => value + 1)}
+            >
+              {searchAreaBounds ? "Fit search area" : "Fit results"}
+            </button>
+          </div>
+        ) : mapBounds || mapPolygon ? (
+          <button
+            type="button"
+            className="leads-map-filter-pill"
+            onClick={() => { setMapBounds(null); setMapPolygon(null); }}
+          >
+            Geographic filter active · Clear
+          </button>
+        ) : null}
+      </div>
+
+      {showMap ? (
+        <LeadMap
+          leads={leadsToShow}
+          selectedIds={selected}
+          focusLeadId={selected.length ? selected[selected.length - 1] : null}
+          fitToken={fitMapToken}
+          searchAreaBounds={searchAreaBounds}
+          searchAreaPolygon={searchAreaPolygon}
+          onToggleLead={toggleLead}
+          onViewLead={setDetailId}
+          onBoundsChange={setDraftMapBounds}
+          activePolygon={mapPolygon}
+          onPolygonApply={(polygon) => {
+            setMapBounds(null);
+            setMapPolygon(polygon);
+          }}
+          onPolygonClear={() => setMapPolygon(null)}
+        />
+      ) : null}
 
       {selectedVisible.length > 0 ? (
         <div className="leads-selection-bar" role="status">
@@ -864,7 +1143,7 @@ const availableCities =
               </th>
               <th scope="col">Stage</th>
               <th scope="col">Last activity</th>
-              <th scope="col">Phone</th>
+              <th scope="col">Source</th>
               <th scope="col"><span className="sr-only">Actions</span></th>
             </tr>
           </thead>

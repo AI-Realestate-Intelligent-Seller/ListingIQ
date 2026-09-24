@@ -56,7 +56,7 @@ async def add_request_context(request: Request, call_next):
     return response
 
 
-from .db import init_db
+from .init_db import init_db
 
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(team.router, prefix="/api/v1/team", tags=["team"])

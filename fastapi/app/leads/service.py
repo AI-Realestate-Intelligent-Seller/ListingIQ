@@ -24,6 +24,68 @@ from .location import STATE_LABELS, Location, parse as parse_location
 DELETE_CHUNK = 500
 
 
+def validate_bounds(north: float | None, south: float | None,
+                    east: float | None, west: float | None) -> None:
+    """Validate an optional complete, non-antimeridian bounding box."""
+    bounds = (north, south, east, west)
+    if any(value is not None for value in bounds) and any(value is None for value in bounds):
+        raise ValueError('north, south, east and west must be provided together.')
+    if north is not None and not -90 <= north <= 90:
+        raise ValueError('north must be between -90 and 90.')
+    if south is not None and not -90 <= south <= 90:
+        raise ValueError('south must be between -90 and 90.')
+    if east is not None and not -180 <= east <= 180:
+        raise ValueError('east must be between -180 and 180.')
+    if west is not None and not -180 <= west <= 180:
+        raise ValueError('west must be between -180 and 180.')
+    if north is not None and south is not None and north < south:
+        raise ValueError('north must be greater than or equal to south.')
+    if east is not None and west is not None and east < west:
+        raise ValueError('east must be greater than or equal to west.')
+
+
+def validate_polygon(points: object) -> list[tuple[float, float]]:
+    """Validate a client-drawn polygon represented as ``[[lat, lng], ...]``."""
+    if not isinstance(points, list) or not 3 <= len(points) <= 200:
+        raise ValueError('polygon must contain between 3 and 200 points.')
+    result: list[tuple[float, float]] = []
+    for point in points:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            raise ValueError('Each polygon point must be [latitude, longitude].')
+        try:
+            latitude, longitude = float(point[0]), float(point[1])
+        except (TypeError, ValueError):
+            raise ValueError('Polygon coordinates must be numbers.')
+        if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+            raise ValueError('Polygon coordinates are outside valid latitude/longitude ranges.')
+        result.append((latitude, longitude))
+    if len(set(result)) < 3:
+        raise ValueError('polygon must contain at least 3 distinct points.')
+    return result
+
+
+def _point_in_polygon(latitude: float, longitude: float,
+                      polygon: list[tuple[float, float]]) -> bool:
+    """Ray-casting containment with points on polygon edges included."""
+    inside = False
+    previous_lat, previous_lng = polygon[-1]
+    for current_lat, current_lng in polygon:
+        cross = ((longitude - previous_lng) * (current_lat - previous_lat)
+                 - (latitude - previous_lat) * (current_lng - previous_lng))
+        if (abs(cross) < 1e-10
+                and min(previous_lat, current_lat) <= latitude <= max(previous_lat, current_lat)
+                and min(previous_lng, current_lng) <= longitude <= max(previous_lng, current_lng)):
+            return True
+        if ((current_lat > latitude) != (previous_lat > latitude)):
+            intersection = ((previous_lng - current_lng)
+                            * (latitude - current_lat)
+                            / (previous_lat - current_lat) + current_lng)
+            if longitude < intersection:
+                inside = not inside
+        previous_lat, previous_lng = current_lat, current_lng
+    return inside
+
+
 def split_signals(lead: Lead) -> list[str]:
     return [key for key in (lead.signals or '').split(',') if key]
 
@@ -88,6 +150,14 @@ def derive_stage(lead: Lead, now: datetime | None = None) -> str:
 
 def serialize(lead: Lead, now: datetime | None = None) -> dict:
     signals = split_signals(lead)
+    details = lead_details(lead)
+
+    def detail_value(*keys: str):
+        for key in keys:
+            if details.get(key) not in (None, ''):
+                return details[key]
+        return None
+
     return {
         'id': lead.id,
         'owner_name': lead.owner_name,
@@ -95,6 +165,16 @@ def serialize(lead: Lead, now: datetime | None = None) -> dict:
         'phone_numbers': lead_phone_numbers(lead),
         'property_address': lead.property_address,
         'area': lead.area,
+        'latitude': lead.latitude,
+        'longitude': lead.longitude,
+        'geocoding_status': lead.geocoding_status,
+        'geocoding_provider': lead.geocoding_provider,
+        'source': lead.source,
+        # Only the compact facts needed by a marker popup are included here;
+        # the full imported payload remains available from the detail route.
+        'property_type': detail_value('property_type', 'propertyType', 'Property Type'),
+        'estimated_value': detail_value('estimated_value', 'estimatedValue', 'Estimated Value'),
+        'listing_price': detail_value('listing_price', 'listingPrice', 'Listing Price'),
         'signals': [{'key': key, 'label': signal_label(key)} for key in signals],
         'score': lead.score,
         'outreach_reason': lead.outreach_reason,
@@ -285,7 +365,11 @@ def _matches_location(item: Location, city_id: str, states: set[str], cities: se
 
 def list_leads(session: Session, user: User, search: str = '', signals: list[str] | None = None,
                stage: str = '', states: list[str] | None = None, cities: list[str] | None = None,
-               zips: list[str] | None = None) -> list[dict]:
+               zips: list[str] | None = None, north: float | None = None,
+               south: float | None = None, east: float | None = None,
+               west: float | None = None,
+               polygon: list[tuple[float, float]] | None = None,
+               addresses: list[str] | None = None) -> list[dict]:
     """The brokerage's leads, filtered by text, signals, stage and location.
 
     Signal, stage and location filters run in Python: signals are a packed
@@ -293,18 +377,42 @@ def list_leads(session: Session, user: User, search: str = '', signals: list[str
     string, so none can be expressed as a portable SQL predicate. The pool is a
     per-brokerage working set, not a warehouse table.
     """
+    validate_bounds(north, south, east, west)
+    if polygon is not None:
+        polygon = validate_polygon(polygon)
     # A lead in a campaign is shown under that campaign, not here: the pool is
     # what is still to be worked, and a row in both places is a row two people
     # can pick up at once.
     query = (session.query(Lead)
              .filter(Lead.user_id.in_(brokerage_user_ids(session, user)),
                      Lead.campaign_id.is_(None)))
+    if None not in (north, south, east, west):
+        query = query.filter(
+            Lead.latitude.is_not(None),
+            Lead.longitude.is_not(None),
+            Lead.latitude >= south,
+            Lead.latitude <= north,
+            Lead.longitude >= west,
+            Lead.longitude <= east,
+        )
+    if polygon:
+        polygon_lats = [point[0] for point in polygon]
+        polygon_lngs = [point[1] for point in polygon]
+        query = query.filter(
+            Lead.latitude.is_not(None),
+            Lead.longitude.is_not(None),
+            Lead.latitude >= min(polygon_lats),
+            Lead.latitude <= max(polygon_lats),
+            Lead.longitude >= min(polygon_lngs),
+            Lead.longitude <= max(polygon_lngs),
+        )
     now = datetime.utcnow()
     rows = query.order_by(Lead.score.desc(), Lead.id.desc()).all()
     wanted = {key for key in (signals or []) if key}
     want_states = {key for key in (states or []) if key}
     want_cities = {key for key in (cities or []) if key}
     want_zips = {key for key in (zips or []) if key}
+    want_addresses = [value.strip().lower() for value in (addresses or []) if value.strip()]
     # Resolving a town needs the whole pool, so it is only read when a town or
     # a state is being filtered on — a state because a town can imply one.
     city_states: dict[str, str] = {}
@@ -316,7 +424,13 @@ def list_leads(session: Session, user: User, search: str = '', signals: list[str
 
     result = []
     for lead in rows:
+        if (polygon and not _point_in_polygon(
+                float(lead.latitude), float(lead.longitude), polygon)):
+            continue
         if not _matches_search(lead, search, now):
+            continue
+        if want_addresses and not any(
+                value in (lead.property_address or '').lower() for value in want_addresses):
             continue
         if wanted and not wanted.issubset(set(split_signals(lead))):
             continue
@@ -330,6 +444,18 @@ def list_leads(session: Session, user: User, search: str = '', signals: list[str
             continue
         result.append(item)
     return result
+
+
+def map_summary(leads: list[dict]) -> dict:
+    """Counts for the current combined filter set, including geocoding state."""
+    return {
+        'mappable_count': sum(
+            item['latitude'] is not None and item['longitude'] is not None for item in leads),
+        'pending_count': sum(
+            item['geocoding_status'] in {'pending', 'processing'} for item in leads),
+        'failed_count': sum(
+            item['geocoding_status'] in {'failed', 'invalid_address'} for item in leads),
+    }
 
 
 def location_facets(session: Session, user: User, states: list[str] | None = None,

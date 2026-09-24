@@ -1,5 +1,6 @@
 from fastapi import APIRouter,Query,HTTPException
-from ..location.service import get_fitlerData, get_zipcodes, get_all_zipcodes,get_cities,get_by_city,get_by_zip
+from ..location.service import get_fitlerData, get_zipcodes, get_all_zipcodes,get_cities,get_by_city,get_by_zip,get_by_county
+from ..location.boundary_service import get_dissolved_boundary
 from app.location.geocoding_service import resolve_place_to_zip
 
 router = APIRouter()
@@ -62,4 +63,22 @@ def by_zip(zipcode: str = Query(..., min_length=5, max_length=10)):
     result = get_by_zip(zipcode)
     if not result["states"]:
         raise HTTPException(status_code=404, detail=f"No location data for ZIP '{zipcode}'")
+    return result
+
+
+@router.get("/boundary")
+def boundary(zips: str = Query(..., min_length=5)):
+    """Dissolved outline geometry (GeoJSON) for the given comma-separated ZIP codes."""
+    zip_list = sorted({z.strip() for z in zips.split(",") if z.strip()})
+    geometry = get_dissolved_boundary(zip_list)
+    if not geometry:
+        raise HTTPException(status_code=404, detail="No boundary data for given ZIP codes")
+    return {"type": "Feature", "geometry": geometry, "properties": {}}
+
+
+@router.get("/by-county")
+def by_county(county: str = Query(..., min_length=1), state: str | None = None):
+    result = get_by_county(county, state)
+    if not result["zipcodes"]:
+        raise HTTPException(status_code=404, detail=f"No location data for county '{county}'")
     return result

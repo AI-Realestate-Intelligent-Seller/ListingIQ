@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useId, useState } from "react";
 
 
 
@@ -53,11 +53,13 @@ export type LocationComboProps = {
   ariaLabel: string;
   placeholder: string;
   options: string[];
-  selected: string;
+  selected: string | string[];
   onSelect: (value: string) => void;
-  onClear: () => void;
+  onClear: (value?: string) => void;
   onClick?: () => void;
   onSubmit?: (query: string) => void;
+  /** Limits very large nationwide menus; omit after State/City narrows the options. */
+  optionLimit?: number;
 };
 
 export function LocationCombo({
@@ -70,70 +72,125 @@ export function LocationCombo({
   onClear,
   onClick,
   onSubmit,
+  optionLimit,
 }: LocationComboProps) {
-  
+    const listId = useId();
     const [query, setQuery] = useState("");
     const [open, setOpen] = useState(false);
+    const [editing, setEditing] = useState(false);
+    const isMulti = Array.isArray(selected);
+    const selectedValues = isMulti ? selected : selected ? [selected] : [];
+    const singleSelected = typeof selected === "string" ? selected : "";
   
-    const filtered = options
-      .filter((option) =>
-        option.toLowerCase().includes(query.toLowerCase())
-      )
-      .slice(0, 50);
+    const matchingOptions = options.filter((option) =>
+      option.toLowerCase().includes(query.toLowerCase()) &&
+      (!Array.isArray(selected) || !selectedValues.includes(option))
+    );
+    const filtered = optionLimit === undefined
+      ? matchingOptions
+      : matchingOptions.slice(0, optionLimit);
   
     return (
       <div className="leads-location-combo">
-        <span className="leads-combo-icon" aria-hidden="true">
-          {icon}
-        </span>
-  
-        <input
+        <div className={`leads-combo-field${Array.isArray(selected) ? " multi" : ""}`}>
+          <span className="leads-combo-icon" aria-hidden="true">
+            {icon}
+          </span>
+
+          {Array.isArray(selected) && selected.length > 0 ? (
+            <div className="leads-combo-values" aria-label={`${ariaLabel} selections`}>
+              {selected.map((value) => (
+                <span key={value} className="leads-combo-value">
+                  {value}
+                  <button
+                    type="button"
+                    aria-label={`Remove ${value}`}
+                    onClick={() => onClear(value)}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : null}
+
+          <input
           type="text"
+          role="combobox"
           className="leads-combo-input"
-          placeholder={selected || placeholder}
-          value={query}
+          placeholder={Array.isArray(selected) && selected.length > 0 ? "Add ZIP…" : placeholder}
+          value={editing ? query : singleSelected}
           onChange={(event) => {
+            setEditing(true);
             setQuery(event.target.value);
             setOpen(true);
           }}
-          onFocus={() => {
+          onFocus={(event) => {
             onClick?.();
-  
+            if (singleSelected) event.currentTarget.select();
             if (options.length > 0) {
               setOpen(true);
             }
           }}
           onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              setOpen(false);
+              setEditing(false);
+              setQuery("");
+              return;
+            }
             if (event.key !== "Enter") return;
+
             const trimmed = query.trim();
-            if (!onSubmit || !trimmed) return;
-            event.preventDefault();
-            onSubmit(trimmed);
-            setOpen(false);
+            if (onSubmit && trimmed) {
+              event.preventDefault();
+              onSubmit(trimmed);
+              setQuery("");
+              setEditing(false);
+              setOpen(false);
+              return;
+            }
+            if (!onSubmit && filtered[0]) {
+              event.preventDefault();
+              onSelect(filtered[0]);
+              setQuery("");
+              setEditing(false);
+              setOpen(false);
+            }
           }}
-          onBlur={() => window.setTimeout(() => setOpen(false), 120)}
+          onBlur={() => window.setTimeout(() => {
+            setOpen(false);
+            setEditing(false);
+            setQuery("");
+          }, 120)}
           aria-label={ariaLabel}
           aria-expanded={open}
           aria-haspopup="listbox"
-        />
-  
-        {selected ? (
-          <button
-            type="button"
-            className="leads-combo-clear"
-            aria-label={`Clear ${ariaLabel}`}
-            onMouseDown={(event) => {
-              event.preventDefault();
-              onClear();
-              setQuery("");
-            }}
-          >
-            ×
-          </button>
-        ) : null}
+          aria-controls={listId}
+          aria-autocomplete="list"
+          />
+
+          {singleSelected ? (
+            <button
+              type="button"
+              className="leads-combo-clear"
+              aria-label={`Clear ${ariaLabel}`}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                onClear(singleSelected);
+                setQuery("");
+                setEditing(false);
+                setOpen(false);
+              }}
+            >
+              ×
+            </button>
+          ) : null}
+        </div>
   
       {open && options.length > 0 ? (
     <ul
+      id={listId}
       className="leads-combo-list"
       role="listbox"
       aria-label={ariaLabel}
@@ -143,6 +200,7 @@ export function LocationCombo({
           {onSubmit && query.trim() ? (
             <li
               role="option"
+              aria-selected={false}
               className="leads-combo-search"
               onMouseDown={(event) => {
                 event.preventDefault();
@@ -151,10 +209,11 @@ export function LocationCombo({
   
                 onSubmit(trimmed);
                 setQuery("");
+                setEditing(false);
                 setOpen(false);
               }}
             >
-              Search "{query.trim()}"
+              Search &quot;{query.trim()}&quot;
             </li>
           ) : (
             <li className="leads-combo-empty">
@@ -168,14 +227,18 @@ export function LocationCombo({
             <li
               key={option}
               role="option"
-              aria-selected={selected === option}
+              aria-selected={selectedValues.includes(option)}
               className={
-                selected === option ? "active" : undefined
+                selectedValues.includes(option) ? "active" : undefined
               }
-              onMouseDown={() => {
+              onMouseDown={(event) => {
+                event.preventDefault();
                 onSelect(option);
                 setQuery("");
-                setOpen(false);
+                setEditing(false);
+                // Multi-select (e.g. ZIPs): keep the list open so the user
+                // can pick the next one without refocusing the field.
+                if (!isMulti) setOpen(false);
               }}
             >
               {option}
@@ -185,6 +248,7 @@ export function LocationCombo({
           {onSubmit && query.trim() ? (
             <li
               role="option"
+              aria-selected={false}
               className="leads-combo-search"
               onMouseDown={(event) => {
                 event.preventDefault();
@@ -193,10 +257,11 @@ export function LocationCombo({
   
                 onSubmit(trimmed);
                 setQuery("");
+                setEditing(false);
                 setOpen(false);
               }}
             >
-              Search "{query.trim()}"
+              Search &quot;{query.trim()}&quot;
             </li>
           ) : null}
         </>
@@ -282,7 +347,9 @@ export type ResolvedLocation = {
 export type LocationFilterState = {
   state: string; // "State Name, XX" combo value from LocationCombo
   city: string; // raw text the user searched
-  zip: string; // a single manually-picked zip
+  cityKeys: string[]; // canonical exact-city keys, e.g. "greenleaf|WI"
+  addressQuery: string; // street/address text, kept separate from advanced search
+  zips: string[]; // manually-picked ZIPs; selections widen the ZIP filter
   matches: ResolvedLocation[]; // all matches resolved for `city`
   isResolving: boolean;
 };
@@ -290,7 +357,9 @@ export type LocationFilterState = {
 export  const EMPTY_LOCATION_FILTER: LocationFilterState = {
   state: "",
   city: "",
-  zip: "",
+  cityKeys: [],
+  addressQuery: "",
+  zips: [],
   matches: [],
   isResolving: false,
 };
@@ -299,9 +368,10 @@ export type LocationFilterAction =
   | { type: "SET_STATE"; value: string }
   | { type: "CLEAR_STATE" }
   | { type: "SET_ZIP"; value: string }
-  | { type: "CLEAR_ZIP" }
+  | { type: "REMOVE_ZIP"; value: string }
+  | { type: "CLEAR_ZIPS" }
   | { type: "RESOLVE_START" }
-  | { type: "RESOLVE_SUCCESS"; city: string; matches: ResolvedLocation[] }
+  | { type: "RESOLVE_SUCCESS"; city: string; matches: ResolvedLocation[]; cityKeys?: string[]; addressQuery?: string }
   | { type: "RESOLVE_FAILURE" }
   | { type: "CLEAR_CITY" }
   | { type: "CLEAR_ALL" };
@@ -314,28 +384,39 @@ export function locationFilterReducer(
     case "SET_STATE":
       // State is the parent filter: changing it invalidates any city/ZIP
       // that belonged to the previously selected state.
-      return { ...state, state: action.value, city: "", zip: "", matches: [] };
+      return { ...state, state: action.value, city: "", cityKeys: [], addressQuery: "", zips: [], matches: [] };
     case "CLEAR_STATE":
       return { ...state, state: "" };
     case "SET_ZIP":
-      // A manually chosen zip overrides any city-search ambiguity.
-      return { ...state, zip: action.value, city: "", matches: [] };
-    case "CLEAR_ZIP":
-      return { ...state, zip: "" };
+      // A manually chosen zip overrides any free-text/geocoded ambiguity,
+      // but an already-resolved city (picked from the dropdown) stays
+      // selected - zips widen that selection instead of replacing it.
+      return {
+        ...state,
+        zips: state.zips.includes(action.value) ? state.zips : [...state.zips, action.value],
+        addressQuery: "",
+        matches: [],
+      };
+    case "REMOVE_ZIP":
+      return { ...state, zips: state.zips.filter((zip) => zip !== action.value) };
+    case "CLEAR_ZIPS":
+      return { ...state, zips: [] };
     case "RESOLVE_START":
       return { ...state, isResolving: true };
     case "RESOLVE_SUCCESS":
       return {
         ...state,
         city: action.city,
+        cityKeys: action.cityKeys ?? [],
+        addressQuery: action.addressQuery ?? "",
         matches: action.matches,
-        zip: "",
+        zips: [],
         isResolving: false,
       };
     case "RESOLVE_FAILURE":
-      return { ...state, matches: [], isResolving: false };
+      return { ...state, cityKeys: [], addressQuery: "", matches: [], isResolving: false };
     case "CLEAR_CITY":
-      return { ...state, city: "", matches: [] };
+      return { ...state, city: "", cityKeys: [], addressQuery: "", matches: [] };
     case "CLEAR_ALL":
       return EMPTY_LOCATION_FILTER;
     default:
@@ -363,4 +444,3 @@ export const EMPTY_LOCATION_OPTIONS: LocationOptions = {
   allZips: [],
   allStates: [],
 };
-

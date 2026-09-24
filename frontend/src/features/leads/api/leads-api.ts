@@ -18,6 +18,7 @@ export function fetchLeadPool(
 ): Promise<LeadPoolResponse> {
   const params = new URLSearchParams();
   if (query.search) params.set("search", query.search);
+  for (const value of query.addresses ?? []) params.append("address", value);
   if (query.stage) params.set("stage", query.stage);
   // Repeated keys — the API requires every listed signal to be present.
   for (const key of query.signals ?? []) params.append("signal", key);
@@ -25,6 +26,15 @@ export function fetchLeadPool(
   for (const key of query.states ?? []) params.append("state", key);
   for (const key of query.cities ?? []) params.append("city", key);
   for (const key of query.zips ?? []) params.append("zip", key);
+  if (query.bounds) {
+    params.set("north", String(query.bounds.north));
+    params.set("south", String(query.bounds.south));
+    params.set("east", String(query.bounds.east));
+    params.set("west", String(query.bounds.west));
+  }
+  if (query.polygon && query.polygon.length >= 3) {
+    params.set("polygon", JSON.stringify(query.polygon));
+  }
 
   const suffix = params.toString();
   return getJson<LeadPoolResponse>(`${LEADS}${suffix ? `?${suffix}` : ""}`, accessToken, signal);

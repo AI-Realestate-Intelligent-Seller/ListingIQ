@@ -14,6 +14,14 @@ export type Lead = {
   phone_numbers: { phone: string; dnc: boolean }[];
   property_address: string | null;
   area: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  geocoding_status: "pending" | "processing" | "success" | "failed" | "invalid_address";
+  geocoding_provider: string | null;
+  source: string;
+  property_type: string | number | null;
+  estimated_value: string | number | null;
+  listing_price: string | number | null;
   signals: LeadSignal[];
   score: number;
   /** The reason shipped with the lead, if the import carried one. */
@@ -65,6 +73,7 @@ export type LeadFacets = {
 
 export type LeadPoolResponse = {
   leads: Lead[];
+  map: { mappable_count: number; pending_count: number; failed_count: number };
   facets: LeadFacets;
   locations: LocationFacets;
   signal_catalog: LeadSignal[];
@@ -126,6 +135,8 @@ export type LeadHistory = {
 
 export type LeadQuery = {
   search?: string;
+  /** Street/address fragments entered through the place filter. */
+  addresses?: string[];
   signals?: string[];
   stage?: string;
   /** USPS state codes. Each location filter narrows the pool on its own. */
@@ -133,4 +144,20 @@ export type LeadQuery = {
   /** Town keys from the location facets, e.g. "mattoon|IL". */
   cities?: string[];
   zips?: string[];
+  bounds?: MapBounds;
+  polygon?: MapPoint[];
 };
+
+export type MapPoint = [latitude: number, longitude: number];
+
+export type MapBounds = {
+  north: number;
+  south: number;
+  east: number;
+  west: number;
+};
+
+/** The real ZIP/city outline drawn on the map, as returned by /location/boundary. */
+export type AreaGeometry =
+  | { type: "Polygon"; coordinates: number[][][] }
+  | { type: "MultiPolygon"; coordinates: number[][][][] };

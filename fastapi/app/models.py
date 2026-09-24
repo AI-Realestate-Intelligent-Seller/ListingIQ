@@ -5,8 +5,11 @@ from sqlalchemy import (
     Text,
     DateTime,
     Boolean,
+    Float,
     ForeignKey,
     Index,
+    event,
+    inspect,
 )
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
@@ -188,12 +191,24 @@ class Lead(Base):
     the broker adds it to a campaign, and `conversation_id` links the two.
     """
     __tablename__ = 'leads'
+    __table_args__ = (Index('ix_leads_coordinates', 'latitude', 'longitude'),)
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
     owner_name = Column(String(255))
     phone = Column(String(50), index=True)
     property_address = Column(String(500))
     area = Column(String(120))
+    # Coordinates are populated asynchronously by app.location.worker.  They
+    # belong to the lead (rather than a transient map response), so map views
+    # never need to geocode while rendering.
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    geocoding_status = Column(String(24), nullable=False, default='pending', index=True)
+    geocoding_provider = Column(String(50), nullable=True)
+    geocoded_at = Column(DateTime, nullable=True)
+    geocoding_error = Column(String(500), nullable=True)
+    geocoding_retry_count = Column(Integer, nullable=False, default=0)
+    normalized_address = Column(String(700), nullable=True)
     # Canonical signal keys, comma separated (see app.leads.catalog).
     signals = Column(String(500), nullable=False, default='')
     # The vendor's own words for why this owner is being contacted. Bobbie uses
@@ -225,6 +240,22 @@ class Lead(Base):
     user = relationship('User', foreign_keys=[user_id])
     conversation = relationship('Conversation')
     assigned_agent = relationship('User', foreign_keys=[assigned_agent_id])
+
+
+@event.listens_for(Lead, 'before_insert')
+def _queue_new_lead_for_geocoding(_mapper, _connection, lead):
+    from .location.queue import prepare_lead
+
+    prepare_lead(lead)
+
+
+@event.listens_for(Lead, 'before_update')
+def _requeue_changed_lead_address(_mapper, _connection, lead):
+    state = inspect(lead)
+    if state.attrs.property_address.history.has_changes() or state.attrs.area.history.has_changes():
+        from .location.queue import prepare_lead
+
+        prepare_lead(lead)
 
 
 class LeadEvent(Base):
@@ -465,4 +496,3 @@ class Notification(Base):
     user = relationship("User")
     booking = relationship("Booking")
     reminder = relationship("BookingReminder")
-    

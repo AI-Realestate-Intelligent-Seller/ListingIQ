@@ -63,12 +63,18 @@ def _require_access(user: User) -> None:
 @router.get('')
 def list_leads(
     search: str = '',
+    address: list[str] = Query(default=[], description='Street/address fragments'),
     signal: list[str] = Query(default=[]),
     stage: str = '',
     state: list[str] = Query(default=[], description='USPS state codes, e.g. IL'),
     city: list[str] = Query(default=[], description='Town keys from the location facets, e.g. "mattoon|IL"'),
     # Aliased rather than named `zip`, which would shadow the builtin.
     zip_code: list[str] = Query(default=[], alias='zip', description='Five-digit ZIP codes'),
+    north: float | None = Query(None, ge=-90, le=90),
+    south: float | None = Query(None, ge=-90, le=90),
+    east: float | None = Query(None, ge=-180, le=180),
+    west: float | None = Query(None, ge=-180, le=180),
+    polygon: str = Query('', description='JSON array of [latitude, longitude] points'),
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
 ):
@@ -80,11 +86,22 @@ def list_leads(
     used. See app.leads.location for how a location is read out of an address.
     """
     _require_access(current_user)
+    try:
+        leads_service.validate_bounds(north, south, east, west)
+        polygon_points = leads_service.validate_polygon(json.loads(polygon)) if polygon else None
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=422, detail='polygon must be valid JSON.')
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error))
     # Stage and last activity are system-owned; refresh them before reading.
     leads_service.sync_activity(session, brokerage_user_ids(session, current_user))
+    filtered = leads_service.list_leads(
+        session, current_user, search, signal, stage, state, city, zip_code,
+        north, south, east, west, polygon_points, addresses=address,
+    )
     return {
-        'leads': leads_service.list_leads(session, current_user, search, signal, stage,
-                                          state, city, zip_code),
+        'leads': filtered,
+        'map': leads_service.map_summary(filtered),
         'facets': leads_service.facets(session, current_user),
         'locations': leads_service.location_facets(session, current_user, state, city, zip_code),
         'signal_catalog': catalog.catalog(),

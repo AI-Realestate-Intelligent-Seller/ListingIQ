@@ -114,6 +114,30 @@ def load_config():
         'staging_ttl_minutes': int(os.getenv('LEAD_UPLOAD_TTL_MINUTES',
                                              leads_cfg.get('staging_ttl_minutes', 30))),
     }
+    geocoding_cfg = cfg.get('geocoding', {}) if isinstance(cfg.get('geocoding', {}), dict) else {}
+    cfg['geocoding'] = {
+        'provider': os.getenv('GEOCODING_PROVIDER', geocoding_cfg.get('provider', 'nominatim')),
+        'nominatim_base_url': (
+            os.getenv('NOMINATIM_BASE_URL')
+            or geocoding_cfg.get('nominatim_base_url')
+            or 'https://nominatim.openstreetmap.org'
+        ).rstrip('/'),
+        'country': os.getenv('GEOCODING_COUNTRY', geocoding_cfg.get('country', 'us')).lower(),
+        'request_interval_seconds': float(os.getenv(
+            'GEOCODING_REQUEST_INTERVAL_SECONDS',
+            geocoding_cfg.get('request_interval_seconds', 1.1),
+        )),
+        'timeout_seconds': float(os.getenv(
+            'GEOCODING_TIMEOUT_SECONDS', geocoding_cfg.get('timeout_seconds', 12),
+        )),
+        'user_agent': os.getenv(
+            'NOMINATIM_USER_AGENT',
+            geocoding_cfg.get('user_agent', 'ListingIQ/1.0 (lead-geocoding)'),
+        ),
+        'max_retries': int(os.getenv(
+            'GEOCODING_MAX_RETRIES', geocoding_cfg.get('max_retries', 3),
+        )),
+    }
     cfg['redis_url'] = os.getenv('REDIS_URL', 'redis://127.0.0.1:6379')
     cfg['frontend_url'] = os.getenv('FRONTEND_URL', cfg.get('frontend_url', 'http://localhost:3000'))
     smtp_port = os.getenv('SMTP_PORT', cfg.get('smtp', {}).get('port') if isinstance(cfg.get('smtp', {}), dict) else None)

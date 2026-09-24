@@ -1,3 +1,6 @@
-"""The lead pool: CSV import, signal/stage vocabulary, and campaign hand-off."""
+"""The lead pool: CSV import, signal/stage vocabulary, and campaign hand-off.
 
-from . import campaign, catalog, importer, service  # noqa: F401
+Submodules are intentionally loaded on demand. Eagerly importing campaign and
+SMS dependencies here makes lightweight users such as migrations and the
+geocoding worker enter the SMS package through a circular import.
+"""
