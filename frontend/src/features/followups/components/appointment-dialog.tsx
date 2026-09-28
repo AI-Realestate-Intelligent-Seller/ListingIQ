@@ -1,11 +1,19 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useEffect, useState } from "react";
 
 import { getAvailability } from "@/features/sms/api/sms-api";
 import type { CalendarSlot } from "@/features/sms/types/sms.types";
 
 import type { AppointmentPayload, FollowUp } from "../types/followups.types";
+import type { GeocodedAppointmentAddress } from "../types/followups.types";
+import { geocodeAppointmentAddress } from "../api/followups-api";
+
+const AppointmentLocationMap = dynamic(
+  () => import("./appointment-location-map").then((module) => module.AppointmentLocationMap),
+  { ssr: false, loading: () => <div className="appointment-map-loading">Loading map…</div> },
+);
 
 type AppointmentDialogProps = {
   followUp: FollowUp | null;
@@ -24,6 +32,9 @@ export function AppointmentDialog({ followUp, accessToken, onClose, onBook }: Ap
   const [timezone, setTimezone] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [address, setAddress] = useState("");
+  const [resolvedAddress, setResolvedAddress] = useState<GeocodedAppointmentAddress | null>(null);
+  const [isGeocoding, setIsGeocoding] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
 
   const isOpen = followUp !== null;
@@ -32,6 +43,9 @@ export function AppointmentDialog({ followUp, accessToken, onClose, onBook }: Ap
     if (!isOpen) return;
     let cancelled = false;
     setIsLoading(true);
+    setAddress("");
+    setResolvedAddress(null);
+    setIsGeocoding(false);
     setErrorMessage("");
 
     getAvailability(accessToken)
@@ -57,6 +71,27 @@ export function AppointmentDialog({ followUp, accessToken, onClose, onBook }: Ap
 
   if (!followUp) return null;
 
+  async function previewAddress(): Promise<void> {
+    const exactAddress = address.trim();
+    setErrorMessage("");
+    if (!exactAddress) {
+      setErrorMessage("Enter the exact appointment address.");
+      return;
+    }
+
+    setIsGeocoding(true);
+    try {
+      setResolvedAddress(await geocodeAppointmentAddress(exactAddress, accessToken));
+    } catch (error) {
+      setResolvedAddress(null);
+      setErrorMessage(
+        error instanceof Error ? error.message : "Could not find that address.",
+      );
+    } finally {
+      setIsGeocoding(false);
+    }
+  }
+
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (isSaving) return;
@@ -68,6 +103,10 @@ export function AppointmentDialog({ followUp, accessToken, onClose, onBook }: Ap
       setErrorMessage("Pick one of your open times.");
       return;
     }
+    if (!resolvedAddress || resolvedAddress.address !== address.trim()) {
+      setErrorMessage("Preview the exact address on the map before booking.");
+      return;
+    }
 
     setIsSaving(true);
     try {
@@ -75,6 +114,7 @@ export function AppointmentDialog({ followUp, accessToken, onClose, onBook }: Ap
         start_at: chosen.start_at,
         end_at: chosen.end_at,
         title: String(form.get("title") ?? "").trim() || undefined,
+        address: resolvedAddress.address,
         notify: form.get("notify") === "on",
       });
     } catch (error) {
@@ -136,12 +176,53 @@ export function AppointmentDialog({ followUp, accessToken, onClose, onBook }: Ap
             />
           </label>
 
+          <label className="sms-field">
+            <span>Exact appointment address</span>
+            <div className="appointment-address-row">
+              <input
+                name="address"
+                value={address}
+                maxLength={500}
+                autoComplete="street-address"
+                placeholder="123 Main St, City, State ZIP"
+                disabled={isSaving}
+                onChange={(event) => {
+                  setAddress(event.target.value);
+                  setResolvedAddress(null);
+                }}
+              />
+              <button
+                type="button"
+                className="sms-button-secondary"
+                disabled={isSaving || isGeocoding || !address.trim()}
+                onClick={() => void previewAddress()}
+              >
+                {isGeocoding ? "Finding…" : "Preview on map"}
+              </button>
+            </div>
+            <small>Enter the full street address, then verify the pin before booking.</small>
+          </label>
+
+          {resolvedAddress ? (
+            <div className="appointment-map-preview">
+              <AppointmentLocationMap
+                address={resolvedAddress.display_name}
+                latitude={resolvedAddress.latitude}
+                longitude={resolvedAddress.longitude}
+              />
+              <p>
+                <strong>Map match</strong>
+                <span>{resolvedAddress.display_name}</span>
+              </p>
+            </div>
+          ) : null}
+
           <label className="sms-toggle">
             <input type="checkbox" name="notify" defaultChecked disabled={isSaving} />
             <span>
               <strong>Text the owner the confirmation</strong>
               <small>
-                Sends the date, time and meeting link to {followUp.contact}. Bobbie will not reply to
+                Sends the date, time, exact address and map link to {followUp.contact}. Bobbie will not reply to
                 that message.
               </small>
             </span>
@@ -156,7 +237,7 @@ export function AppointmentDialog({ followUp, accessToken, onClose, onBook }: Ap
             <button
               type="submit"
               className="button"
-              disabled={isSaving || isLoading || slots.length === 0}
+              disabled={isSaving || isLoading || isGeocoding || slots.length === 0 || !resolvedAddress}
             >
               {isSaving ? "Booking…" : "Book appointment"}
             </button>

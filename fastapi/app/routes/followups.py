@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from ..leads import address as address_key
 from ..leads.catalog import signal_label
 from ..leads.service import split_signals
+from ..location.geocoding_service import build_query
 from ..logger import get_logger
 from ..models import Campaign, Conversation, Lead, Message, User
 from ..schemas import (
@@ -346,6 +347,11 @@ def book_appointment(
     conversation = _owned_conversation(session, conversation_id, current_user)
     if conversation.dnc_alert or conversation.lead_status == 'dnc':
         raise HTTPException(status_code=409, detail='This owner has opted out and cannot be contacted.')
+    if build_query(payload.address) is None:
+        raise HTTPException(
+            status_code=400,
+            detail='Enter a complete street address including city, state, and ZIP code.',
+        )
 
     try:
         booking = calendar_service.create_booking(
@@ -356,6 +362,7 @@ def book_appointment(
             payload.title or 'Property consultation',
             payload.start_at,
             payload.end_at,
+            location_address=payload.address,
         )
     except calendar_service.SlotTakenError as error:
         raise HTTPException(status_code=409, detail=str(error))

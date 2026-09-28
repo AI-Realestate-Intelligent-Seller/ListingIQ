@@ -191,7 +191,7 @@ Created:
 - `fastapi/tests/propertyradar/{conftest,test_integration}.py`
 - `fastapi/scripts/propertyradar_local_smoke.py`
 - `fastapi/requirements-dev.txt`
-- `fastapi/propertyradar.env.example`
+- `fastapi/.env.example` (see the PropertyRadar integration section)
 - `frontend/src/app/platform-admin/integrations/page.tsx`
 - `frontend/src/app/platform-admin/integrations/propertyradar/page.tsx`
 - `frontend/src/features/integrations/{types.ts,propertyradar-view.tsx,propertyradar-view.test.tsx}`

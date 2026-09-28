@@ -4,6 +4,7 @@ import type { LeadStatus } from "@/features/sms/types/sms.types";
 import type {
   AppointmentPayload,
   AppointmentResult,
+  GeocodedAppointmentAddress,
   FollowUp,
   FollowUpState,
 } from "../types/followups.types";
@@ -60,6 +61,17 @@ export function bookAppointment(
   return postJson<AppointmentResult, AppointmentPayload>(
     `${FOLLOWUPS}/${conversationId}/appointment`,
     payload,
+    accessToken,
+  );
+}
+
+export function geocodeAppointmentAddress(
+  address: string,
+  accessToken: string,
+): Promise<GeocodedAppointmentAddress> {
+  return postJson<GeocodedAppointmentAddress, { address: string }>(
+    "/location/geocode",
+    { address },
     accessToken,
   );
 }

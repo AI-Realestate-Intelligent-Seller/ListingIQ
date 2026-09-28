@@ -79,6 +79,7 @@ export type Booking = {
   phone: string;
   name: string | null;
   title: string;
+  location_address: string | null;
   start_at: string;
   end_at: string;
   join_url: string;

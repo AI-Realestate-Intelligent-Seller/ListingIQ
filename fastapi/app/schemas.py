@@ -264,7 +264,8 @@ class FollowUpAppointmentRequest(BaseModel):
     start_at: datetime
     end_at: datetime
     title: Optional[str] = Field(None, max_length=200)
-    # Text the owner the confirmation and the meeting link.
+    address: str = Field(..., min_length=5, max_length=500)
+    # Text the owner the confirmation and the appointment map link.
     notify: bool = True
 
 class FollowUpAppointmentResult(BaseModel):
