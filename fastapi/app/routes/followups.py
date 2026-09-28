@@ -12,7 +12,6 @@ be listed or acted on. Taking a thread over and reading
 its messages stay on the SMS endpoints — this module adds no second way to do
 either.
 """
-
 from collections import defaultdict
 from datetime import datetime
 

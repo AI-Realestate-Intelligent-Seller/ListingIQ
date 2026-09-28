@@ -7,12 +7,12 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from ..logger import get_logger
-from ..models import Conversation, Message
+from ..models import Conversation, Lead, Message
 from ..sms import service
 from ..sms.followup_scheduler import cancel_followup_cadence
 from ..sms.webhook_security import InvalidSignatureError, verification_enabled, verify_webhook
 from .auth import get_db
-
+from ..reminder.notification import notify_conversation_reply
 router = APIRouter()
 logger = get_logger(__name__)
 
@@ -44,62 +44,194 @@ def _extract_inbound(payload: dict) -> dict | None:
     }
 
 
-@router.post('/telnyx')
-async def telnyx_webhook(req: Request, background: BackgroundTasks, db: Session = Depends(get_db)):
-    raw = await req.body()
-    try:
-        verify_webhook(
-            raw,
-            req.headers.get('telnyx-signature-ed25519'),
-            req.headers.get('telnyx-timestamp'),
+
+def process_inbound_message(
+    db: Session,
+    inbound: dict,
+    background: BackgroundTasks | None = None,
+):
+    """
+    Single source of truth for every inbound SMS.
+
+    Used by:
+    - Real Telnyx webhook
+   
+    """
+
+
+    conversation = (
+        db.query(Conversation)
+        .filter(
+            Conversation.contact
+            == inbound["from_number"]
         )
-    except InvalidSignatureError as error:
-        logger.warning('[webhook] rejected unsigned/invalid Telnyx post: %s', error)
-        raise HTTPException(status_code=401, detail='Invalid webhook signature')
+        .order_by(
+            Conversation.created_at.desc(),
+            Conversation.id.desc(),
+        )
+        .first()
+    )
 
-    if not verification_enabled():
-        logger.warning('[webhook] TELNYX_PUBLIC_KEY is not set — accepting unverified webhooks')
-
-    try:
-        payload = json.loads(raw or b'{}')
-    except ValueError:
-        raise HTTPException(status_code=400, detail='Malformed webhook payload')
-    inbound = _extract_inbound(payload)
-    if not inbound:
-        return {'ok': True}
-
-    # Route the reply into the most recent thread for that number. A conversation
-    # is always owned by a broker, so an unknown number is ignored rather than
-    # creating an ownerless thread.
-    conversation = (db.query(Conversation)
-                    .filter(Conversation.contact == inbound['from_number'])
-                    .order_by(Conversation.created_at.desc(), Conversation.id.desc())
-                    .first())
     if not conversation:
-        logger.warning('[webhook] inbound from unknown contact %s ignored', inbound['from_number'])
-        raise HTTPException(status_code=404, detail='No conversation exists for this number')
+        raise HTTPException(
+            status_code=404,
+            detail="No conversation exists for this number",
+        )
 
     message = Message(
         conversation_id=conversation.id,
-        direction='inbound',
-        from_number=inbound['from_number'],
-        to_number=inbound['to_number'],
-        text=inbound['text'],
-        status='received',
-        event_type='message.received',
-        telnyx_id=inbound['telnyx_id'],
+        direction="inbound",
+        from_number=inbound["from_number"],
+        to_number=inbound.get("to_number"),
+        text=inbound["text"],
+        status="received",
+        event_type="message.received",
+        telnyx_id=inbound.get("telnyx_id"),
         created_at=datetime.utcnow(),
     )
+
     db.add(message)
     db.commit()
     db.refresh(message)
 
-    # Any owner reply immediately ends the no-response cadence before Bobbie
-    # considers the response. This also revives a previously dead thread.
-    cancel_followup_cadence(db, conversation, owner_replied=True)
-    service.log_first_reply(db, conversation, message)
-    service.record_inbound_classification(db, conversation, inbound['text'])
-    if conversation.ai_enabled:
-        background.add_task(service.process_ai_reply, conversation.id, inbound['text'])
 
-    return {'ok': True, 'message_id': message.id, 'conversation_id': conversation.id}
+    # A thread can be linked to multiple leads/properties. Notify each current
+    # assignee once; retain the creator as the fallback for unassigned threads.
+    recipient_user_ids = [
+        user_id for (user_id,) in db.query(Lead.assigned_agent_id)
+        .filter(
+            Lead.conversation_id == conversation.id,
+            Lead.assigned_agent_id.isnot(None),
+        )
+        .distinct()
+        .order_by(Lead.assigned_agent_id)
+        .all()
+    ] or [conversation.user_id]
+
+    print(
+        "[INBOUND MESSAGE]",
+        "message_id=", message.id,
+        "conversation_id=", conversation.id,
+        "recipient_user_ids=", recipient_user_ids,
+        "text=", inbound["text"],
+    )
+
+
+   
+    # Notification
+  
+
+    for recipient_user_id in recipient_user_ids:
+        notify_conversation_reply(
+            session=db,
+            user_id=recipient_user_id,
+            conversation_id=conversation.id,
+            message_text=inbound["text"],
+            sender_name=conversation.name or conversation.contact or "Customer",
+        )
+
+    cancel_followup_cadence(
+        db,
+        conversation,
+        owner_replied=True,
+    )
+
+    service.log_first_reply(
+        db,
+        conversation,
+        message,
+    )
+
+    service.record_inbound_classification(
+        db,
+        conversation,
+        inbound["text"],
+    )
+
+    if (
+        conversation.ai_enabled
+        and background is not None
+    ):
+        background.add_task(
+            service.process_ai_reply,
+            conversation.id,
+            inbound["text"],
+        )
+
+
+    return {
+        "ok": True,
+        "message_id": message.id,
+        "conversation_id": conversation.id,
+        "user_id": conversation.user_id,
+        "recipient_user_ids": recipient_user_ids,
+    }
+
+
+
+@router.post("/telnyx")
+async def telnyx_webhook(
+    req: Request,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    raw = await req.body()
+
+    try:
+        verify_webhook(
+            raw,
+            req.headers.get(
+                "telnyx-signature-ed25519"
+            ),
+            req.headers.get(
+                "telnyx-timestamp"
+            ),
+        )
+
+    except InvalidSignatureError as error:
+        logger.warning(
+            "[webhook] rejected unsigned/invalid Telnyx post: %s",
+            error,
+        )
+
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid webhook signature",
+        )
+
+
+    if not verification_enabled():
+        logger.warning(
+            "[webhook] TELNYX_PUBLIC_KEY is not set — "
+            "accepting unverified webhooks"
+        )
+
+
+    try:
+        payload = json.loads(
+            raw or b"{}"
+        )
+
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Malformed webhook payload",
+        )
+
+
+    inbound = _extract_inbound(
+        payload
+    )
+
+
+    if not inbound:
+        return {
+            "ok": True
+        }
+
+
+    return process_inbound_message(
+        db=db,
+        inbound=inbound,
+        background=background,
+    )

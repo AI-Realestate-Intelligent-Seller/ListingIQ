@@ -22,11 +22,14 @@ import { NewConversationDialog } from "@/features/sms/components/new-conversatio
 import { ApiRequestError } from "@/lib/api/http-client";
 import { LeadDetailDrawer } from "@/features/leads/components/lead-detail-drawer";
 import { LeadTimeline } from "@/features/leads/components/lead-timeline";
+import { NotificationBell } from "@/features/dashboard/components/notification-bell";
 
 import { bookAppointment, listFollowUps, setFollowUpStatus } from "../api/followups-api";
 import type { AppointmentPayload, FollowUp, FollowUpState } from "../types/followups.types";
 import { AppointmentDialog } from "./appointment-dialog";
-
+import {
+  useNotifications,
+} from "../../dashboard/components/notification-provider";
 /** How often the list and the open thread refresh. */
 const POLL_INTERVAL_MS = 8000;
 
@@ -261,6 +264,87 @@ export function FollowUpsBoard({
       .filter(Boolean)
       .some((value) => String(value).toLowerCase().includes(needle));
   });
+  const {
+  markConversationAsRead,
+} = useNotifications();
+
+useEffect(() => {
+
+  window.dispatchEvent(
+    new CustomEvent(
+      "listingiq-active-conversation",
+      {
+        detail: {
+          conversationId:
+            activeId,
+        },
+      },
+    ),
+  );
+
+  if (
+    "serviceWorker" in navigator
+  ) {
+    navigator.serviceWorker.ready
+      .then((registration) => {
+        registration.active?.postMessage({
+          type:
+            "ACTIVE_CONVERSATION",
+
+          conversation_id:
+            activeId,
+        });
+      })
+      .catch((error) => {
+        console.error(
+          "[FollowUps] Failed to update active conversation in SW:",
+          error,
+        );
+      });
+  }
+
+
+  if (activeId !== null) {
+    void markConversationAsRead(
+      activeId,
+    );
+  }
+
+
+  return () => {
+    
+    window.dispatchEvent(
+      new CustomEvent(
+        "listingiq-active-conversation",
+        {
+          detail: {
+            conversationId: null,
+          },
+        },
+      ),
+    );
+
+
+    if (
+      "serviceWorker" in navigator
+    ) {
+      void navigator.serviceWorker.ready
+        .then((registration) => {
+          registration.active?.postMessage({
+            type:
+              "ACTIVE_CONVERSATION",
+
+            conversation_id:
+              null,
+          });
+        });
+    }
+  };
+
+}, [
+  activeId,
+  markConversationAsRead,
+]);
 
   async function handleCreate(payload: NewConversationPayload): Promise<void> {
     const result = await createConversation(payload, token);
@@ -371,9 +455,12 @@ export function FollowUpsBoard({
             {viewer ? `${ROLE_LABELS[viewer.role] ?? "Workspace"} view — ${viewer.full_name}` : ""}
           </p>
         </div>
-        <button className="button" type="button" onClick={() => setIsNewConversationOpen(true)}>
-          + New conversation
-        </button>
+        <div className="dashboard-header-actions">
+          <NotificationBell />
+          <button className="button" type="button" onClick={() => setIsNewConversationOpen(true)}>
+            + New conversation
+          </button>
+        </div>
       </header>
 
       <div className="followups-layout">

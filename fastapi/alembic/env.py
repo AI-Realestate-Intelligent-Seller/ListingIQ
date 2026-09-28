@@ -8,7 +8,8 @@ from app.db import Base
 from app.core.config import settings
 
 config = context.config
-fileConfig(config.config_file_name)
+# Migrations also run inside FastAPI startup; keep the server loggers enabled.
+fileConfig(config.config_file_name, disable_existing_loggers=False)
 config.set_main_option('sqlalchemy.url', settings['database']['url'])
 
 target_metadata = Base.metadata

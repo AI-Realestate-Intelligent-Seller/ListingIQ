@@ -113,6 +113,10 @@ def login(form: UserCreate, session: Session = Depends(get_db)):
         expires_delta=timedelta(days=30),
     )
     expires_in = ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    if form.timezone is not None and user.timezone != form.timezone:
+        user.timezone = form.timezone
+        session.commit()
+        session.refresh(user)
     return {
         "access_token": token,
         "refresh_token": refresh_token,

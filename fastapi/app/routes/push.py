@@ -34,18 +34,24 @@ def subscribe_to_push(
     p256dh = subscription["keys"]["p256dh"]
     auth = subscription["keys"]["auth"]
 
+
+    # First look for this DEVICE, regardless of which
+    # ListingIQ user previously owned it.
+  
+
     existing = (
         db.query(PushSubscription)
         .filter(
-            PushSubscription.user_id == user_id,
             PushSubscription.device_id == device_id,
         )
         .first()
     )
 
     if existing:
-        # Same browser/device.
-        # Replace old endpoint with current one.
+        # Same physical browser/device.
+        
+
+        existing.user_id = user_id
         existing.endpoint = endpoint
         existing.p256dh = p256dh
         existing.auth = auth
@@ -55,11 +61,12 @@ def subscribe_to_push(
         db.refresh(existing)
 
         return {
-            "message":
-                "Push subscription refreshed"
+            "message": "Push subscription refreshed",
+            "subscription_id": existing.id,
+            "user_id": existing.user_id,
         }
 
-    # Different/new browser
+
     push_subscription = PushSubscription(
         user_id=user_id,
         device_id=device_id,
@@ -74,6 +81,7 @@ def subscribe_to_push(
     db.refresh(push_subscription)
 
     return {
-        "message":
-            "Push subscription created"
+        "message": "Push subscription created",
+        "subscription_id": push_subscription.id,
+        "user_id": push_subscription.user_id,
     }

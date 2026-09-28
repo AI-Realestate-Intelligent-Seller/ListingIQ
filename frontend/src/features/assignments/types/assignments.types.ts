@@ -21,6 +21,13 @@ export type AssignmentLead = Lead & {
 export type AssignmentsResponse = { leads: AssignmentLead[]; agents: AssignmentAgent[] };
 export type BrokerSummary = { id: number; full_name: string | null; email: string };
 export type MyAssignedLeadsResponse = { leads: AssignmentLead[]; broker: BrokerSummary | null };
+export type UpcomingEvent = {
+  id: number;
+  name: string | null;
+  title: string | null;
+  start_at: string;
+  end_at: string | null;
+};
 export type AgentOverview = {
   assigned_leads: number;
   new_assignments: number;
@@ -30,6 +37,9 @@ export type AgentOverview = {
   appointments_booked: number;
   completion_rate: number;
   average_handling_seconds: number | null;
+  average_response_seconds: number | null;
+  reply_rate: number | null;
+upcoming_events:UpcomingEvent[];
 };
 export type BrokerOverview = {
   campaigns_started: number;

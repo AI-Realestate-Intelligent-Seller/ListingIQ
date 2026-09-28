@@ -8,22 +8,26 @@ from app.models import Booking
 from app.models import BookingReminder
 from app.models import Notification,User
 from .push import send_push_to_user
+from .actions import action_for_notification, dashboard_url
+from .notification import broadcast_notification_event_sync
 
 BATCH_SIZE = 500
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 def utc_to_user_timezone(
     utc_naive_datetime,
     timezone_name: str,
 ):
-    utc_aware = utc_naive_datetime.replace(
-        tzinfo=timezone.utc
-    )
+    utc_aware = utc_naive_datetime
+    if utc_aware.tzinfo is None:
+        utc_aware = utc_aware.replace(tzinfo=timezone.utc)
 
-    user_zone = ZoneInfo(
-        timezone_name
-    )
+    try:
+        user_zone = ZoneInfo(timezone_name or 'America/Chicago')
+    except (ZoneInfoNotFoundError, ValueError):
+        # Preserve the existing fallback for users without a usable timezone.
+        user_zone = ZoneInfo('America/Chicago')
 
     return utc_aware.astimezone(
         user_zone
@@ -167,37 +171,70 @@ def process_single_reminder(
 
     message = (
     f"Your meeting starts at "
-    f"{local_start.strftime('%I:%M %p')}."
+    f"{local_start.strftime('%b %d, %Y at %I:%M %p %Z')}."
 )
     # Create notification
    
 
-    notification = Notification(
-        user_id=reminder.user_id,
-        booking_id=booking.id,
-        reminder_id=reminder.id,
-        type="BOOKING_REMINDER",
-        title=title,
-        message=message,
-        is_read=False,
+    notification = db.scalar(
+        select(Notification).where(Notification.reminder_id == reminder.id)
     )
+    is_new_notification = notification is None
+    if is_new_notification:
+        notification = Notification(
+            user_id=reminder.user_id,
+            booking_id=booking.id,
+            reminder_id=reminder.id,
+            type="BOOKING_REMINDER",
+            action_url=dashboard_url({"view": "calendar", "booking_id": booking.id}),
+            title=title,
+            message=message,
+            is_read=False,
+        )
 
-    db.add(notification)
-    db.commit()
-    db.refresh(notification)
+        db.add(notification)
+        db.commit()
+        db.refresh(notification)
 
+    # In-app delivery does not depend on a browser push subscription. Retries
+    # reuse the stored notification without broadcasting another unread alert.
+    if is_new_notification:
+        notification_data = {
+            "id": notification.id,
+            "type": notification.type,
+            "title": notification.title,
+            "message": notification.message,
+            "is_read": notification.is_read,
+            "action_url": notification.action_url,
+            "action": action_for_notification(notification),
+            "booking_id": notification.booking_id,
+            "created_at": notification.created_at.isoformat() if notification.created_at else None,
+        }
+        try:
+            broadcast_notification_event_sync(
+                user_id=reminder.user_id,
+                notification=notification_data,
+            )
+        except Exception as error:
+            print(f"[REMINDER BROADCAST FAILED] id={reminder.id} | error={error}")
 
     try:
 
-        send_push_to_user(
+        sent_count = send_push_to_user(
             db=db,
             user_id=reminder.user_id,
             title=title,
             body=message,
-            url=f"/calendar/bookings/{booking.id}",
+            url=notification.action_url,
         )
+        if sent_count <= 0:
+            reminder.status = "pending"
+            db.commit()
+            return
 
     except Exception as error:
+
+        db.rollback()
 
         print(
             f"[PUSH FAILED] "
@@ -214,12 +251,11 @@ def process_single_reminder(
 
     # Mark reminder sent
    
-
+    
     reminder.status = "sent"
     reminder.sent_at = utc_now_naive()
 
     db.commit()
-
     print(
         f"[REMINDER SENT] "
         f"id={reminder.id}"

@@ -146,13 +146,22 @@ def send_sms(payload: dict) -> dict:
     return parsed
 
 
-def send_and_store_message(session, conversation: Conversation, text: str,
-                           event_type: str = 'message.sent',
-                           suppress_auto_reply: bool = False) -> Message:
+def send_and_store_message(
+    session,
+    conversation: Conversation,
+    text: str,
+    event_type: str = 'message.sent',
+    suppress_auto_reply: bool = False,
+    sender_user_id: int | None = None,
+) -> Message:
+
     lead_context = None
+
     if conversation.lead_context:
         try:
-            lead_context = json.loads(conversation.lead_context)
+            lead_context = json.loads(
+                conversation.lead_context
+            )
         except ValueError:
             lead_context = None
 
@@ -171,12 +180,21 @@ def send_and_store_message(session, conversation: Conversation, text: str,
         text=text,
         status='queued',
         event_type=event_type,
-        telnyx_id=(response.get('data') or {}).get('id'),
+
+        # NEW
+        sender_user_id=sender_user_id,
+
+        telnyx_id=(
+            response.get('data') or {}
+        ).get('id'),
+
         created_at=datetime.utcnow(),
     )
+
     session.add(message)
     session.commit()
     session.refresh(message)
+
     return message
 
 

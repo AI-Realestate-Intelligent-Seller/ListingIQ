@@ -2,16 +2,18 @@
 
 import json
 from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..leads import events as lead_events
+from ..leads.response_analytics import get_agent_response_analytics
 from ..leads.service import serialize
-from ..models import Campaign, Conversation, Lead, Message, User
+from ..models import Campaign, Conversation, Lead, Message, User,Booking
 from ..schemas import LeadAssignmentRequest, LeadAssignmentStageRequest
 from .auth import get_current_user, get_db
-
+from ..reminder.notification import notify_user
 router = APIRouter()
 
 
@@ -190,47 +192,178 @@ def my_assignment_overview(
     session: Session = Depends(get_db),
 ):
     """Persisted assignment and follow-up metrics for the Agent Overview."""
+
     _require_agent(current_user)
-    leads = session.query(Lead).filter(Lead.assigned_agent_id == current_user.id).all()
-    counts = {stage: sum(1 for lead in leads if _assignment_stage(lead) == stage)
-              for stage in ASSIGNMENT_STAGES}
 
-    conversation_ids = [lead.conversation_id for lead in leads if lead.conversation_id]
-    conversations = ([] if not conversation_ids else
-                     session.query(Conversation).filter(Conversation.id.in_(conversation_ids)).all())
-    messages = ([] if not conversation_ids else
-                session.query(Message)
-                .filter(Message.conversation_id.in_(conversation_ids))
-                .order_by(Message.conversation_id, Message.created_at, Message.id).all())
-    latest_by_conversation = {}
-    for message in messages:
-        latest_by_conversation[message.conversation_id] = message
-    attention = sum(1 for conversation in conversations
-                    if latest_by_conversation.get(conversation.id)
-                    and latest_by_conversation[conversation.id].direction == 'inbound')
-    appointments = sum(1 for conversation in conversations if conversation.meeting_booked)
+    leads = (
+        session.query(Lead)
+        .filter(
+            Lead.assigned_agent_id == current_user.id
+        )
+        .all()
+    )
 
-    completed_seconds = []
-    for lead in leads:
-        if _assignment_stage(lead) not in COMPLETED_STAGES:
-            continue
-        totals = _stage_seconds(lead)
-        completed_seconds.append(sum(totals[stage] for stage in ('new', *IN_PROGRESS_STAGES)))
-
-    total = len(leads)
-    return {
-        'assigned_leads': total,
-        'new_assignments': counts['new'],
-        'in_progress_leads': sum(counts[stage] for stage in IN_PROGRESS_STAGES),
-        'completed_leads': sum(counts[stage] for stage in COMPLETED_STAGES),
-        'replies_requiring_attention': attention,
-        'appointments_booked': appointments,
-        'completion_rate': round((sum(counts[stage] for stage in COMPLETED_STAGES) / total * 100)
-                                 if total else 0, 1),
-        'average_handling_seconds': (round(sum(completed_seconds) / len(completed_seconds))
-                                     if completed_seconds else None),
+    counts = {
+        stage: sum(
+            1
+            for lead in leads
+            if _assignment_stage(lead) == stage
+        )
+        for stage in ASSIGNMENT_STAGES
     }
 
+    conversation_ids = [
+        lead.conversation_id
+        for lead in leads
+        if lead.conversation_id
+    ]
+
+    conversations = (
+        []
+        if not conversation_ids
+        else session.query(Conversation)
+        .filter(
+            Conversation.id.in_(
+                conversation_ids
+            )
+        )
+        .all()
+    )
+
+    messages = (
+        []
+        if not conversation_ids
+        else session.query(Message)
+        .filter(
+            Message.conversation_id.in_(
+                conversation_ids
+            )
+        )
+        .order_by(
+            Message.conversation_id,
+            Message.created_at,
+            Message.id,
+        )
+        .all()
+    )
+
+    latest_by_conversation = {}
+
+    for message in messages:
+        latest_by_conversation[
+            message.conversation_id
+        ] = message
+
+    attention = sum(
+        1
+        for conversation in conversations
+        if latest_by_conversation.get(
+            conversation.id
+        )
+        and latest_by_conversation[
+            conversation.id
+        ].direction == 'inbound'
+    )
+
+    appointments = sum(
+        1
+        for conversation in conversations
+        if conversation.meeting_booked
+    )
+
+    completed_seconds = []
+
+    for lead in leads:
+        if (
+            _assignment_stage(lead)
+            not in COMPLETED_STAGES
+        ):
+            continue
+
+        totals = _stage_seconds(lead)
+
+        completed_seconds.append(
+            sum(
+                totals[stage]
+                for stage in (
+                    'new',
+                    *IN_PROGRESS_STAGES,
+                )
+            )
+        )
+
+    total = len(leads)
+    response_analytics = (
+        get_agent_response_analytics(
+            session=session,
+            agent_id=current_user.id,
+        )
+    )
+    upcoming_events = get_upcoming_calendar_events(
+    session=session,
+    agent_id=current_user.id,
+)
+
+    return {
+        'assigned_leads': total,
+
+        'new_assignments':
+            counts['new'],
+
+        'in_progress_leads':
+            sum(
+                counts[stage]
+                for stage
+                in IN_PROGRESS_STAGES
+            ),
+
+        'completed_leads':
+            sum(
+                counts[stage]
+                for stage
+                in COMPLETED_STAGES
+            ),
+
+        'replies_requiring_attention':
+            attention,
+
+        'appointments_booked':
+            appointments,
+
+        'completion_rate':
+            round(
+                (sum(
+                        counts[stage]
+                        for stage
+                        in COMPLETED_STAGES
+                    )
+                    / total
+                    * 100
+                )
+                if total
+                else 0,
+                1,
+            ),
+
+        'average_handling_seconds':
+            (
+                round(
+                    sum(completed_seconds)
+                    / len(completed_seconds)
+                )
+                if completed_seconds
+                else None
+            ),
+        'upcoming_events': upcoming_events,
+        'average_response_seconds':
+            response_analytics[
+                'average_response_seconds'
+            ],
+        'reply_rate':
+            response_analytics[
+                'reply_rate'
+            ],
+    }
 
 @router.get('/my-broker')
 def get_my_broker(
@@ -253,39 +386,134 @@ def round_robin_assignments(
     session: Session = Depends(get_db),
 ):
     """Evenly distribute unassigned replied leads across linked active agents."""
-    _require_broker(current_user)
-    agents = _linked_agents(session, current_user)
-    if not agents:
-        raise HTTPException(status_code=400, detail='Link at least one active agent before automatic assignment.')
 
-    leads = _replied_leads(session, current_user)
-    unassigned = [lead for lead in leads if lead.assigned_agent_id is None]
-    workload = {agent.id: sum(1 for lead in leads if lead.assigned_agent_id == agent.id)
-                for agent in agents}
+    _require_broker(current_user)
+
+    agents = _linked_agents(
+        session,
+        current_user,
+    )
+
+    if not agents:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                'Link at least one active agent '
+                'before automatic assignment.'
+            ),
+        )
+
+    leads = _replied_leads(
+        session,
+        current_user,
+    )
+
+    unassigned = [
+        lead
+        for lead in leads
+        if lead.assigned_agent_id is None
+    ]
+
+    workload = {
+        agent.id: sum(
+            1
+            for lead in leads
+            if lead.assigned_agent_id == agent.id
+        )
+        for agent in agents
+    }
+
     now = datetime.utcnow()
+
+    # Keep track of exactly which agent
+    # received each lead.
+    assigned_pairs: list[tuple[Lead, User]] = []
+
     for lead in unassigned:
-        agent = min(agents, key=lambda row: (workload[row.id], row.full_name or row.email, row.id))
+
+        agent = min(
+            agents,
+            key=lambda row: (
+                workload[row.id],
+                row.full_name or row.email,
+                row.id,
+            ),
+        )
+
         lead.assigned_agent_id = agent.id
         lead.assignment_stage = 'new'
         lead.assignment_stage_changed_at = now
         lead.assignment_stage_seconds = '{}'
+
         workload[agent.id] += 1
+
+        assigned_pairs.append(
+            (lead, agent)
+        )
+
     if unassigned:
+
         session.commit()
-        for lead in unassigned:
+
+        for lead, agent in assigned_pairs:
+
             lead_events.log_event(
-                session, lead.id, lead_events.ASSIGNMENT, 'assigned',
-                actor_type='broker', actor_id=current_user.id, target_id=lead.assigned_agent_id,
+                session,
+                lead.id,
+                lead_events.ASSIGNMENT,
+                'assigned',
+                actor_type='broker',
+                actor_id=current_user.id,
+                target_id=agent.id,
                 reason='round robin',
             )
 
+            try:
+                notify_user(
+                    session=session,
+                    user_id=agent.id,
+                    notification_type="LEAD_ASSIGNED",
+                    title="New lead assigned",
+                    message=(
+                        "A new lead has been assigned to you."
+                    ),
+                    action_url=f"/dashboard?view=leads&lead_id={lead.id}",
+                )
+
+                print(
+                    "[ROUND ROBIN NOTIFICATION SENT]",
+                    f"lead_id={lead.id}",
+                    f"agent_id={agent.id}",
+                )
+
+            except Exception as error:
+                print(
+                    "[LEAD ASSIGNMENT NOTIFICATION FAILED]",
+                    f"lead_id={lead.id}",
+                    f"agent_id={agent.id}",
+                    repr(error),
+                )
+
     return {
         'assigned': len(unassigned),
-        'leads': [_serialize_assignment(session, lead) for lead in leads],
-        'agents': [{'id': agent.id, 'full_name': agent.full_name, 'email': agent.email}
-                   for agent in agents],
-    }
 
+        'leads': [
+            _serialize_assignment(
+                session,
+                lead,
+            )
+            for lead in leads
+        ],
+
+        'agents': [
+            {
+                'id': agent.id,
+                'full_name': agent.full_name,
+                'email': agent.email,
+            }
+            for agent in agents
+        ],
+    }
 
 @router.patch('/mine/{lead_id}/stage')
 def update_my_lead_stage(
@@ -336,10 +564,11 @@ def assign_lead(
     session: Session = Depends(get_db),
 ):
     _require_broker(current_user)
+    
     lead = next((row for row in _replied_leads(session, current_user) if row.id == lead_id), None)
     if not lead:
         raise HTTPException(status_code=404, detail='Replied lead not found.')
-
+    assigned_agent = None
     previous_agent_id = lead.assigned_agent_id
     if payload.agent_id is None:
         lead.assigned_agent_id = None
@@ -348,6 +577,8 @@ def assign_lead(
                       if row.id == payload.agent_id), None)
         if not agent:
             raise HTTPException(status_code=400, detail='Select an active agent assigned to you.')
+        
+        assigned_agent = agent       
         if lead.assigned_agent_id != agent.id:
             lead.assigned_agent_id = agent.id
             lead.assignment_stage = 'new'
@@ -356,7 +587,7 @@ def assign_lead(
 
     session.commit()
     session.refresh(lead)
-
+    
     if previous_agent_id != lead.assigned_agent_id:
         if lead.assigned_agent_id is None:
             event_type = 'revoked'
@@ -370,4 +601,80 @@ def assign_lead(
             from_value=str(previous_agent_id) if previous_agent_id else None,
             to_value=str(lead.assigned_agent_id) if lead.assigned_agent_id else None,
         )
+          
+        if (
+            lead.assigned_agent_id
+            is not None
+            and assigned_agent
+            is not None
+        ):
+
+            try:
+
+                notification_title = (
+                    "Lead reassigned to you"
+                    if previous_agent_id
+                    is not None
+                    else "New lead assigned"
+                )
+                print("hi noti")
+                notify_user(
+                    session=session,
+                    user_id=
+                        assigned_agent.id,
+                    notification_type=
+                        "LEAD_ASSIGNED",
+                    title=
+                        notification_title,
+                    message=(
+                        "A lead has been "
+                        "assigned to you."
+                    ),
+                    action_url=
+                        f"/dashboard?view=leads&lead_id={lead.id}",
+                )
+
+            except Exception as error:
+
+                print(
+                    "[LEAD ASSIGNMENT "
+                    "NOTIFICATION FAILED]",
+                    error,
+                )
+
     return _serialize_assignment(session, lead)
+
+
+
+def get_upcoming_calendar_events(
+    session: Session,
+    agent_id: int,
+    limit: int = 5,
+) -> list[dict]:
+
+    now = datetime.utcnow()
+
+    bookings = (
+        session.query(Booking)
+        .filter(
+            Booking.user_id == agent_id,
+            Booking.start_at >= now,
+        )
+        .order_by(
+            Booking.start_at.asc(),
+            Booking.id.asc(),
+        )
+        .limit(limit)
+        .all()
+    )
+
+    return [
+        {
+            "id": booking.id,
+            "name": booking.name,
+            "title": booking.title,
+            "start_at": booking.start_at.replace(tzinfo=timezone.utc) if booking.start_at.tzinfo is None else booking.start_at,
+            "end_at": (booking.end_at.replace(tzinfo=timezone.utc) if booking.end_at.tzinfo is None else booking.end_at) if booking.end_at else None,
+        }
+        for booking in bookings
+    ]
