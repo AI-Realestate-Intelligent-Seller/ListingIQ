@@ -450,7 +450,7 @@ class Notification(Base):
             "booking_reminders.id",
             ondelete="SET NULL",
         ),
-        nullable=False,
+        nullable=True,
         unique=True,
     )
 

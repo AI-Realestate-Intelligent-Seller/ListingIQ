@@ -19,7 +19,7 @@ def upgrade():
     op.add_column('conversations',
                   sa.Column('handled_by', sa.String(20), nullable=False, server_default='bobbie'))
     # Threads where Bobbie has already stopped belong to the broker from now on.
-    op.execute("UPDATE conversations SET handled_by = 'broker' WHERE ai_enabled = 0")
+    op.execute("UPDATE conversations SET handled_by = 'broker' WHERE ai_enabled = FALSE")
 
 
 def downgrade():

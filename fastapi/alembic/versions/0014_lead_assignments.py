@@ -29,10 +29,10 @@ def upgrade():
     connection.execute(sa.text(
         "UPDATE users SET assigned_broker_id = ("
         " SELECT MIN(b.id) FROM users b"
-        " WHERE b.brokerage_id = users.brokerage_id AND b.role = 'broker' AND b.is_active = 1"
+        " WHERE b.brokerage_id = users.brokerage_id AND b.role = 'broker' AND b.is_active = TRUE"
         ") WHERE users.role = 'agent' AND users.assigned_broker_id IS NULL"
         " AND 1 = (SELECT COUNT(*) FROM users b WHERE b.brokerage_id = users.brokerage_id"
-        " AND b.role = 'broker' AND b.is_active = 1)"
+        " AND b.role = 'broker' AND b.is_active = TRUE)"
     ))
 
 
