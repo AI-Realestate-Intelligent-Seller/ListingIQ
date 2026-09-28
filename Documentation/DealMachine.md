@@ -4,7 +4,7 @@ DealMachine is available to active platform administrators at `http://localhost:
 
 ## Setup
 
-1. Copy the values in `fastapi/dealmachine.env.example` into the backend environment. Use a random 32+ character `DEALMACHINE_ENCRYPTION_KEY` when storing the key through the settings endpoint.
+1. Copy the DealMachine values from `fastapi/.env.example` into the backend environment. Use a random 32+ character `DEALMACHINE_ENCRYPTION_KEY` when storing the key through the settings endpoint.
 2. Apply migrations: `cd fastapi && .venv311/bin/alembic upgrade head`.
 3. Start the API: `.venv311/bin/uvicorn app.main:app --reload --port 8000`.
 4. Start the UI: `cd ../frontend && npm run dev`.

@@ -1,9 +1,17 @@
-from fastapi import APIRouter,Query,HTTPException
+import httpx
+from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, Query, HTTPException
 from ..location.service import get_fitlerData, get_zipcodes, get_all_zipcodes,get_cities,get_by_city,get_by_zip,get_by_county
 from ..location.boundary_service import get_dissolved_boundary
-from app.location.geocoding_service import resolve_place_to_zip
+from app.location.geocoding_service import build_query, get_geocoder, resolve_place_to_zip
+from ..models import User
+from .auth import get_current_user
 
 router = APIRouter()
+
+
+class ExactAddressRequest(BaseModel):
+    address: str = Field(..., min_length=5, max_length=500)
 
 
 @router.get("/filter")
@@ -47,6 +55,39 @@ async def resolve_location(
     return {
         "found": True,
         "data": result,
+    }
+
+
+@router.post("/geocode")
+def geocode_exact_address(
+    payload: ExactAddressRequest,
+    _current_user: User = Depends(get_current_user),
+):
+    """Resolve one complete street address for an authenticated map preview."""
+    query = build_query(payload.address)
+    if query is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Enter a complete street address including city, state, and ZIP code.",
+        )
+    try:
+        result = get_geocoder().geocode(query)
+    except (httpx.HTTPError, ValueError):
+        raise HTTPException(
+            status_code=502,
+            detail="The address service is unavailable. Please try again.",
+        )
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No reliable map match was found. Check the full address and ZIP code.",
+        )
+    return {
+        "address": payload.address.strip(),
+        "display_name": result.display_name,
+        "latitude": result.latitude,
+        "longitude": result.longitude,
+        "provider": result.provider,
     }
 
 
