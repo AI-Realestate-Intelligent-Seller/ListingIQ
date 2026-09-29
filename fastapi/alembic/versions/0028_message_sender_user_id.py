@@ -3,8 +3,8 @@
 from alembic import op
 import sqlalchemy as sa
 
-revision = '0027_message_sender_user_id'
-down_revision = '0026_user_timezone'
+revision = '0028_message_sender_user_id'
+down_revision = '0027_user_timezone'
 branch_labels = None
 depends_on = None
 

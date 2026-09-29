@@ -4,8 +4,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = '0025_notification_reminder'
-down_revision = '0024_lead_geocoding'
+revision = '0026_notification_reminder'
+down_revision = '0025_booking_location'
 branch_labels = None
 depends_on = None
 
@@ -63,7 +63,14 @@ def upgrade():
         for name in ('user_id', 'booking_id', 'is_read', 'created_at'):
             op.create_index(f'ix_notifications_{name}', 'notifications', [name])
         return
-    column = next(c for c in inspector.get_columns('notifications') if c['name'] == 'reminder_id')
+    columns = {c['name']: c for c in inspector.get_columns('notifications')}
+    with op.batch_alter_table('notifications') as batch:
+        if 'conversation_id' not in columns:
+            batch.add_column(sa.Column('conversation_id', sa.Integer(), nullable=True))
+            batch.create_foreign_key('fk_notifications_conversation_id_conversations', 'conversations', ['conversation_id'], ['id'])
+        if 'unread_count' not in columns:
+            batch.add_column(sa.Column('unread_count', sa.Integer(), nullable=False, server_default='1'))
+    column = columns['reminder_id']
     if not column['nullable']:
         with op.batch_alter_table('notifications') as batch:
             batch.alter_column('reminder_id', existing_type=sa.Integer(), nullable=True)
@@ -71,8 +78,7 @@ def upgrade():
 
 def downgrade():
     inspector = sa.inspect(op.get_bind())
-    # Remove dependents first. As with other table-creation migrations, rollback
-    # removes these tables and their data, including tables created by startup.
+    # Remove dependents first. Rolling back table creation removes their data.
     for name in ('notifications', 'booking_reminders', 'push_subscriptions'):
         if inspector.has_table(name):
             op.drop_table(name)

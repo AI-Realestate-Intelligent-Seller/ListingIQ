@@ -91,10 +91,25 @@ async function savePushSubscription(
 
 // CHECK CURRENT PUSH STATUS
 
+async function deactivatePushSubscription() {
+  const deviceId = localStorage.getItem("push_device_id");
+  if (!deviceId) return;
+
+  await requestJson("/push/unsubscribe", {
+    method: "POST",
+    accessToken: readAuthSession()?.access_token,
+    payload: { device_id: deviceId },
+  });
+}
+
 async function checkPushStatus(): Promise<{
   status: PushStatus;
   subscription: PushSubscription | null;
 }> {
+  if ("Notification" in window && Notification.permission === "denied") {
+    return { status: "denied", subscription: null };
+  }
+
   if (
     !("serviceWorker" in navigator) ||
     !("PushManager" in window) ||
@@ -155,6 +170,7 @@ async function enablePushNotifications(userId: number) {
   }
 
   if (permission !== "granted") {
+    await deactivatePushSubscription();
     throw new Error("Notification permission was not granted.");
   }
 
@@ -212,7 +228,10 @@ export function RealtimeProvider({
       return;
     }
 
-    async function setupPushNotifications() {
+    let syncingPush = false;
+    async function setupPushNotifications(allowPrompt = false) {
+      if (cancelled || syncingPush) return;
+      syncingPush = true;
       try {
         const result = await checkPushStatus();
 
@@ -232,18 +251,33 @@ export function RealtimeProvider({
         }
 
         if (result.status === "denied") {
+          await deactivatePushSubscription();
           console.log("[PUSH] Notification permission denied.");
           return;
+        }
+
+        if (result.status === "needs_permission") {
+          await deactivatePushSubscription();
+          if (!allowPrompt) return;
         }
 
         await enablePushNotifications(userId);
         console.log("[PUSH] Push notifications enabled for user:", userId);
       } catch (error) {
         console.error("[PUSH] Failed to enable notifications:", error);
+      } finally {
+        syncingPush = false;
       }
     }
 
-    void setupPushNotifications();
+    void setupPushNotifications(true);
+    function refreshPushStatus() {
+      if (document.visibilityState === "visible") {
+        void setupPushNotifications();
+      }
+    }
+    window.addEventListener("focus", refreshPushStatus);
+    document.addEventListener("visibilitychange", refreshPushStatus);
 
     const wsBaseUrl = publicEnv.apiBaseUrl
       .replace(/^http:\/\//, "ws://")
@@ -446,6 +480,8 @@ export function RealtimeProvider({
 
     return () => {
       cancelled = true;
+      window.removeEventListener("focus", refreshPushStatus);
+      document.removeEventListener("visibilitychange", refreshPushStatus);
       stopHeartbeat();
 
       if (reconnectTimer !== null) {

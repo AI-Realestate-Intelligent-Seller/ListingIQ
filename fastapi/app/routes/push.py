@@ -1,9 +1,11 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
+from pydantic import BaseModel, Field
 
 from app.db import SessionLocal
 from app.models import PushSubscription
 from ..reminder.push import send_push_to_user
+from .auth import get_current_user
 
 router = APIRouter(
     prefix="/api/v1/push",
@@ -18,6 +20,24 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+class UnsubscribeRequest(BaseModel):
+    device_id: str = Field(min_length=1, max_length=100)
+
+
+@router.post("/unsubscribe")
+def unsubscribe_from_push(
+    data: UnsubscribeRequest,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    db.query(PushSubscription).filter(
+        PushSubscription.user_id == current_user.id,
+        PushSubscription.device_id == data.device_id,
+    ).update({PushSubscription.is_active: False}, synchronize_session=False)
+    db.commit()
+    return {"message": "Push subscription deactivated"}
 
 
 @router.post("/subscribe")
