@@ -322,6 +322,14 @@ class CampaignReasonSuggestions(BaseModel):
     # Why the catalog was used, when it was. Empty on the happy path.
     note: str = ''
 
+class ReplySuggestions(BaseModel):
+    """Draft next replies for a thread, grounded in its message history."""
+    suggestions: List[str] = []
+    # 'ai' when DeepSeek drafted them, 'template' for the built-in wordings.
+    source: str = 'template'
+    # Why the templates were used, when they were. Empty on the happy path.
+    note: str = ''
+
 class CampaignRecipient(BaseModel):
     """One lead of a campaign: what it would receive, or what it did receive.
 

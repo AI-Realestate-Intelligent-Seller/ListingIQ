@@ -32,8 +32,9 @@ from ..schemas import (
     FollowUpOut,
     FollowUpStateRequest,
     FollowUpStatusUpdate,
+    ReplySuggestions,
 )
-from ..sms import calendar_service, service
+from ..sms import calendar_service, reply_suggest, service
 from ..tenancy import brokerage_user_ids
 from .auth import get_current_user, get_db
 
@@ -333,6 +334,21 @@ def update_followup_status(
                 from_value=previous_status, to_value=payload.lead_status,
             )
     return _serialize_one(session, conversation, current_user)
+
+
+@router.post('/{conversation_id}/reply-suggestions', response_model=ReplySuggestions)
+def suggest_replies(conversation_id: int, current_user: User = Depends(get_current_user),
+                    session: Session = Depends(get_db)):
+    """Draft next replies from this thread's history. Nothing is sent.
+
+    POST rather than GET: each call spends a DeepSeek request, so it should not
+    be something a browser or a proxy can repeat on its own.
+    """
+    _require_access(current_user)
+    conversation = _owned_conversation(session, conversation_id, current_user)
+    if conversation.dnc_alert or conversation.lead_status == 'dnc':
+        raise HTTPException(status_code=409, detail='This owner has opted out and cannot be contacted.')
+    return reply_suggest.suggest(session, conversation)
 
 
 @router.post('/{conversation_id}/appointment', response_model=FollowUpAppointmentResult)

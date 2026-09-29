@@ -23,8 +23,13 @@ import { ApiRequestError } from "@/lib/api/http-client";
 import { LeadDetailDrawer } from "@/features/leads/components/lead-detail-drawer";
 import { LeadTimeline } from "@/features/leads/components/lead-timeline";
 
-import { bookAppointment, listFollowUps, setFollowUpStatus } from "../api/followups-api";
-import type { AppointmentPayload, FollowUp, FollowUpState } from "../types/followups.types";
+import { bookAppointment, listFollowUps, setFollowUpStatus, suggestReplies } from "../api/followups-api";
+import type {
+  AppointmentPayload,
+  FollowUp,
+  FollowUpState,
+  ReplySuggestions,
+} from "../types/followups.types";
 import { AppointmentDialog } from "./appointment-dialog";
 
 /** How often the list and the open thread refresh. */
@@ -102,6 +107,11 @@ export function FollowUpsBoard({
   const [isNewConversationOpen, setIsNewConversationOpen] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [notice, setNotice] = useState("");
+  /** Drafted replies, tagged with the thread whose history they answer. */
+  const [drafts, setDrafts] = useState<
+    (ReplySuggestions & { conversationId: number }) | null
+  >(null);
+  const [isSuggesting, setIsSuggesting] = useState(false);
 
   const threadRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -135,6 +145,8 @@ export function FollowUpsBoard({
   );
 
   const active = followUps.find((item) => item.id === activeId) ?? null;
+  // Suggestions belong to one thread's history; never show them on another.
+  const ideas = drafts !== null && drafts.conversationId === activeId ? drafts : null;
 
   const refreshFollowUps = useCallback(
     async (signal?: AbortSignal) => {
@@ -307,6 +319,30 @@ export function FollowUpsBoard({
     );
   }
 
+  /** Asks the server to draft next replies from this thread's history. */
+  async function fetchIdeas(conversationId: number): Promise<void> {
+    if (isSuggesting) return;
+    setIsSuggesting(true);
+    setErrorMessage("");
+    try {
+      const result = await suggestReplies(conversationId, token);
+      setDrafts({ ...result, conversationId });
+    } catch (error) {
+      handleApiError(error, "Could not suggest a reply.");
+    } finally {
+      setIsSuggesting(false);
+    }
+  }
+
+  /** Fills the composer with a draft. Nothing is sent until the broker submits. */
+  function applyIdea(text: string): void {
+    const box = composerRef.current;
+    if (!box) return;
+    box.value = text;
+    box.focus();
+    box.setSelectionRange(text.length, text.length);
+  }
+
   /** Taking over pauses Bobbie; handing back is the only way she resumes. */
   function changeHandover(to: "bobbie" | "broker"): void {
     if (!active) return;
@@ -318,8 +354,14 @@ export function FollowUpsBoard({
     }, to === "broker"
       ? "You have taken over. Write your reply below — Bobbie will not answer this thread."
       : "Bobbie is handling this conversation again.").then(() => {
-        // Taking over is only useful if you can type, so land the cursor there.
-        if (to === "broker") composerRef.current?.focus();
+        // Taking over is only useful if you can type, so land the cursor there
+        // and offer drafts grounded in what has been said so far.
+        if (to === "broker") {
+          composerRef.current?.focus();
+          void fetchIdeas(conversationId);
+        } else {
+          setDrafts(null);
+        }
       });
   }
 
@@ -337,6 +379,8 @@ export function FollowUpsBoard({
     try {
       await sendMessage(active.id, text, token);
       form.reset();
+      // The history just moved on, so the old drafts no longer answer it.
+      setDrafts(null);
       await Promise.all([refreshMessages(active.id), refreshFollowUps()]);
     } catch (error) {
       handleApiError(error, "Could not send the message.");
@@ -635,6 +679,45 @@ export function FollowUpsBoard({
                   available and sending makes the broker the thread's voice. */}
               {active.reply_count === 0 || active.handled_by === "broker" ? (
                 <form className="sms-composer followups-composer" onSubmit={handleSend}>
+                  <div className="followups-suggest-head">
+                    <button
+                      type="button"
+                      className="sms-button-secondary followups-suggest"
+                      onClick={() => void fetchIdeas(active.id)}
+                      disabled={isSuggesting || isSending}
+                    >
+                      {isSuggesting
+                        ? "Thinking…"
+                        : ideas
+                          ? "✦ Suggest again"
+                          : "✦ Suggest from chat"}
+                    </button>
+                    {ideas ? (
+                      <button
+                        type="button"
+                        className="followups-suggest-dismiss"
+                        onClick={() => setDrafts(null)}
+                        aria-label="Hide suggestions"
+                        title="Hide suggestions"
+                      >
+                        ×
+                      </button>
+                    ) : null}
+                  </div>
+                  {ideas ? (
+                    <div className="followups-ideas">
+                      {ideas.note ? <p className="followups-ideas-note">{ideas.note}</p> : null}
+                      <ul className="followups-ideas-list">
+                        {ideas.suggestions.map((text) => (
+                          <li key={text}>
+                            <button type="button" onClick={() => applyIdea(text)}>
+                              {text}
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
                   <div className="followups-compose-field">
                     <textarea
                       ref={composerRef}

@@ -227,6 +227,30 @@
   font-size: 10px; letter-spacing: 1px; transform: translateY(-2px);
 }
 
+/* Drafted replies above the composer. Same look as the campaign Reason
+   suggestions: picking one fills the box, it never sends. */
+.followups-suggest-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.followups-suggest { padding: 5px 11px; font-size: 12px; white-space: nowrap; color: var(--ink); }
+.followups-suggest:disabled { opacity: .55; cursor: not-allowed; }
+.followups-suggest-dismiss {
+  width: 26px; height: 26px; border: 0; border-radius: 50%; background: transparent;
+  color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer;
+}
+.followups-suggest-dismiss:hover { background: #eceeea; color: var(--ink); }
+.followups-ideas {
+  display: grid; gap: 6px; margin-bottom: 10px; padding: 9px 11px;
+  max-height: 190px; overflow-y: auto;
+  border: 1px solid var(--accent-line); border-radius: 11px; background: #f7fbf9;
+}
+.followups-ideas-note { margin: 0; color: var(--muted); font-size: 11.5px; }
+.followups-ideas-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.followups-ideas-list button {
+  width: 100%; padding: 8px 11px; text-align: left; cursor: pointer; color: var(--ink);
+  border: 1px solid var(--line); border-radius: 9px; background: var(--white);
+  font: inherit; font-size: 12.5px; line-height: 1.5;
+}
+.followups-ideas-list button:hover { border-color: var(--accent-line); background: #eef6f2; }
+
 .followups-actions {
   display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
   padding: 14px 20px; border-top: 1px solid var(--line); background: var(--white);

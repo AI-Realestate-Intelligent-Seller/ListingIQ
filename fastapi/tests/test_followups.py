@@ -386,3 +386,116 @@ def test_a_failed_confirmation_still_reports_the_booking(client, make_user, auth
     # The meeting is real even though the text is not.
     assert session.query(Booking).count() == 1
     assert response.json()['followup']['meeting_booked'] is True
+
+
+# --------------------------------------------------------------------------
+# Reply suggestions
+# --------------------------------------------------------------------------
+
+def test_reply_suggestions_are_drafted_from_the_thread_history(
+        client, make_user, auth_header, sent_sms, monkeypatch):
+    seen = {}
+
+    def fake_completion(messages, **options):
+        seen['messages'] = messages
+        return {'content': '```json\n{"suggestions": ["Happy to run the numbers for you."]}\n```'}
+
+    monkeypatch.setattr('app.sms.reply_suggest.deepseek.is_configured', lambda: True)
+    monkeypatch.setattr('app.sms.reply_suggest.deepseek.completion', fake_completion)
+
+    make_user(BROKER_EMAIL, role='broker')
+    headers = auth_header(BROKER_EMAIL)
+    conversation_id = start_conversation(client, headers)
+    owner_replies(client)
+
+    response = client.post(f'{FOLLOWUPS_URL}/{conversation_id}/reply-suggestions', headers=headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body['source'] == 'ai'
+    assert body['suggestions'] == ['Happy to run the numbers for you.']
+    # The owner's latest message is what the drafts must answer.
+    assert 'depends what my place is worth' in seen['messages'][1]['content']
+    # Suggesting never sends anything.
+    assert len(sent_sms) == 1
+
+
+def test_reply_suggestions_see_the_property_details_behind_the_thread(
+        client, make_user, auth_header, session, sent_sms, monkeypatch):
+    """An owner asking about their own house should get the imported value back."""
+    import json
+
+    from app.models import Lead
+
+    seen = {}
+
+    def fake_completion(messages, **options):
+        seen['messages'] = messages
+        return {'content': '{"suggestions": ["It shows 3 beds and 2 baths."]}'}
+
+    monkeypatch.setattr('app.sms.reply_suggest.deepseek.is_configured', lambda: True)
+    monkeypatch.setattr('app.sms.reply_suggest.deepseek.completion', fake_completion)
+
+    user = make_user(BROKER_EMAIL, role='broker')
+    headers = auth_header(BROKER_EMAIL)
+    conversation_id = start_conversation(client, headers)
+    session.add(Lead(user_id=user.id, owner_name='Marcus Webb', phone=CONTACT,
+                     property_address='4517 W Adams St, Austin, TX',
+                     signals='expired,pre_foreclosure',
+                     details=json.dumps({'Bedrooms': 3, 'Bathrooms': 2, 'Year Built': 1962}),
+                     conversation_id=conversation_id))
+    session.commit()
+    owner_replies(client, text='How many bedrooms do you have on file for it?')
+
+    body = client.post(f'{FOLLOWUPS_URL}/{conversation_id}/reply-suggestions', headers=headers).json()
+    assert body['source'] == 'ai'
+    prompt = seen['messages'][1]['content']
+    assert '"Bedrooms": 3' in prompt
+    assert '"Year Built": 1962' in prompt
+    # Visible to the model, but marked as something a draft must not raise.
+    assert '"sensitive_signals": ["Pre-Foreclosure"]' in prompt
+
+
+def test_reply_suggestions_fall_back_to_templates_when_ai_is_down(
+        client, make_user, auth_header, sent_sms, monkeypatch):
+    from app.sms import deepseek
+
+    def boom(messages, **options):
+        raise deepseek.AiUnavailableError('AI provider unreachable')
+
+    monkeypatch.setattr('app.sms.reply_suggest.deepseek.is_configured', lambda: True)
+    monkeypatch.setattr('app.sms.reply_suggest.deepseek.completion', boom)
+
+    make_user(BROKER_EMAIL, role='broker')
+    headers = auth_header(BROKER_EMAIL)
+    conversation_id = start_conversation(client, headers)
+    owner_replies(client)
+
+    body = client.post(f'{FOLLOWUPS_URL}/{conversation_id}/reply-suggestions', headers=headers).json()
+    assert body['source'] == 'template'
+    assert body['suggestions']
+    # The owner asked about value, so the templates should speak to price.
+    assert any('price' in text.lower() for text in body['suggestions'])
+    assert 'could not be reached' in body['note']
+
+
+def test_reply_suggestions_for_another_brokerages_thread_are_not_found(
+        client, make_user, auth_header, sent_sms):
+    make_user(BROKER_EMAIL, role='broker')
+    make_user(OTHER_EMAIL, role='broker', brokerage_id='brokerage-2', brokerage_name='Other Group')
+    conversation_id = start_conversation(client, auth_header(BROKER_EMAIL))
+    owner_replies(client)
+
+    response = client.post(f'{FOLLOWUPS_URL}/{conversation_id}/reply-suggestions',
+                           headers=auth_header(OTHER_EMAIL))
+    assert response.status_code == 404
+
+
+def test_no_reply_suggestions_for_an_opted_out_owner(client, make_user, auth_header, sent_sms):
+    make_user(BROKER_EMAIL, role='broker')
+    headers = auth_header(BROKER_EMAIL)
+    conversation_id = start_conversation(client, headers)
+    owner_replies(client)
+    client.patch(f'{FOLLOWUPS_URL}/{conversation_id}', json={'lead_status': 'dnc'}, headers=headers)
+
+    response = client.post(f'{FOLLOWUPS_URL}/{conversation_id}/reply-suggestions', headers=headers)
+    assert response.status_code == 409
