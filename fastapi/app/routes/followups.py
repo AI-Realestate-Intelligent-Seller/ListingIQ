@@ -139,6 +139,8 @@ def _reason(conversation: Conversation, latest: Message | None, waiting_days: in
     """
     if conversation.dnc_alert or conversation.lead_status == 'dnc':
         return 'opted_out', 'Opted out — do not contact'
+    if conversation.lead_status == 'location_discussion':
+        return 'location_discussion', 'Location to confirm'
     if conversation.handled_by == 'broker' and latest is not None and latest.direction == 'inbound':
         return 'reply_needed', 'Reply needs an answer'
     if conversation.meeting_booked:

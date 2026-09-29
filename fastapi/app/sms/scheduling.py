@@ -8,8 +8,9 @@ import re
 
 SCHEDULING_PRESSURE = re.compile(
     r'\b(?:schedule|book|appointment|what time works|when (?:can|could|would) (?:we|you)'
-    r'|quick (?:call|conversation|chat)|phone call|i can do .{0,60}(?:a\.?m\.?|p\.?m\.?))\b'
-    r"|\b(?:would you|could we|can we|want to|prefer to|let['’]?s)\b[^.!?]{0,35}\b(?:call|talk|meet|speak)\b",
+    r'|quick (?:call|conversation|chat|visit|look)|phone call|walk-?through|in person'
+    r'|(?:stop|come|swing|drop) by|i can do .{0,60}(?:a\.?m\.?|p\.?m\.?))\b'
+    r"|\b(?:would you|could we|can we|want to|prefer to|let['’]?s)\b[^.!?]{0,35}\b(?:call|talk|meet|speak|visit)\b",
     re.I,
 )
 TIME_OF_DAY = re.compile(r'\b(?:1[0-2]|0?[1-9])(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)\b', re.I)
@@ -21,7 +22,7 @@ UNBOOKED_CONFIRMATION = re.compile(
     r"\b(?:you(?:['’]re| are) all set|confirmed|booked"
     r"|i(?:['’]ll| will) (?:book|confirm|reserve|schedule|set (?:it|that) up|put you down"
     r"|get (?:it|that) booked|give you a call|call you|ring you)"
-    r"|see you at|talk (?:to you )?(?:then|at)|looking forward to (?:it|our call))\b",
+    r"|see you (?:at|then|there)|talk (?:to you )?(?:then|at)|looking forward to (?:it|our call|our visit|meeting you|seeing))\b",
     re.I,
 )
 

@@ -56,8 +56,8 @@ def _replied_leads(session: Session, broker: User) -> list[Lead]:
 
 
 ASSIGNMENT_STAGES = ('new', 'processing', 'want_more_info', 'interested', 'ready_to_sell',
-                     'not_interested', 'no_response', 'dnc')
-IN_PROGRESS_STAGES = {'processing', 'want_more_info', 'interested'}
+                     'location_discussion', 'not_interested', 'no_response', 'dnc')
+IN_PROGRESS_STAGES = {'processing', 'want_more_info', 'interested', 'location_discussion'}
 COMPLETED_STAGES = {'ready_to_sell', 'not_interested', 'no_response', 'dnc'}
 
 

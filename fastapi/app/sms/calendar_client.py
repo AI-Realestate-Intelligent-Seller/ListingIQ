@@ -49,9 +49,10 @@ def create_booking(conversation, slot: dict, session=None) -> dict:
                 user_id=conversation.user_id,
                 phone=conversation.contact,
                 name=conversation.name or '',
-                title='Property consultation with Bobbie',
+                title='Property visit with Bobbie',
                 start_at=slot.get('start_at'),
                 end_at=slot.get('end_at'),
+                location_address=getattr(conversation, 'property_address', None),
             )
         except calendar_service.SlotTakenError as error:
             raise SlotTakenError(str(error)) from error
@@ -65,9 +66,10 @@ def create_booking(conversation, slot: dict, session=None) -> dict:
         json={
             'phone': conversation.contact,
             'name': conversation.name or '',
-            'title': 'Property consultation with Bobbie',
+            'title': 'Property visit with Bobbie',
             'start_at': slot.get('start_at'),
             'end_at': slot.get('end_at'),
+            'location_address': getattr(conversation, 'property_address', None),
         },
         timeout=15,
     )
@@ -107,7 +109,7 @@ def safe_available_offer(availability: dict) -> str:
         if len(slots) == 2:
             break
     if not slots:
-        return 'I don’t have an open time to confirm yet. What other day works for a quick call?'
+        return 'I don’t have an open time to confirm yet. What other day works for me to stop by?'
     labels = [_short_label(slot.get('label') or '') for slot in slots]
     if len(labels) == 1:
         return f'I can do {labels[0]}. Does that work?'

@@ -3,6 +3,7 @@ export type LeadStatus =
   | "want_more_info"
   | "interested"
   | "ready_to_sell"
+  | "location_discussion"
   | "not_interested"
   | "no_response"
   | "dnc";

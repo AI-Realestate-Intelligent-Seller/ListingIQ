@@ -128,7 +128,7 @@ export function FollowUpsBoard({
   const [historyTick, setHistoryTick] = useState(0);
   const viewer = session?.user ?? null;
   const isAgent = viewer?.role === "agent";
-  const followUpScope = isAgent ? "replied" : scope;
+  const followUpScope = scope;
 
   /** A rejected token means the session is over; stop polling and sign out. */
   const handleApiError = useCallback(
@@ -422,26 +422,24 @@ export function FollowUpsBoard({
 
       <div className="followups-layout">
         <aside className="followups-list-panel">
-          {!isAgent ? (
-            <div className="followups-scope" role="group" aria-label="Conversation scope">
-              <button
-                type="button"
-                className={scope === "replied" ? "active" : undefined}
-                aria-pressed={scope === "replied"}
-                onClick={() => setScope("replied")}
-              >
-                Replied
-              </button>
-              <button
-                type="button"
-                className={scope === "all" ? "active" : undefined}
-                aria-pressed={scope === "all"}
-                onClick={() => setScope("all")}
-              >
-                All
-              </button>
-            </div>
-          ) : null}
+          <div className="followups-scope" role="group" aria-label="Conversation scope">
+            <button
+              type="button"
+              className={scope === "replied" ? "active" : undefined}
+              aria-pressed={scope === "replied"}
+              onClick={() => setScope("replied")}
+            >
+              Replied
+            </button>
+            <button
+              type="button"
+              className={scope === "all" ? "active" : undefined}
+              aria-pressed={scope === "all"}
+              onClick={() => setScope("all")}
+            >
+              All
+            </button>
+          </div>
 
           <label className="sms-search followups-search">
             <span className="sr-only">Search conversations</span>

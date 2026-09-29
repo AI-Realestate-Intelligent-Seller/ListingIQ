@@ -48,7 +48,8 @@ TOOLS = [
     },
 ]
 
-CONTINUE_STATUSES = {'processing', 'want_more_info', 'interested', 'ready_to_sell'}
+CONTINUE_STATUSES = {
+    'processing', 'want_more_info', 'interested', 'ready_to_sell', 'location_discussion'}
 LEAD_STATUSES = CONTINUE_STATUSES | {'not_interested'}
 NEXT_STEPS = {'answer_and_qualify', 'answer_only', 'offer_call', 'schedule', 'close'}
 CALENDAR_STATES = {'none', 'call_declined', 'call_accepted', 'time_proposed', 'booking_confirmed'}
@@ -57,6 +58,7 @@ OUTCOMES = {'positive', 'neutral', 'negative', 'disqualified'}
 
 DISPOSITION_SYSTEM = """You are the conversation disposition and next-step layer for Bobbie's property-owner SMS chat. Decide whether there is any reasonable path to continue and what Bobbie should do next.
 Return only JSON: {"action":"continue|end","intent":"short_snake_case","outcome":"positive|neutral|negative|disqualified","lead_status":"processing|want_more_info|interested|ready_to_sell|not_interested","confidence":0.0,"conversation_stage":"discovery|qualified_for_call|call_requested|scheduling|complete","next_step":"answer_and_qualify|answer_only|offer_call|schedule|close","qualification_focus":"brief topic or empty","calendar":{"state":"none|call_declined|call_accepted|time_proposed|booking_confirmed","should_fetch_availability":false,"requested_time_text":"exact owner words or empty","reason":"brief"},"reason":"brief"}.
+In these labels "call" means Bobbie's meeting request, which is an onsite visit to the property; a phone call is only the fallback when the owner declines a visit or asks for one. Treat acceptance of a visit, a walkthrough, or "come by / stop by" as call acceptance, and refusal of a visit as call_declined only if the owner also rejects meeting at all.
 Choose continue when the owner asks a question, requests information, states a condition, raises an objection that can be answered, expresses hesitation, says maybe/later, rejects only a call or listing method, or otherwise leaves any opening. Treat conditional willingness as continue even when the message contains words like "not interested."
 Choose end only when the owner clearly wants the conversation to stop, clearly rejects both selling and further discussion without any question or condition, reports a final disqualifier such as wrong number/already sold, or gives a pure closing after the matter is resolved. Action controls whether messaging continues; it does not determine lead quality. A polite goodbye after the owner said they are ready to sell must remain positive/ready_to_sell, never not_interested. Use negative/not_interested only for an actual rejection. When uncertain, choose continue.
 For a new objection, condition, failed-listing concern, or unclear motivation, use discovery plus answer_and_qualify and identify the single most logical missing detail. Do not ask for information the owner already clearly provided.
@@ -66,7 +68,7 @@ Calendar state must be based on the latest conversational turn, not isolated key
 
 REVIEW_SYSTEM = """You are an independent semantic QA reviewer for Bobbie's property-owner SMS. Determine whether the draft is the response the owner would reasonably expect next.
 Return only JSON: {"valid":true,"issues":["short_issue"],"rewrite_instruction":"specific instruction or empty","reason":"brief"}.
-A valid reply must answer the owner's latest message as a whole, follow the supplied disposition and required next step, make sense after the immediately preceding turn, avoid repeating answered questions, avoid unsupported claims, and avoid jumping to a call or calendar unless the supplied calendar state permits it. When next_step is offer_call, another qualification question without a low-pressure call invitation is invalid. Any promise to book or confirm later is invalid: a booking claim may only come from the calendar API after creation succeeds. Selecting one of Bobbie's immediately preceding live slots is already booking consent and should produce the real calendar confirmation, not a conversational placeholder. A bare "yes" answers the immediately preceding question, not an older invitation. Be strict about non sequiturs, over-qualification, and premature scheduling, but do not reject concise natural SMS merely for style."""
+A valid reply must answer the owner's latest message as a whole, follow the supplied disposition and required next step, make sense after the immediately preceding turn, avoid repeating answered questions, avoid unsupported claims, and avoid jumping to a call or calendar unless the supplied calendar state permits it. When next_step is offer_call, another qualification question without a low-pressure invitation to visit the property in person is invalid; a phone call instead of a visit is valid only if the owner declined a visit or asked for a call. Any promise to book or confirm later is invalid: a booking claim may only come from the calendar API after creation succeeds. Selecting one of Bobbie's immediately preceding live slots is already booking consent and should produce the real calendar confirmation, not a conversational placeholder. A bare "yes" answers the immediately preceding question, not an older invitation. Be strict about non sequiturs, over-qualification, and premature scheduling, but do not reject concise natural SMS merely for style."""
 
 
 def _json_object(content: str) -> dict:

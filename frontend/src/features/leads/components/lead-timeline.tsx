@@ -129,6 +129,11 @@ export function LeadTimeline({ leadId, accessToken, title = "History", refreshTo
       .then((history) => {
         shownLeadId.current = leadId;
         setEvents(history.events);
+        // Polling is deliberately resilient: a backend reload or brief network
+        // interruption may fail one refresh while the previous timeline stays
+        // visible. Clear that transient error as soon as a later refresh
+        // succeeds so a recovered server is not still reported as unreachable.
+        setErrorMessage("");
       })
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === "AbortError") return;

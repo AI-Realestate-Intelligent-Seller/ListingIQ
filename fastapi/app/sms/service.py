@@ -375,9 +375,10 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
             f"Qualification focus: {disposition['qualification_focus'] or 'none supplied'}. "
             f"Calendar state: {disposition['calendar']['state']}. Reason: {disposition['reason']}. "
             'Follow the required next step naturally without assuming facts. If the next step is '
-            'answer_and_qualify, answer the concern and ask one concise logical question; do not request a call yet. '
+            'answer_and_qualify, answer the concern and ask one concise logical question; do not request a meeting yet. '
             'If it is answer_only, do not ask a question. If it is offer_call, do not qualify further: acknowledge '
-            'what is already known and make one low-pressure 5-10 minute call request without proposing a time. '
+            'what is already known and make one low-pressure request to visit the property in person without '
+            'proposing a time (a phone call only if the owner has declined a visit or asked for a call). '
             'Do not introduce calendar times unless calendar state explicitly permits it.'
         )
         calendar_state = disposition['calendar']
@@ -407,44 +408,29 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
                     consent_confirmed = (calendar_state['state'] == 'booking_confirmed'
                                          or action.get('consent') in ('offered_slot_selected', 'confirmed_exact'))
                     if action.get('action') == 'book' and consent_confirmed:
-                        try:
-                            booking = calendar_client.create_booking(conversation, action, session)
-                            if booking.get('confirmation_sent') is not True and booking.get('message'):
-                                # In-process bookings always land here: the calendar
-                                # creates the row, this pipeline sends the confirmation
-                                # SMS (suppressing any simulated reply to it).
-                                logger.info('[calendar-tool] sending booking confirmation to %s',
-                                            conversation.contact)
-                                send_and_store_message(session, conversation, booking['message'],
-                                                       'calendar.confirmation', True)
-                            hand_to_broker(session, conversation)
-                            mark_lead_completed(session, conversation, lead_status='ready_to_sell',
-                                                meeting_booked=True)
-                            _log_status_change(session, conversation, status_before, 'ready_to_sell')
-                            lead_id = _lead_id_for(session, conversation)
-                            if lead_id:
-                                from ..leads import events as lead_events
-                                lead_events.log_event(
-                                    session, lead_id, lead_events.ACTIVITY, 'meeting_booked',
-                                    actor_type='ai',
-                                    meta={'start_at': str(booking.get('start_at'))},
-                                )
-                            logger.info('Meeting booked for %s: %s', conversation.contact, booking.get('start_at'))
-                            return
-                        except calendar_client.SlotTakenError:
-                            refreshed = calendar_client.fetch_availability(session, conversation.user_id)
-                            last_availability = refreshed
-                            scheduling_context = calendar_client.prompt_context(
-                                refreshed,
-                                'The requested slot was just taken. Apologize briefly and offer one or two '
-                                'nearby available alternatives.')
-                            scheduling_fallback_reply = (
-                                f'That time was just taken. {calendar_client.safe_available_offer(refreshed)}')
-                            logger.info('[calendar-tool] collision alternatives for %s: %s',
-                                        conversation.contact, scheduling_fallback_reply)
+                        # A selected time is not approval to assume the property
+                        # address is the meeting location. Bobbie pauses without
+                        # creating a calendar row or sending a confirmation; the
+                        # assigned person negotiates the location and uses the
+                        # manual appointment action to send the final details.
+                        previous_status = conversation.lead_status
+                        hand_to_broker(session, conversation)
+                        update_lead_progress(
+                            session, conversation,
+                            lead_status='location_discussion',
+                            meeting_booked=False,
+                            processed_at=None,
+                        )
+                        _log_status_change(
+                            session, conversation, previous_status, 'location_discussion')
+                        logger.info(
+                            '[calendar-tool] time selected for %s; waiting for agent location approval',
+                            conversation.contact,
+                        )
+                        return
                     elif action.get('action') == 'ask_confirmation':
                         label = calendar_client._short_label(action.get('label') or '')
-                        scheduling_fallback_reply = f'{label} is open. Should I book it for our quick call?'
+                        scheduling_fallback_reply = f'{label} is open. Should I book it for me to stop by?'
                         logger.info('[calendar-tool] asking final booking confirmation for %s: %s',
                                     conversation.contact, scheduling_fallback_reply)
                     elif action.get('action') == 'offer_alternatives':
@@ -462,8 +448,8 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
                 scheduling_context = ('The live calendar is currently unavailable. Do not claim availability or a '
                                       'booking, and do not invent or repeat a time.')
         elif calendar_state['state'] == 'call_declined':
-            scheduling_context = ('The recipient declined or deferred a call. Answer their latest question directly. '
-                                  'Do not offer times, ask for a call, or pressure them to schedule.')
+            scheduling_context = ('The recipient declined or deferred a meeting. Answer their latest question directly. '
+                                  'Do not offer times, ask for a visit or a call, or pressure them to schedule.')
 
         fallback_plan = {'next_step': disposition['next_step']}
         reply = scheduling_fallback_reply or bobbie.generate_ai_reply(

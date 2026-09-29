@@ -7,6 +7,7 @@ export type FollowUpState = "pending" | "accepted" | "declined";
 export type FollowUpReason =
   | "opted_out"
   | "reply_needed"
+  | "location_discussion"
   | "appointment_booked"
   | "appointment_pending"
   | "not_interested"
