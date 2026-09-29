@@ -11,12 +11,11 @@ class RagService:
         return self.client.available
 
     def index_document(self, doc_id: str, text: str, metadata: dict | None = None):
-        vector = self.client.embed_text(text)
-        return self.client.upsert_embedding(self.collection, doc_id, vector=vector, metadata=metadata or {}, text=text)
+        return self.client.upsert_text(
+            self.collection, doc_id, text, metadata=metadata or {})
 
     def search(self, query: str, k: int = 5):
-        vector = self.client.embed_text(query)
-        return self.client.search(self.collection, vector, k=k)
+        return self.client.search_text(self.collection, query, k=k)
 
     def prompt_context(self, query: str):
         results = self.search(query)
