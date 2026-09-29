@@ -14,7 +14,7 @@ from app.models import Lead
 
 
 LEADS_URL = '/api/v1/leads'
-EMAIL = 'maps@listingiq.test'
+EMAIL = 'maps@listingiq.example.com'
 
 
 def test_address_normalization_requires_a_street_and_locality():
@@ -42,6 +42,38 @@ def test_nominatim_parser_rejects_wrong_postcode_and_chooses_matching_result():
     assert result is not None
     assert (result.latitude, result.longitude) == (41.8801, -87.7401)
     assert result.provider == 'nominatim'
+
+
+def test_authenticated_exact_address_preview_uses_configured_geocoder(
+        client, make_user, auth_header, monkeypatch):
+    make_user(EMAIL, role='broker')
+    result = GeocodingResult(
+        41.8801, -87.7401,
+        '4517 West Adams Street, Chicago, Illinois 60624, United States',
+        'nominatim',
+    )
+    fake = FakeGeocoder(result)
+    monkeypatch.setattr('app.routes.location.get_geocoder', lambda: fake)
+
+    response = client.post(
+        '/api/v1/location/geocode',
+        json={'address': '4517 W Adams St, Chicago, IL 60624'},
+        headers=auth_header(EMAIL),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()['latitude'] == 41.8801
+    assert response.json()['longitude'] == -87.7401
+    assert response.json()['display_name'].startswith('4517 West Adams Street')
+    assert fake.calls == 1
+
+
+def test_exact_address_preview_requires_authentication(client):
+    response = client.post(
+        '/api/v1/location/geocode',
+        json={'address': '4517 W Adams St, Chicago, IL 60624'},
+    )
+    assert response.status_code == 401
 
 
 @dataclass

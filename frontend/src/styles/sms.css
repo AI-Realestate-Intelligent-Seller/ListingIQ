@@ -300,6 +300,33 @@
 }
 .sms-field small { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; font-weight: 400; }
 
+.appointment-address-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end;
+}
+.appointment-address-row .sms-button-secondary {
+  min-height: 41px; margin-top: 6px; padding: 9px 13px; white-space: nowrap;
+}
+.appointment-map-preview {
+  margin-top: 12px; overflow: hidden; border: 1px solid var(--line);
+  border-radius: 11px; background: var(--surface);
+}
+.appointment-map,
+.appointment-map-loading {
+  position: relative; height: 210px; background: var(--surface-2);
+}
+.appointment-map-loading { display: grid; place-items: center; color: var(--muted); font-size: 12px; }
+.appointment-map-canvas { width: 100%; height: 100%; }
+.appointment-map-attribution {
+  position: absolute; z-index: 500; right: 6px; bottom: 5px; padding: 2px 5px;
+  border-radius: 4px; background: rgba(255, 255, 255, .82); color: #43504b; font-size: 9px;
+}
+.appointment-map-preview > p {
+  margin: 0; display: grid; gap: 3px; padding: 10px 12px;
+  border-top: 1px solid var(--line); font-size: 11px; line-height: 1.4;
+}
+.appointment-map-preview > p strong { color: var(--ink); font-size: 11px; }
+.appointment-map-preview > p span { color: var(--muted); }
+
 .sms-toggle {
   margin-top: 15px; padding: 12px 14px; display: flex; gap: 11px; align-items: flex-start;
   border: 1px solid var(--line); border-radius: 10px; cursor: pointer;
@@ -393,4 +420,6 @@
   .sms-dialog { padding: 18px; border-radius: 14px; }
   .sms-dialog-actions { flex-direction: column-reverse; }
   .sms-dialog-actions > * { width: 100%; }
+  .appointment-address-row { grid-template-columns: 1fr; }
+  .appointment-address-row .sms-button-secondary { width: 100%; margin-top: 0; }
 }

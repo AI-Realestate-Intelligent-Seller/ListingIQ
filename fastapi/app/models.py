@@ -188,6 +188,7 @@ class Booking(Base):
     phone = Column(String(50))
     name = Column(String(255), nullable=True)
     title = Column(String(255))
+    location_address = Column(String(500), nullable=True)
     start_at = Column(DateTime)
     end_at = Column(DateTime)
     join_token = Column(String(128))

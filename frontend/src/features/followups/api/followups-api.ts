@@ -4,8 +4,10 @@ import type { LeadStatus } from "@/features/sms/types/sms.types";
 import type {
   AppointmentPayload,
   AppointmentResult,
+  GeocodedAppointmentAddress,
   FollowUp,
   FollowUpState,
+  ReplySuggestions,
 } from "../types/followups.types";
 
 const FOLLOWUPS = "/followups";
@@ -60,6 +62,29 @@ export function bookAppointment(
   return postJson<AppointmentResult, AppointmentPayload>(
     `${FOLLOWUPS}/${conversationId}/appointment`,
     payload,
+    accessToken,
+  );
+}
+
+export function geocodeAppointmentAddress(
+  address: string,
+  accessToken: string,
+): Promise<GeocodedAppointmentAddress> {
+  return postJson<GeocodedAppointmentAddress, { address: string }>(
+    "/location/geocode",
+    { address },
+    accessToken,
+  );
+}
+
+/** Drafts only: picking one fills the composer, and nothing is sent. */
+export function suggestReplies(
+  conversationId: number,
+  accessToken: string,
+): Promise<ReplySuggestions> {
+  return postJson<ReplySuggestions, Record<string, never>>(
+    `${FOLLOWUPS}/${conversationId}/reply-suggestions`,
+    {},
     accessToken,
   );
 }

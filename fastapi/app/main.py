@@ -204,8 +204,9 @@ def health_stores():
 
         report["vector_store"] = {
             "ok": vector_store.available,
-            "engine": "chromadb",
+            "engine": vector_store.backend,
             "path": vector_store.path,
+            "url": vector_store.url,
             "collections": vector_store.collections(),
         }
     except Exception as error:

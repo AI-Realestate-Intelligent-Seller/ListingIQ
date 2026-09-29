@@ -1,13 +1,15 @@
 """Bobbie's approved-knowledge retrieval (RAG).
 
 Pipeline: PyMuPDF extracts the PDF page by page → text is chunked with overlap →
-MiniLM embeddings are stored in ChromaDB → queries are answered by vector
+MiniLM embeddings are stored in the selected vector backend → queries are answered
+by vector
 similarity.
 
 Ingestion is idempotent: the PDF's SHA-256 and the embedding model name are
 stored on the collection, and re-indexing only happens when either changes.
 
-If Chroma or the embedding model is unavailable the index falls back to the
+If the vector store or embedding model is unavailable, the index falls back to
+the
 lexical TF-IDF scorer over the same chunks, so Bobbie keeps working (with worse
 recall) instead of losing her knowledge base entirely.
 """
@@ -27,7 +29,6 @@ except Exception:  # pragma: no cover - optional dependency
 from ..core.config import settings
 from ..logger import get_logger
 from ..vector_store import vector_store
-from .embeddings import embedding_provider
 
 logger = get_logger(__name__)
 
@@ -218,24 +219,24 @@ class BobbieKnowledgeIndex:
             if not vector_store.available:
                 return self._status('lexical', 'vector store unavailable')
 
-            fingerprint = f'{document_hash}:{embedding_provider.name}'
+            fingerprint = f'{document_hash}:{vector_store.embedding_name}'
             stored = vector_store.collection_metadata(self.collection) or {}
             if not force and stored.get('fingerprint') == fingerprint \
                     and vector_store.count(self.collection) == len(self.chunks):
                 return self._status('semantic')
 
-            logger.info('[bobbie-rag] embedding %s chunks with %s', len(self.chunks), embedding_provider.name)
+            logger.info('[bobbie-rag] embedding %s chunks with %s', len(self.chunks), vector_store.embedding_name)
             vector_store.reset_collection(self.collection, metadata={'fingerprint': fingerprint})
             batch = 32
             for start in range(0, len(self.chunks), batch):
                 window = self.chunks[start:start + batch]
                 # Embed the heading with the body: it carries the section topic
                 # that the chunk text alone often lacks.
-                vectors = embedding_provider.embed([self._embeddable(chunk) for chunk in window])
-                vector_store.add_many(
+                vector_store.add_texts(
                     self.collection,
                     ids=[chunk['id'] for chunk in window],
-                    vectors=vectors,
+                    texts=[chunk['text'] for chunk in window],
+                    embedding_texts=[self._embeddable(chunk) for chunk in window],
                     documents=[chunk['text'] for chunk in window],
                     metadatas=[{'page': chunk['page'], 'heading': chunk['heading'] or 'unspecified'}
                                for chunk in window],
@@ -248,7 +249,7 @@ class BobbieKnowledgeIndex:
             'retrieval': retrieval,
             'chunks': len(self.chunks or []),
             'document': self.pdf_path.name,
-            'embedding_model': embedding_provider.name if retrieval == 'semantic' else None,
+            'embedding_model': vector_store.embedding_name if retrieval == 'semantic' else None,
             'collection': self.collection if retrieval == 'semantic' else None,
         }
         if reason:
@@ -276,7 +277,7 @@ class BobbieKnowledgeIndex:
         pool = max(limit * 3, 10)
         lexical = self._lexical_search(query, pool)
 
-        if status['retrieval'] == 'semantic' and embedding_provider.is_semantic:
+        if status['retrieval'] == 'semantic' and vector_store.semantic_embeddings:
             semantic = self._semantic_search(query, pool)
             if semantic:
                 return self._response(query, self._fuse(semantic, lexical, limit), 'hybrid')
@@ -307,8 +308,7 @@ class BobbieKnowledgeIndex:
         return fused
 
     def _semantic_search(self, query: str, limit: int) -> list:
-        vector = embedding_provider.embed_one(query)
-        hits = vector_store.search(self.collection, vector, k=limit)
+        hits = vector_store.search_text(self.collection, query, k=limit)
         matches = []
         for hit in hits:
             distance = hit.get('score')
@@ -351,7 +351,7 @@ class BobbieKnowledgeIndex:
             'document_status': DOCUMENT_STATUS,
             'retrieval': retrieval,
             # Only vector-backed modes involve the embedding model.
-            'embedding_model': embedding_provider.name if retrieval in ('semantic', 'hybrid') else None,
+            'embedding_model': vector_store.embedding_name if retrieval in ('semantic', 'hybrid') else None,
             'matches': matches,
         }
 

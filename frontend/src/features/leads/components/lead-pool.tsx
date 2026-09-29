@@ -112,6 +112,79 @@ type LeadPoolProps = {
   onOpenConversation?: (conversationId: number) => void;
 };
 
+type StageFilterOption = {
+  value: string;
+  label: string;
+};
+
+function StageFilter({
+  value,
+  options,
+  onChange,
+}: {
+  value: string;
+  options: StageFilterOption[];
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const selected = options.find((option) => option.value === value) ?? options[0];
+
+  useEffect(() => {
+    if (!open) return;
+
+    const close = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  return (
+    <div className={`leads-stage-filter${open ? " open" : ""}`} ref={rootRef}>
+      <button
+        type="button"
+        className="leads-stage-filter-trigger"
+        aria-label="Filter by stage"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span>{selected?.label ?? "All stages"}</span>
+        <span className="leads-stage-filter-chevron" aria-hidden="true" />
+      </button>
+      {open ? (
+        <div className="leads-stage-filter-menu" role="listbox" aria-label="Filter by stage">
+          {options.map((option) => (
+            <button
+              key={option.value || "all"}
+              type="button"
+              role="option"
+              aria-selected={option.value === value}
+              className={option.value === value ? "active" : ""}
+              onClick={() => {
+                onChange(option.value);
+                setOpen(false);
+              }}
+            >
+              <span>{option.label}</span>
+              {option.value === value ? <span aria-hidden="true">✓</span> : null}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps) {
   const [pool, setPool] = useState<LeadPoolResponse>(EMPTY_POOL);
   const [activeSignals, setActiveSignals] = useState<string[]>([]);
@@ -917,20 +990,19 @@ useEffect(() => {
       </header>
 
       <div className="leads-toolbar">
-        <label className="leads-stage-filter">
-          <span className="sr-only">Filter by stage</span>
-          <select value={stage} onChange={(event) => setStage(event.target.value)}>
-            <option value="">All stages</option>
-            {pool.stage_catalog
+        <StageFilter
+          value={stage}
+          onChange={setStage}
+          options={[
+            { value: "", label: "All stages" },
+            ...pool.stage_catalog
               .filter((item) => item.key !== "needs_review" && item.key !== "in_campaign")
-              .map((item) => (
-                <option key={item.key} value={item.key}>
-                  {item.label}
-                  {pool.facets.stages[item.key] ? ` (${pool.facets.stages[item.key]})` : ""}
-                </option>
-              ))}
-          </select>
-        </label>
+              .map((item) => ({
+                value: item.key,
+                label: `${item.label}${pool.facets.stages[item.key] ? ` (${pool.facets.stages[item.key]})` : ""}`,
+              })),
+          ]}
+        />
         <LocationCombo
   icon={PIN_ICON}
   ariaLabel="Filter by state"

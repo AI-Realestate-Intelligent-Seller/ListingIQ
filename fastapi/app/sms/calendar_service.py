@@ -8,6 +8,7 @@ single-file simulator could not do.
 
 from datetime import datetime, time as clock_time, timedelta, timezone
 from uuid import uuid4
+from urllib.parse import quote_plus
 
 from sqlalchemy.exc import IntegrityError
 from ..routes.websocket import broadcast_calendar_event_sync,broadcast_notification_event_sync
@@ -111,6 +112,7 @@ def create_booking(
     title: str,
     start_at,
     end_at,
+    location_address: str | None = None,
 ) -> dict:
     """
     Create a booking and notify the connected
@@ -151,6 +153,7 @@ def create_booking(
         phone=phone,
         name=name or None,
         title=title or "Property consultation",
+        location_address=(location_address or '').strip() or None,
         start_at=start.replace(tzinfo=None),
         end_at=end.replace(tzinfo=None),
         join_token=uuid4().hex,
@@ -249,6 +252,7 @@ def serialize(booking: Booking) -> dict:
         'phone': booking.phone,
         'name': booking.name,
         'title': booking.title,
+        'location_address': booking.location_address,
         'start_at': _iso(booking.start_at.replace(tzinfo=timezone.utc)),
         'end_at': _iso(booking.end_at.replace(tzinfo=timezone.utc)),
         'join_token': booking.join_token,
@@ -260,6 +264,11 @@ def serialize(booking: Booking) -> dict:
 def join_url(token: str) -> str:
     """Meeting links now point at the Next.js app rather than the calendar port."""
     return f"{settings['frontend_url'].rstrip('/')}/meeting/{token}"
+
+
+def map_url(address: str) -> str:
+    """Public directions/search link for an in-person appointment address."""
+    return f"https://www.google.com/maps/search/?api=1&query={quote_plus(address)}"
 
 
 def confirmation_message(booking: dict, host: str | None = None) -> str:
@@ -278,9 +287,13 @@ def confirmation_message(booking: dict, host: str | None = None) -> str:
     # like a form letter, not a text message.
     full_name = (booking.get('name') or '').strip()
     name = full_name.split()[0] if full_name else 'there'
-    return (f"Thanks, {name}. Your meeting with {host or 'Bobbie'} is confirmed for "
-            f"{start.strftime('%b %d, %Y at %I:%M %p')}–{end.strftime('%I:%M %p')} "
-            f"{timezone_name}. Join here: {booking['join_url']}")
+    message = (f"Thanks, {name}. Your meeting with {host or 'Bobbie'} is confirmed for "
+               f"{start.strftime('%b %d, %Y at %I:%M %p')}–{end.strftime('%I:%M %p')} "
+               f"{timezone_name}.")
+    address = (booking.get('location_address') or '').strip()
+    if address:
+        return f"{message} Address: {address}. Map: {map_url(address)}"
+    return f"{message} Join here: {booking['join_url']}"
 
 
 def list_bookings(session, user_id: int) -> list:
@@ -294,7 +307,6 @@ def list_bookings(session, user_id: int) -> list:
 def booking_by_token(session, token: str) -> dict | None:
     booking = session.query(Booking).filter(Booking.join_token == token).first()
     return serialize(booking) if booking else None
-
 
 
 

@@ -58,8 +58,17 @@ export type AppointmentPayload = {
   start_at: string;
   end_at: string;
   title?: string;
-  /** Text the owner the confirmation and the meeting link. */
+  address: string;
+  /** Text the owner the confirmation and the appointment map link. */
   notify: boolean;
+};
+
+export type GeocodedAppointmentAddress = {
+  address: string;
+  display_name: string;
+  latitude: number;
+  longitude: number;
+  provider: string;
 };
 
 export type AppointmentResult = {
@@ -67,4 +76,13 @@ export type AppointmentResult = {
   notified: boolean;
   note: string | null;
   followup: FollowUp;
+};
+
+/** Draft next replies for a thread, grounded in its message history. */
+export type ReplySuggestions = {
+  suggestions: string[];
+  /** "ai" when DeepSeek drafted them, "template" for the built-in wordings. */
+  source: "ai" | "template";
+  /** Why the templates were used, when they were. Empty on the happy path. */
+  note: string;
 };

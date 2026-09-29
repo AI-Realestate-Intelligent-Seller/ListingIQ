@@ -276,7 +276,8 @@ class FollowUpAppointmentRequest(BaseModel):
     start_at: datetime
     end_at: datetime
     title: Optional[str] = Field(None, max_length=200)
-    # Text the owner the confirmation and the meeting link.
+    address: str = Field(..., min_length=5, max_length=500)
+    # Text the owner the confirmation and the appointment map link.
     notify: bool = True
 
 class FollowUpAppointmentResult(BaseModel):
@@ -331,6 +332,14 @@ class CampaignReasonSuggestions(BaseModel):
     # 'ai' when DeepSeek phrased them, 'catalog' for the built-in wordings.
     source: str = 'catalog'
     # Why the catalog was used, when it was. Empty on the happy path.
+    note: str = ''
+
+class ReplySuggestions(BaseModel):
+    """Draft next replies for a thread, grounded in its message history."""
+    suggestions: List[str] = []
+    # 'ai' when DeepSeek drafted them, 'template' for the built-in wordings.
+    source: str = 'template'
+    # Why the templates were used, when they were. Empty on the happy path.
     note: str = ''
 
 class CampaignRecipient(BaseModel):

@@ -13,6 +13,7 @@ CONTACT = '+13125848528'
 SECOND_CONTACT = '+13125848529'
 SMS_URL = '/api/v1/sms/conversations'
 FOLLOWUPS_URL = '/api/v1/followups'
+APPOINTMENT_ADDRESS = '4517 W Adams St, Chicago, IL 60624'
 
 
 @pytest.fixture
@@ -277,7 +278,8 @@ def test_booking_an_appointment_texts_the_owner(client, make_user, auth_header, 
 
     response = client.post(f'{FOLLOWUPS_URL}/{conversation_id}/appointment',
                            json={'start_at': slots[0]['start_at'], 'end_at': slots[0]['end_at'],
-                                 'title': 'Home value walkthrough', 'notify': True},
+                                 'title': 'Home value walkthrough',
+                                 'address': APPOINTMENT_ADDRESS, 'notify': True},
                            headers=headers)
     assert response.status_code == 200, response.text
     body = response.json()
@@ -290,6 +292,7 @@ def test_booking_an_appointment_texts_the_owner(client, make_user, auth_header, 
     assert booking.user_id == broker.id
     assert booking.phone == CONTACT
     assert booking.title == 'Home value walkthrough'
+    assert booking.location_address == APPOINTMENT_ADDRESS
     # The owner was told, and Bobbie must not answer this confirmation.
     assert sent_sms[-1]['to'] == CONTACT
     assert 'confirmed' in sent_sms[-1]['text']
@@ -297,6 +300,9 @@ def test_booking_an_appointment_texts_the_owner(client, make_user, auth_header, 
     # A person booked it, so the owner is told they are meeting that person, and
     # the thread records it as theirs rather than as Bobbie's.
     assert 'meeting with Test User is confirmed' in sent_sms[-1]['text']
+    assert f'Address: {APPOINTMENT_ADDRESS}' in sent_sms[-1]['text']
+    assert 'google.com/maps/search/' in sent_sms[-1]['text']
+    assert 'Join here:' not in sent_sms[-1]['text']
     assert 'Bobbie' not in sent_sms[-1]['text']
     assert sent_sms[-1]['simulation_event_type'] == 'broker.booking'
     # Greeted by first name, as the initial outreach does.
@@ -310,11 +316,35 @@ def test_a_taken_slot_is_refused(client, make_user, auth_header, sent_sms):
     owner_replies(client)
 
     slot = client.get('/api/v1/sms/calendar/availability', headers=headers).json()['slots'][0]
-    booking = {'start_at': slot['start_at'], 'end_at': slot['end_at'], 'notify': False}
+    booking = {'start_at': slot['start_at'], 'end_at': slot['end_at'],
+               'address': APPOINTMENT_ADDRESS, 'notify': False}
     assert client.post(f'{FOLLOWUPS_URL}/{conversation_id}/appointment', json=booking,
                        headers=headers).status_code == 200
     assert client.post(f'{FOLLOWUPS_URL}/{conversation_id}/appointment', json=booking,
                        headers=headers).status_code == 409
+
+
+def test_manual_appointment_requires_a_complete_street_address(
+        client, make_user, auth_header, sent_sms):
+    make_user(BROKER_EMAIL, role='broker')
+    headers = auth_header(BROKER_EMAIL)
+    conversation_id = start_conversation(client, headers)
+    owner_replies(client)
+    slot = client.get('/api/v1/sms/calendar/availability', headers=headers).json()['slots'][0]
+
+    response = client.post(
+        f'{FOLLOWUPS_URL}/{conversation_id}/appointment',
+        json={
+            'start_at': slot['start_at'],
+            'end_at': slot['end_at'],
+            'address': 'Chicago',
+            'notify': False,
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 400
+    assert 'complete street address' in response.json()['detail']
 
 
 def test_an_opted_out_owner_cannot_be_booked(client, make_user, auth_header, sent_sms):
@@ -327,7 +357,7 @@ def test_an_opted_out_owner_cannot_be_booked(client, make_user, auth_header, sen
 
     response = client.post(f'{FOLLOWUPS_URL}/{conversation_id}/appointment',
                            json={'start_at': slot['start_at'], 'end_at': slot['end_at'],
-                                 'notify': True},
+                                 'address': APPOINTMENT_ADDRESS, 'notify': True},
                            headers=headers)
     assert response.status_code == 409
     assert 'opted out' in response.json()['detail']
@@ -347,7 +377,7 @@ def test_a_failed_confirmation_still_reports_the_booking(client, make_user, auth
     monkeypatch.setattr('app.routes.followups.service.send_and_store_message', refuse)
     response = client.post(f'{FOLLOWUPS_URL}/{conversation_id}/appointment',
                            json={'start_at': slot['start_at'], 'end_at': slot['end_at'],
-                                 'notify': True},
+                                 'address': APPOINTMENT_ADDRESS, 'notify': True},
                            headers=headers)
 
     assert response.status_code == 200, response.text
@@ -356,3 +386,116 @@ def test_a_failed_confirmation_still_reports_the_booking(client, make_user, auth
     # The meeting is real even though the text is not.
     assert session.query(Booking).count() == 1
     assert response.json()['followup']['meeting_booked'] is True
+
+
+# --------------------------------------------------------------------------
+# Reply suggestions
+# --------------------------------------------------------------------------
+
+def test_reply_suggestions_are_drafted_from_the_thread_history(
+        client, make_user, auth_header, sent_sms, monkeypatch):
+    seen = {}
+
+    def fake_completion(messages, **options):
+        seen['messages'] = messages
+        return {'content': '```json\n{"suggestions": ["Happy to run the numbers for you."]}\n```'}
+
+    monkeypatch.setattr('app.sms.reply_suggest.deepseek.is_configured', lambda: True)
+    monkeypatch.setattr('app.sms.reply_suggest.deepseek.completion', fake_completion)
+
+    make_user(BROKER_EMAIL, role='broker')
+    headers = auth_header(BROKER_EMAIL)
+    conversation_id = start_conversation(client, headers)
+    owner_replies(client)
+
+    response = client.post(f'{FOLLOWUPS_URL}/{conversation_id}/reply-suggestions', headers=headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body['source'] == 'ai'
+    assert body['suggestions'] == ['Happy to run the numbers for you.']
+    # The owner's latest message is what the drafts must answer.
+    assert 'depends what my place is worth' in seen['messages'][1]['content']
+    # Suggesting never sends anything.
+    assert len(sent_sms) == 1
+
+
+def test_reply_suggestions_see_the_property_details_behind_the_thread(
+        client, make_user, auth_header, session, sent_sms, monkeypatch):
+    """An owner asking about their own house should get the imported value back."""
+    import json
+
+    from app.models import Lead
+
+    seen = {}
+
+    def fake_completion(messages, **options):
+        seen['messages'] = messages
+        return {'content': '{"suggestions": ["It shows 3 beds and 2 baths."]}'}
+
+    monkeypatch.setattr('app.sms.reply_suggest.deepseek.is_configured', lambda: True)
+    monkeypatch.setattr('app.sms.reply_suggest.deepseek.completion', fake_completion)
+
+    user = make_user(BROKER_EMAIL, role='broker')
+    headers = auth_header(BROKER_EMAIL)
+    conversation_id = start_conversation(client, headers)
+    session.add(Lead(user_id=user.id, owner_name='Marcus Webb', phone=CONTACT,
+                     property_address='4517 W Adams St, Austin, TX',
+                     signals='expired,pre_foreclosure',
+                     details=json.dumps({'Bedrooms': 3, 'Bathrooms': 2, 'Year Built': 1962}),
+                     conversation_id=conversation_id))
+    session.commit()
+    owner_replies(client, text='How many bedrooms do you have on file for it?')
+
+    body = client.post(f'{FOLLOWUPS_URL}/{conversation_id}/reply-suggestions', headers=headers).json()
+    assert body['source'] == 'ai'
+    prompt = seen['messages'][1]['content']
+    assert '"Bedrooms": 3' in prompt
+    assert '"Year Built": 1962' in prompt
+    # Visible to the model, but marked as something a draft must not raise.
+    assert '"sensitive_signals": ["Pre-Foreclosure"]' in prompt
+
+
+def test_reply_suggestions_fall_back_to_templates_when_ai_is_down(
+        client, make_user, auth_header, sent_sms, monkeypatch):
+    from app.sms import deepseek
+
+    def boom(messages, **options):
+        raise deepseek.AiUnavailableError('AI provider unreachable')
+
+    monkeypatch.setattr('app.sms.reply_suggest.deepseek.is_configured', lambda: True)
+    monkeypatch.setattr('app.sms.reply_suggest.deepseek.completion', boom)
+
+    make_user(BROKER_EMAIL, role='broker')
+    headers = auth_header(BROKER_EMAIL)
+    conversation_id = start_conversation(client, headers)
+    owner_replies(client)
+
+    body = client.post(f'{FOLLOWUPS_URL}/{conversation_id}/reply-suggestions', headers=headers).json()
+    assert body['source'] == 'template'
+    assert body['suggestions']
+    # The owner asked about value, so the templates should speak to price.
+    assert any('price' in text.lower() for text in body['suggestions'])
+    assert 'could not be reached' in body['note']
+
+
+def test_reply_suggestions_for_another_brokerages_thread_are_not_found(
+        client, make_user, auth_header, sent_sms):
+    make_user(BROKER_EMAIL, role='broker')
+    make_user(OTHER_EMAIL, role='broker', brokerage_id='brokerage-2', brokerage_name='Other Group')
+    conversation_id = start_conversation(client, auth_header(BROKER_EMAIL))
+    owner_replies(client)
+
+    response = client.post(f'{FOLLOWUPS_URL}/{conversation_id}/reply-suggestions',
+                           headers=auth_header(OTHER_EMAIL))
+    assert response.status_code == 404
+
+
+def test_no_reply_suggestions_for_an_opted_out_owner(client, make_user, auth_header, sent_sms):
+    make_user(BROKER_EMAIL, role='broker')
+    headers = auth_header(BROKER_EMAIL)
+    conversation_id = start_conversation(client, headers)
+    owner_replies(client)
+    client.patch(f'{FOLLOWUPS_URL}/{conversation_id}', json={'lead_status': 'dnc'}, headers=headers)
+
+    response = client.post(f'{FOLLOWUPS_URL}/{conversation_id}/reply-suggestions', headers=headers)
+    assert response.status_code == 409

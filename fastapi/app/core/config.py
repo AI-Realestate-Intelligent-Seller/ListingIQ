@@ -59,7 +59,7 @@ def load_config():
         'timeout_seconds': float(os.getenv('AI_REQUEST_TIMEOUT_MS', ai_cfg.get('timeout_ms', 30000))) / 1000.0,
         'timezone': os.getenv('BOBBIE_TIMEZONE', ai_cfg.get('timezone', 'America/Chicago')),
         # Retrieval embeddings: MiniLM ONNX bundled with chromadb (local, free).
-        'embedding_model': os.getenv('EMBEDDING_MODEL', ai_cfg.get('embedding_model', 'all-MiniLM-L6-v2')),
+        'embedding_model': os.getenv('EMBEDDING_MODEL', ai_cfg.get('embedding_model', 'sentence-transformers/all-MiniLM-L6-v2')),
     }
     # Services the SMS workspace talks to (all reused from the Simulation folder).
     sms_cfg = cfg.get('sms', {}) if isinstance(cfg.get('sms', {}), dict) else {}
@@ -91,8 +91,9 @@ def load_config():
         'followup_max_attempts': int(os.getenv('BOBBIE_FOLLOWUP_MAX_ATTEMPTS', sms_cfg.get('followup_max_attempts', 3))),
         'followup_poll_seconds': float(os.getenv('BOBBIE_FOLLOWUP_POLL_SECONDS', sms_cfg.get('followup_poll_seconds', 60))),
     }
-    # Vector store (ChromaDB) lives inside the project, so no root-owned path is
-    # needed. CHROMA_PATH is the current name; LANCEDB_PATH is still read so
+    # ChromaDB lives inside the project and remains the default. Qdrant is
+    # selected only when both server-side credentials are present and valid.
+    # CHROMA_PATH is the current name; LANCEDB_PATH is still read so
     # existing .env files keep working.
     vector_cfg = cfg.get('vector_store', {}) if isinstance(cfg.get('vector_store', {}), dict) else {}
     cfg['vector_store'] = {
@@ -102,6 +103,13 @@ def load_config():
             or vector_cfg.get('path')
             or 'data/chroma'
         ),
+        'qdrant_url': os.getenv('QDRANT_URL', '').strip(),
+        'qdrant_api_key': os.getenv('QDRANT_API_KEY', '').strip(),
+        'qdrant_timeout_seconds': float(os.getenv('QDRANT_TIMEOUT_SECONDS', 10)),
+        'qdrant_cloud_inference': str(os.getenv(
+            'QDRANT_CLOUD_INFERENCE', 'true')).lower() in ('1', 'true', 'yes', 'on'),
+        'embedding_model': cfg['ai']['embedding_model'],
+        'vector_dimension': int(os.getenv('VECTOR_DIMENSION', 384)),
     }
     # Lead pool CSV/XLSX uploads. Files are streamed to disk, so the ceiling
     # bounds disk and parse time rather than memory.
