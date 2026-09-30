@@ -5,8 +5,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.core.config import settings
-from app.models import Booking
-from app.sms import calendar_client, calendar_service, service
+from app.models import Booking, Conversation, Lead, Message
+from app.sms import bobbie, calendar_client, calendar_service, service
 from app.sms.knowledge import search_bobbie_knowledge
 from app.sms.knowledge_index import BobbieKnowledgeIndex
 
@@ -151,6 +151,95 @@ def test_calendar_endpoints_are_scoped_to_the_caller(client, make_user, auth_hea
     other = auth_header('other@linchpinglobal.net')
     assert client.get('/api/v1/sms/calendar/bookings', headers=other).json() == []
     assert client.get('/api/v1/sms/calendar/availability').status_code == 401
+
+
+def test_ai_time_selection_waits_for_agent_location_approval(
+        client, make_user, auth_header, session, monkeypatch):
+    broker = make_user(BROKER_EMAIL, role='broker')
+    agent = make_user('agent@linchpinglobal.net', role='agent')
+    conversation = Conversation(
+        contact=CONTACT,
+        user_id=broker.id,
+        name='Oksana',
+        property_address='416 Glendale Rd, Glenview, IL, 60025',
+        ai_enabled=True,
+        handled_by='bobbie',
+        lead_status='ready_to_sell',
+    )
+    session.add(conversation)
+    session.commit()
+    session.refresh(conversation)
+    session.add_all([
+        Message(
+            conversation_id=conversation.id,
+            direction='inbound',
+            from_number=CONTACT,
+            to_number=service.FIXED_FROM,
+            text='9:00 works for me',
+            status='received',
+            event_type='message.received',
+            created_at=datetime.utcnow(),
+        ),
+        Lead(
+            user_id=broker.id,
+            owner_name='Oksana',
+            phone=CONTACT,
+            property_address=conversation.property_address,
+            conversation_id=conversation.id,
+            assigned_agent_id=agent.id,
+        ),
+    ])
+    session.commit()
+
+    slot = {
+        'start_at': '2026-09-30T14:00:00Z',
+        'end_at': '2026-09-30T14:30:00Z',
+        'label': 'Sep 30 at 9:00 AM',
+    }
+    monkeypatch.setattr(bobbie, 'analyze_conversation_disposition', lambda *_: {
+        'action': 'continue',
+        'intent': 'schedule_visit',
+        'outcome': 'positive',
+        'lead_status': 'ready_to_sell',
+        'confidence': 1.0,
+        'conversation_stage': 'scheduling',
+        'next_step': 'schedule',
+        'qualification_focus': '',
+        'calendar': {
+            'state': 'time_proposed',
+            'should_fetch_availability': True,
+            'requested_time_text': '9:00',
+            'reason': 'owner selected the offered slot',
+        },
+        'reason': 'owner selected the offered slot',
+    })
+    monkeypatch.setattr(calendar_client, 'fetch_availability', lambda *_: {
+        'timezone': 'America/Chicago', 'current_time': '', 'slot_minutes': 30, 'slots': [slot]})
+    monkeypatch.setattr(bobbie, 'resolve_calendar_action', lambda *_: {
+        **slot, 'action': 'book', 'consent': 'offered_slot_selected'})
+    monkeypatch.setattr(calendar_client, 'create_booking',
+                        lambda *_: pytest.fail('AI must not create the booking before location approval'))
+    monkeypatch.setattr(service, 'send_and_store_message',
+                        lambda *_: pytest.fail('AI must not send a booking confirmation'))
+
+    service.process_ai_reply(conversation.id, '9:00 works for me')
+
+    session.expire_all()
+    updated = session.get(Conversation, conversation.id)
+    assert updated.ai_enabled is False
+    assert updated.handled_by == 'broker'
+    assert updated.lead_status == 'location_discussion'
+    assert updated.meeting_booked is False
+    assert session.query(Booking).count() == 0
+
+    followup = client.get(
+        f'/api/v1/followups/{conversation.id}',
+        headers=auth_header('agent@linchpinglobal.net'),
+    )
+    assert followup.status_code == 200, followup.text
+    assert followup.json()['reason_label'] == 'Location to confirm'
+    assert followup.json()['reason'] == 'location_discussion'
+    assert followup.json()['awaiting_broker_reply'] is True
 
 
 def test_meeting_links_point_at_the_frontend_not_a_calendar_port():

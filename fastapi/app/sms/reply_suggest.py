@@ -152,7 +152,8 @@ SYSTEM_PROMPT = (
     '"I hope you are well", "Just following up").\n'
     '- Do not repeat anything the agent already said in the thread.\n'
     '- Make the options genuinely different: e.g. a direct answer; an answer plus one '
-    'easy next step (a quick call or a visit); a single question that moves things forward.\n\n'
+    'easy next step, preferably offering to visit the property in person (a quick call only if the '
+    'owner has declined a visit or asked for one); a single question that moves things forward.\n\n'
     'Accuracy:\n'
     '- Answer what the owner actually asked, first.\n'
     '- For property questions (beds, baths, square footage, lot, year built, value, '
@@ -225,7 +226,7 @@ def _fallback(messages: list[Message]) -> list[str]:
     if any(word in latest_inbound for word in ('price', 'worth', 'value', 'offer')):
         return [
             'Happy to put real numbers together for you. What price would make it worth it?',
-            'Fair question. Could we do a quick 10-minute call so I can give you a real answer?',
+            'Fair question. Could I stop by and take a quick look so I can give you a real answer?',
             'Are you mainly curious about value, or thinking about selling soon?',
         ]
     if any(word in latest_inbound for word in ('when', 'timeline', 'soon', 'month', 'year')):
@@ -236,7 +237,7 @@ def _fallback(messages: list[Message]) -> list[str]:
         ]
     return [
         'Thanks for getting back to me. What would help most right now?',
-        'Would a quick call this week work to talk it through?',
+        'Would it work if I stopped by this week to see the place?',
         'Understood. Should I check back another time?',
     ]
 

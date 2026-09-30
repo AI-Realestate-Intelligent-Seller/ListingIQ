@@ -114,7 +114,7 @@ class LeadAssignmentStageRequest(BaseModel):
     def stage_must_be_known(cls, value: str) -> str:
         normalized = (value or '').strip().lower().replace(' ', '_')
         allowed = {'new', 'processing', 'want_more_info', 'interested', 'ready_to_sell',
-                   'not_interested', 'no_response', 'dnc'}
+                   'location_discussion', 'not_interested', 'no_response', 'dnc'}
         if normalized not in allowed:
             raise ValueError('Choose New or a valid lead status.')
         return normalized
@@ -205,7 +205,7 @@ class SmsConversationCreated(BaseModel):
 
 # Statuses the assignee may set by hand from the Follow-ups panel.
 LEAD_STATUSES = ('processing', 'want_more_info', 'interested', 'ready_to_sell',
-                 'not_interested', 'no_response', 'dnc')
+                 'location_discussion', 'not_interested', 'no_response', 'dnc')
 
 # The decision recorded on a replied lead.
 FOLLOWUP_STATES = ('pending', 'accepted', 'declined')

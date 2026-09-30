@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from app.models import Booking, Conversation, Message
+from app.models import Booking, Conversation, Lead, Message
 from app.sms import service
 
 BROKER_EMAIL = 'ather.shamim@linchpinglobal.net'
@@ -105,6 +105,41 @@ def test_all_scope_includes_replied_and_silent_conversations(client, make_user, 
     assert set(by_id) == {replied_id, silent_id}
     assert by_id[replied_id]['reply_count'] == 1
     assert by_id[silent_id]['reply_count'] == 0
+
+
+def test_agent_all_scope_only_includes_assigned_conversations(
+        client, make_user, auth_header, session, sent_sms):
+    broker = make_user(BROKER_EMAIL, role='broker')
+    agent = make_user('agent@linchpinglobal.net', role='agent')
+    broker_headers = auth_header(BROKER_EMAIL)
+    assigned_id = start_conversation(client, broker_headers)
+    unassigned_id = start_conversation(
+        client, broker_headers, contact=SECOND_CONTACT, name='Priya Nguyen')
+    session.add_all([
+        Lead(
+            user_id=broker.id,
+            owner_name='Marcus Webb',
+            phone=CONTACT,
+            property_address='4517 W Adams St, Austin, TX',
+            conversation_id=assigned_id,
+            assigned_agent_id=agent.id,
+        ),
+        Lead(
+            user_id=broker.id,
+            owner_name='Priya Nguyen',
+            phone=SECOND_CONTACT,
+            property_address='90 Lake Ave, Austin, TX',
+            conversation_id=unassigned_id,
+        ),
+    ])
+    session.commit()
+
+    agent_headers = auth_header('agent@linchpinglobal.net')
+    assert client.get(FOLLOWUPS_URL, headers=agent_headers).json() == []
+    rows = client.get(f'{FOLLOWUPS_URL}?scope=all', headers=agent_headers)
+
+    assert rows.status_code == 200, rows.text
+    assert [row['id'] for row in rows.json()] == [assigned_id]
 
 
 def test_followups_reject_unknown_scope(client, make_user, auth_header):

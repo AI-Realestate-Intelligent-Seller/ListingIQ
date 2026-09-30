@@ -102,7 +102,7 @@ def _questions(value: str = '') -> list:
 
 def _question_intent(value: str = '') -> str:
     text = str(value).lower()
-    if re.search(r'\b(?:call|phone|meet|meeting|appointment)\b', text):
+    if re.search(r'\b(?:call|phone|meet|meeting|appointment|visit|walk-?through|stop by|come by|swing by)\b', text):
         return 'scheduled_meeting'
     if re.search(r'\b(?:chat|talk|conversation)\b', text):
         return 'conversation'
@@ -191,7 +191,7 @@ def safe_grounded_fallback(latest_inbound: str = '', violations: list | None = N
 
     if plan.get('next_step') == 'offer_call':
         candidates.append('Thanks—that gives me enough to understand what you need. '
-                          'Would you be open to a quick 5–10 minute call to discuss the next step?')
+                          'Would you be open to me stopping by to take a quick look at the property?')
     if ('unsupported_phone_source' in violations
             or re.search(r'\b(?:how did you (?:find|get)|where did you get|got|found)\b[^?]{0,45}'
                          r'\b(?:my |the )?(?:number|contact info)|\bmy (?:number|contact info)\b', latest, re.I)):

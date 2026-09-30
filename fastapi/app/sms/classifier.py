@@ -7,7 +7,8 @@ detect opt-outs before any model call is made.
 import re
 
 TERMINAL_STATUSES = {'dnc', 'not_interested', 'no_response'}
-STATUS_PRIORITY = {'processing': 0, 'want_more_info': 1, 'interested': 2, 'ready_to_sell': 3}
+STATUS_PRIORITY = {
+    'processing': 0, 'want_more_info': 1, 'interested': 2, 'ready_to_sell': 3, 'location_discussion': 3}
 
 OPT_OUT = re.compile(
     r"\b(stop|stopall|unsubscribe|remove me|do not contact|don['’]?t contact|don['’]?t message"
@@ -36,7 +37,12 @@ INTERESTED = re.compile(
     r"|(?:i(?:['’]m| am)|we(?:['’]re| are)) (?:still )?interested|right price)\b",
     re.I,
 )
-CALL_OPENNESS = re.compile(r'\b(?:quick call (?:could|would|might) work|open to a (?:quick )?(?:call|meeting))\b', re.I)
+CALL_OPENNESS = re.compile(
+    r'\b(?:quick (?:call|visit|look) (?:could|would|might) work'
+    r'|open to a (?:quick )?(?:call|meeting|visit|walk-?through)'
+    r'|(?:you can|feel free to) (?:stop|come|swing|drop) by)\b',
+    re.I,
+)
 WANT_MORE_INFO = re.compile(
     r'\b(?:email|send (?:me )?(?:info|information|details)|more info|recent sales|comps?|ballpark'
     r'|estimate|price range|commission|fees?|listing terms?|strategy|plan|options?|what are you proposing)\b',

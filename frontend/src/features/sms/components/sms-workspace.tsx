@@ -374,8 +374,12 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
 
             {active.awaiting_broker_reply ? (
               <p className="sms-attention" role="status">
-                <strong>Waiting for you.</strong> Bobbie has stepped back on this
-                thread, so this reply will not be answered automatically.
+                {active.lead_status === "location_discussion" ? (
+                  <><strong>Location to confirm.</strong> Agree the location before sending appointment details.</>
+                ) : (
+                  <><strong>Waiting for you.</strong> Bobbie has stepped back on this
+                    thread, so this reply will not be answered automatically.</>
+                )}
               </p>
             ) : null}
 
