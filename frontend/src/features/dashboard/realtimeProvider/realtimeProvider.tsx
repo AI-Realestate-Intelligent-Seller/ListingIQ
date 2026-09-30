@@ -33,13 +33,6 @@ type RealtimeContextValue = {
   socket: WebSocket | null;
 };
 
-type PushStatus =
-  | "subscribed"
-  | "needs_permission"
-  | "needs_subscription"
-  | "denied"
-  | "unsupported";
-
 const RealtimeContext = createContext<RealtimeContextValue>({
   socket: null,
 });
@@ -72,6 +65,10 @@ function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {
 
 // SAVE PUSH SUBSCRIPTION
 
+function hasPushPermission(): boolean {
+  return "Notification" in window && Notification.permission === "granted";
+}
+
 async function savePushSubscription(
   userId: number,
   subscription: PushSubscription,
@@ -93,109 +90,55 @@ async function savePushSubscription(
 
 async function deactivatePushSubscription() {
   const deviceId = localStorage.getItem("push_device_id");
-  if (!deviceId) return;
-
-  await requestJson("/push/unsubscribe", {
-    method: "POST",
-    accessToken: readAuthSession()?.access_token,
-    payload: { device_id: deviceId },
-  });
+  // Clean up both sides independently so a network failure cannot keep this
+  // browser subscribed. Do not register a worker just to turn notifications off.
+  const results = await Promise.allSettled([
+    (async () => {
+      if (!("serviceWorker" in navigator)) return;
+      const registration = await navigator.serviceWorker.getRegistration("/");
+      if (!registration) return;
+      await Promise.all([
+        (async () => {
+          const subscription = await registration.pushManager?.getSubscription();
+          await subscription?.unsubscribe();
+        })(),
+        (async () => {
+          const notifications = await registration.getNotifications();
+          notifications.forEach((notification) => notification.close());
+        })(),
+      ]);
+    })(),
+    deviceId
+      ? requestJson("/push/unsubscribe", {
+          method: "POST",
+          accessToken: readAuthSession()?.access_token,
+          payload: { device_id: deviceId },
+        })
+      : Promise.resolve(),
+  ]);
+  for (const result of results) {
+    if (result.status === "rejected") throw result.reason;
+  }
 }
 
-async function checkPushStatus(): Promise<{
-  status: PushStatus;
-  subscription: PushSubscription | null;
-}> {
-  if ("Notification" in window && Notification.permission === "denied") {
-    return { status: "denied", subscription: null };
-  }
-
-  if (
-    !("serviceWorker" in navigator) ||
-    !("PushManager" in window) ||
-    !("Notification" in window)
-  ) {
-    return {
-      status: "unsupported",
-      subscription: null,
-    };
-  }
-
+async function enablePushNotifications(userId: number, isCancelled: () => boolean) {
   const registration = await navigator.serviceWorker.register("/sw.js");
   await navigator.serviceWorker.ready;
-
-  const subscription = await registration.pushManager.getSubscription();
-  const permission = Notification.permission;
-
-  if (permission === "granted" && subscription) {
-    return {
-      status: "subscribed",
-      subscription,
-    };
-  }
-
-  if (permission === "denied") {
-    return {
-      status: "denied",
-      subscription: null,
-    };
-  }
-
-  if (permission === "granted" && !subscription) {
-    return {
-      status: "needs_subscription",
-      subscription: null,
-    };
-  }
-
-  return {
-    status: "needs_permission",
-    subscription: null,
-  };
-}
-
-async function enablePushNotifications(userId: number) {
-  if (!("serviceWorker" in navigator)) {
-    throw new Error("Service workers are not supported by this browser.");
-  }
-
-  if (!("PushManager" in window)) {
-    throw new Error("Push notifications are not supported by this browser.");
-  }
-
-  let permission = Notification.permission;
-
-  if (permission === "default") {
-    permission = await Notification.requestPermission();
-  }
-
-  if (permission !== "granted") {
-    await deactivatePushSubscription();
-    throw new Error("Notification permission was not granted.");
-  }
-
-  const registration = await navigator.serviceWorker.register("/sw.js");
-  await navigator.serviceWorker.ready;
-
-  const vapidPublicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
-
-  if (!vapidPublicKey) {
-    throw new Error("NEXT_PUBLIC_VAPID_PUBLIC_KEY is not configured.");
-  }
-
-  const applicationServerKey = urlBase64ToUint8Array(vapidPublicKey);
-
   let subscription = await registration.pushManager.getSubscription();
+  if (isCancelled() || !hasPushPermission()) return null;
 
   if (!subscription) {
+    const vapidPublicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
+    if (!vapidPublicKey) {
+      throw new Error("NEXT_PUBLIC_VAPID_PUBLIC_KEY is not configured.");
+    }
     subscription = await registration.pushManager.subscribe({
       userVisibleOnly: true,
-      applicationServerKey,
+      applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
     });
   }
-
+  if (isCancelled() || !hasPushPermission()) return null;
   await savePushSubscription(userId, subscription);
-
   return subscription;
 }
 
@@ -229,55 +172,74 @@ export function RealtimeProvider({
     }
 
     let syncingPush = false;
+    let retryPush = false;
+    let syncedPermission: NotificationPermission | undefined;
     async function setupPushNotifications(allowPrompt = false) {
       if (cancelled || syncingPush) return;
+      if (!("Notification" in window)) return;
       syncingPush = true;
+      let attemptedPermission = Notification.permission;
       try {
-        const result = await checkPushStatus();
+        // Sync once on login. Afterward, only a changed permission or a failed
+        // request needs another write. Re-read after awaits to handle Block
+        // during an in-flight subscribe without queueing duplicate saves.
+        while (!cancelled) {
+          const permission = Notification.permission;
+          attemptedPermission = permission;
+          if (!retryPush && permission === syncedPermission) return;
+          retryPush = false;
 
-        if (cancelled) {
-          return;
+          if (permission === "default" && allowPrompt) {
+            allowPrompt = false;
+            if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
+            await Notification.requestPermission();
+            continue;
+          }
+          if (permission === "granted") {
+            if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
+            if (await enablePushNotifications(userId, () => cancelled)) {
+              syncedPermission = permission;
+            }
+          } else {
+            await deactivatePushSubscription();
+            syncedPermission = permission;
+          }
         }
-
-        if (result.status === "subscribed" && result.subscription) {
-          await savePushSubscription(userId, result.subscription);
-          console.log("[PUSH] Existing subscription registered for user:", userId);
-          return;
-        }
-
-        if (result.status === "unsupported") {
-          console.log("[PUSH] Push notifications unsupported.");
-          return;
-        }
-
-        if (result.status === "denied") {
-          await deactivatePushSubscription();
-          console.log("[PUSH] Notification permission denied.");
-          return;
-        }
-
-        if (result.status === "needs_permission") {
-          await deactivatePushSubscription();
-          if (!allowPrompt) return;
-        }
-
-        await enablePushNotifications(userId);
-        console.log("[PUSH] Push notifications enabled for user:", userId);
       } catch (error) {
+        retryPush = true;
         console.error("[PUSH] Failed to enable notifications:", error);
       } finally {
         syncingPush = false;
+        // A permission change may also have caused the request to fail. Apply
+        // that new state immediately; retry unchanged failures only on online.
+        if (!cancelled && Notification.permission !== attemptedPermission) {
+          void setupPushNotifications();
+        }
       }
     }
 
-    void setupPushNotifications(true);
-    function refreshPushStatus() {
-      if (document.visibilityState === "visible") {
-        void setupPushNotifications();
-      }
+    // Let an immediately cancelled mount finish before starting network work
+    // (React Strict Mode mounts effects twice during development).
+    queueMicrotask(() => { void setupPushNotifications(true); });
+    function retryPushSync() {
+      if (retryPush) void setupPushNotifications();
     }
-    window.addEventListener("focus", refreshPushStatus);
-    document.addEventListener("visibilitychange", refreshPushStatus);
+    window.addEventListener("online", retryPushSync);
+
+    // React to Block immediately, including while this tab is in the background.
+    let notificationPermission: PermissionStatus | undefined;
+    function onPermissionChange() {
+      void setupPushNotifications();
+    }
+    if (navigator.permissions?.query) {
+      void navigator.permissions.query({ name: "notifications" })
+        .then((permission) => {
+          if (cancelled) return;
+          notificationPermission = permission;
+          permission.addEventListener("change", onPermissionChange);
+        })
+        .catch(() => { /* Permission observation is not supported everywhere. */ });
+    }
 
     const wsBaseUrl = publicEnv.apiBaseUrl
       .replace(/^http:\/\//, "ws://")
@@ -480,8 +442,8 @@ export function RealtimeProvider({
 
     return () => {
       cancelled = true;
-      window.removeEventListener("focus", refreshPushStatus);
-      document.removeEventListener("visibilitychange", refreshPushStatus);
+      window.removeEventListener("online", retryPushSync);
+      notificationPermission?.removeEventListener("change", onPermissionChange);
       stopHeartbeat();
 
       if (reconnectTimer !== null) {

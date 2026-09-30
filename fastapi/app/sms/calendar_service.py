@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover
 from ..reminder.notification import notify_user
 from ..core.config import settings
 from ..logger import get_logger
-from ..models import Booking,BookingReminder
+from ..models import Booking,BookingReminder,User
 
 logger = get_logger(__name__)
 
@@ -214,6 +214,12 @@ def create_booking(
     # Create in-app notification + Web Push
 
     zone = _zone()
+    recipient = session.get(User, user_id)
+    if recipient and recipient.timezone and ZoneInfo:
+        try:
+            zone = ZoneInfo(recipient.timezone)
+        except (KeyError, ValueError):
+            pass  # Keep the configured fallback for an invalid saved timezone.
     start_local = start.astimezone(zone)
 
     notify_user(
@@ -225,7 +231,7 @@ def create_booking(
     message=(
         f"{name or phone} booked "
         f"{booking.title} for "
-        f"{start_local.strftime('%b %d, %Y at %I:%M %p')}."
+        f"{start_local.strftime('%b %d, %Y at %I:%M %p')} {zone}."
     ),
     action_url=f"/dashboard?view=calendar&booking_id={booking.id}",
     send_push=True,

@@ -33,6 +33,10 @@ self.addEventListener(
 self.addEventListener(
     "push",
     function (event) {
+        // Read permission for each delivery, including queued push messages.
+        if (self.Notification?.permission !== "granted") {
+            return;
+        }
 
         let data = {};
 
