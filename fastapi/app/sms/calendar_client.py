@@ -10,7 +10,7 @@ import re
 import requests
 
 from ..core.config import settings
-from ..logger import get_logger
+from ..logger import get_logger, log_event
 from . import calendar_service
 
 logger = get_logger(__name__)
@@ -25,10 +25,15 @@ def _base_url() -> str:
 
 
 def fetch_availability(session=None, user_id: int | None = None) -> dict:
+    source = 'http' if _base_url() else 'in_process'
+    log_event(logger, 'sms.calendar.availability.started', user_id=user_id, source=source)
     if not _base_url():
-        return calendar_service.availability(session, user_id)
+        payload = calendar_service.availability(session, user_id)
+        log_event(logger, 'sms.calendar.availability.completed', user_id=user_id,
+                  source=source, slot_count=len(payload.get('slots') or []),
+                  timezone=payload.get('timezone'))
+        return payload
 
-    logger.info('[calendar-tool] availability request -> %s', _base_url())
     response = requests.get(f'{_base_url()}/api/availability', timeout=7)
     try:
         payload = response.json()
@@ -36,12 +41,16 @@ def fetch_availability(session=None, user_id: int | None = None) -> dict:
         payload = {}
     if not response.ok:
         raise RuntimeError(payload.get('error') or f'Calendar returned HTTP {response.status_code}')
-    logger.info('[calendar-tool] availability received: %s open slots', len(payload.get('slots') or []))
+    log_event(logger, 'sms.calendar.availability.completed', user_id=user_id,
+              source=source, slot_count=len(payload.get('slots') or []),
+              timezone=payload.get('timezone'))
     return payload
 
 
 def create_booking(conversation, slot: dict, session=None) -> dict:
-    logger.info('[calendar-tool] booking request for %s: %s', conversation.contact, slot.get('start_at'))
+    log_event(logger, 'sms.calendar.booking.started', conversation_id=getattr(conversation, 'id', None),
+              user_id=conversation.user_id, source='http' if _base_url() else 'in_process',
+              start_at=slot.get('start_at'), end_at=slot.get('end_at'))
     if not _base_url():
         try:
             booking = calendar_service.create_booking(
@@ -58,8 +67,11 @@ def create_booking(conversation, slot: dict, session=None) -> dict:
             raise SlotTakenError(str(error)) from error
         # The confirmation SMS is sent by the caller through the normal pipeline,
         # so no separate delivery hop is involved.
-        return {**booking, 'message': calendar_service.confirmation_message(booking),
-                'confirmation_sent': False}
+        result = {**booking, 'message': calendar_service.confirmation_message(booking),
+                  'confirmation_sent': False}
+        log_event(logger, 'sms.calendar.booking.completed', conversation_id=getattr(conversation, 'id', None),
+                  source='in_process', booking_id=booking.get('id'), start_at=booking.get('start_at'))
+        return result
 
     response = requests.post(
         f'{_base_url()}/api/bookings',
@@ -81,7 +93,8 @@ def create_booking(conversation, slot: dict, session=None) -> dict:
         raise SlotTakenError(payload.get('error') or 'That slot is no longer available')
     if not response.ok:
         raise RuntimeError(payload.get('error') or f'Calendar returned HTTP {response.status_code}')
-    logger.info('[calendar-tool] booking created for %s: %s', conversation.contact, payload.get('start_at'))
+    log_event(logger, 'sms.calendar.booking.completed', conversation_id=getattr(conversation, 'id', None),
+              source='http', booking_id=payload.get('id'), start_at=payload.get('start_at'))
     return payload
 
 

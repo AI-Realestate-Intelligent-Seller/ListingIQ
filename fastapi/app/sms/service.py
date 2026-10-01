@@ -6,6 +6,7 @@ separate threads.
 """
 
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -14,7 +15,7 @@ import requests
 
 from ..core.config import settings
 from ..db import SessionLocal
-from ..logger import get_logger
+from ..logger import get_logger, log_event
 from ..models import Conversation, Lead, Message
 from . import bobbie, calendar_client
 from .deepseek import AiUnavailableError
@@ -61,6 +62,12 @@ class SmsDeliveryError(RuntimeError):
 # Delivery
 # ---------------------------------------------------------------------------
 
+
+def _phone_suffix(value: str | None) -> str:
+    digits = re.sub(r'\D', '', str(value or ''))
+    return digits[-4:] if digits else 'unknown'
+
+
 def _sms_mode() -> str:
     mode = str(settings['telnyx'].get('mode') or 'simulation').lower()
     if mode not in ('simulation', 'telnyx'):
@@ -83,7 +90,10 @@ def _simulate_locally(body: dict) -> dict:
     if not isinstance(text, str) or not text.strip():
         raise SmsDeliveryError("'text' must be a non-empty string")
     now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-    logger.info('[sms-simulation] queued message to %s: %s', to_number, text[:80])
+    log_event(
+        logger, 'sms.delivery.simulated', destination_suffix=_phone_suffix(to_number),
+        text_chars=len(text), event_type=body.get('simulation_event_type'),
+    )
     return {
         'data': {
             'id': str(uuid4()),
@@ -109,6 +119,12 @@ def send_sms(payload: dict) -> dict:
     # Always send from the configured number to prevent accidental overrides.
     body = {**payload, 'from': sending_number()}
     headers = {'Content-Type': 'application/json'}
+    log_event(
+        logger, 'sms.delivery.started', mode=mode,
+        destination_suffix=_phone_suffix(body.get('to')),
+        text_chars=len(str(body.get('text') or '')),
+        event_type=body.get('simulation_event_type'),
+    )
 
     if is_simulation:
         url = settings['telnyx'].get('simulation_url')
@@ -143,12 +159,22 @@ def send_sms(payload: dict) -> dict:
         errors = parsed.get('errors') or [{}]
         detail = errors[0].get('detail') if isinstance(errors, list) and errors else json.dumps(parsed)
         raise SmsDeliveryError(f"{'Outbound simulator' if is_simulation else 'Telnyx'} error: {detail}")
+    data = parsed.get('data') or {}
+    log_event(
+        logger, 'sms.delivery.accepted', mode=mode,
+        provider_message_id=data.get('id'), provider_status=data.get('status'),
+    )
     return parsed
 
 
 def send_and_store_message(session, conversation: Conversation, text: str,
                            event_type: str = 'message.sent',
                            suppress_auto_reply: bool = False) -> Message:
+    log_event(
+        logger, 'sms.outbound.preparing', conversation_id=conversation.id,
+        event_type=event_type, text_chars=len(text),
+        suppress_auto_reply=suppress_auto_reply,
+    )
     lead_context = None
     if conversation.lead_context:
         try:
@@ -177,6 +203,11 @@ def send_and_store_message(session, conversation: Conversation, text: str,
     session.add(message)
     session.commit()
     session.refresh(message)
+    log_event(
+        logger, 'sms.outbound.stored', conversation_id=conversation.id,
+        message_id=message.id, event_type=event_type, status=message.status,
+        provider_message_id=message.telnyx_id,
+    )
     return message
 
 
@@ -189,6 +220,8 @@ def history_for(session, conversation: Conversation) -> list:
                 .filter(Message.conversation_id == conversation.id)
                 .order_by(Message.created_at, Message.id)
                 .all())
+    log_event(logger, 'sms.history.loaded', conversation_id=conversation.id,
+              message_count=len(messages))
     return [{'direction': message.direction, 'text': message.text or ''} for message in messages]
 
 
@@ -200,10 +233,19 @@ def is_conversation_closing(text: str = '') -> bool:
 
 
 def update_lead_progress(session, conversation: Conversation, **values) -> None:
+    transitions = {
+        key: {'from': getattr(conversation, key, None), 'to': value}
+        for key, value in values.items()
+        if getattr(conversation, key, None) != value
+    }
+
     for key, value in values.items():
         setattr(conversation, key, value)
     session.add(conversation)
     session.commit()
+    if transitions:
+        log_event(logger, 'sms.conversation.state_updated', conversation_id=conversation.id,
+                  transitions=transitions)
 
 
 def _lead_id_for(session, conversation: Conversation) -> int | None:
@@ -227,6 +269,8 @@ def _log_status_change(session, conversation: Conversation, previous_status: str
         session, lead_id, lead_events.STAGE, 'stage_changed',
         actor_type='ai', from_value=previous_status, to_value=new_status,
     )
+    log_event(logger, 'sms.lead_status.timeline_recorded', conversation_id=conversation.id,
+              lead_id=lead_id, previous_status=previous_status, new_status=new_status)
 
 
 def hand_to_broker(session, conversation: Conversation) -> None:
@@ -239,7 +283,8 @@ def hand_to_broker(session, conversation: Conversation) -> None:
     was_ai = conversation.handled_by != 'broker'
     update_lead_progress(session, conversation, ai_enabled=False, handled_by='broker',
                          next_followup_at=None)
-    logger.info('[handover] conversation %s handed to the broker', conversation.id)
+    log_event(logger, 'sms.handoff.completed', conversation_id=conversation.id,
+              from_owner='bobbie' if was_ai else 'broker', to_owner='broker', ai_enabled=False)
     lead_id = _lead_id_for(session, conversation)
     if lead_id and was_ai:
         lead_events.log_event(
@@ -255,7 +300,8 @@ def hand_to_bobbie(session, conversation: Conversation) -> None:
     update_lead_progress(session, conversation, ai_enabled=True, handled_by='bobbie')
     from .followup_scheduler import resume_silent_followup_cadence
     resume_silent_followup_cadence(session, conversation)
-    logger.info('[handover] conversation %s handed back to Bobbie', conversation.id)
+    log_event(logger, 'sms.handoff.completed', conversation_id=conversation.id,
+              from_owner='broker' if was_broker else 'bobbie', to_owner='bobbie', ai_enabled=True)
     lead_id = _lead_id_for(session, conversation)
     if lead_id and was_broker:
         lead_events.log_event(
@@ -293,12 +339,15 @@ def log_first_reply(session, conversation: Conversation, message: Message) -> No
         return
     from ..leads import events as lead_events
     lead_events.log_event(session, lead_id, lead_events.ACTIVITY, 'first_reply_received')
+    log_event(logger, 'sms.first_reply.timeline_recorded', conversation_id=conversation.id,
+              lead_id=lead_id, message_id=message.id)
 
 
 def record_inbound_classification(session, conversation: Conversation, text: str) -> dict | None:
     classification = classify_lead_message(text)
     if not classification:
-        logger.info('[lead-classifier] contact=%s status=unchanged terminal=false', conversation.contact)
+        log_event(logger, 'sms.classification.completed', conversation_id=conversation.id,
+                  changed=False, lead_status=conversation.lead_status, terminal=False)
         return None
     previous_status = conversation.lead_status
     lead_status = merge_lead_status(conversation.lead_status, classification.get('lead_status'))
@@ -307,8 +356,10 @@ def record_inbound_classification(session, conversation: Conversation, text: str
         updates['dnc_alert'] = bool(classification['dnc_alert'])
     update_lead_progress(session, conversation, **updates)
     _log_status_change(session, conversation, previous_status, lead_status)
-    logger.info('[lead-classifier] contact=%s status=%s terminal=%s dnc=%s', conversation.contact,
-                lead_status, bool(classification.get('terminal')), bool(classification.get('dnc_alert')))
+    log_event(logger, 'sms.classification.completed', conversation_id=conversation.id,
+              changed=previous_status != lead_status, previous_status=previous_status,
+              lead_status=lead_status, terminal=bool(classification.get('terminal')),
+              dnc=bool(classification.get('dnc_alert')))
     return {**classification, 'lead_status': lead_status}
 
 
@@ -321,24 +372,46 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
     session = SessionLocal()
     try:
         conversation = session.query(Conversation).filter(Conversation.id == conversation_id).first()
-        if not conversation or not conversation.ai_enabled or conversation.handled_by != 'bobbie':
+        if not conversation:
+            log_event(logger, 'sms.ai.skipped', level=logging.WARNING,
+                      conversation_id=conversation_id, reason='conversation_not_found')
             return
+        if not conversation.ai_enabled or conversation.handled_by != 'bobbie':
+            log_event(logger, 'sms.ai.skipped', conversation_id=conversation_id,
+                      reason='autopilot_inactive', ai_enabled=conversation.ai_enabled,
+                      handled_by=conversation.handled_by)
+            return
+        log_event(logger, 'sms.ai.started', conversation_id=conversation.id,
+                  user_id=conversation.user_id, inbound_chars=len(latest_inbound_text or ''),
+                  lead_status=conversation.lead_status)
         # Only one branch below runs per call (each returns), so the status
         # this conversation carried on entry is the "from" side of whichever
         # move happens.
         status_before = conversation.lead_status
 
         if is_opt_out(latest_inbound_text):
+            log_event(logger, 'sms.ai.opt_out_detected', conversation_id=conversation.id)
             reply = 'Understood — I’ll remove you from my outreach list. Take care.'
             hand_to_broker(session, conversation)
             mark_lead_completed(session, conversation, lead_status='dnc', dnc_alert=True)
             _log_status_change(session, conversation, status_before, 'dnc')
             send_and_store_message(session, conversation, reply, 'ai.reply')
-            logger.info('AI reply sent to %s', conversation.contact)
+            log_event(logger, 'sms.ai.completed', conversation_id=conversation.id,
+                      outcome='opt_out_acknowledged')
             return
 
         history = history_for(session, conversation)
         disposition = bobbie.analyze_conversation_disposition(conversation, history)
+        log_event(
+            logger, 'sms.ai.disposition.completed', conversation_id=conversation.id,
+            action=disposition.get('action'), intent=disposition.get('intent'),
+            lead_status=disposition.get('lead_status'),
+            conversation_stage=disposition.get('conversation_stage'),
+            next_step=disposition.get('next_step'),
+            calendar_state=(disposition.get('calendar') or {}).get('state'),
+            should_fetch_availability=(disposition.get('calendar') or {}).get(
+                'should_fetch_availability'),
+        )
 
         if disposition['action'] == 'end':
             closing_context = 'Do not schedule; this conversation is ending.'
@@ -351,15 +424,15 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
             closing_reply = bobbie.review_and_repair_ai_reply(
                 conversation, history, closing_reply, disposition, closing_context, closing_control)
             if not closing_reply or '?' in closing_reply or contains_scheduling_pressure(closing_reply):
-                logger.warning('[ai-disposition] contact=%s invalid_closing=true fallback=brief_close',
-                               conversation.contact)
+                log_event(logger, 'sms.ai.closing.fallback', level=logging.WARNING,
+                          conversation_id=conversation.id, reason='unsafe_or_empty_draft')
                 closing_reply = 'Understood. Thanks for letting me know, and take care.'
             send_and_store_message(session, conversation, closing_reply, 'ai.closing')
             hand_to_broker(session, conversation)
             mark_lead_completed(session, conversation, lead_status=disposition['lead_status'])
             _log_status_change(session, conversation, status_before, disposition['lead_status'])
-            logger.info('[ai-disposition] contact=%s conversation=closed intent=%s',
-                        conversation.contact, disposition['intent'])
+            log_event(logger, 'sms.ai.completed', conversation_id=conversation.id,
+                      outcome='conversation_closed', intent=disposition['intent'])
             return
 
         continued_status = (disposition['lead_status']
@@ -382,8 +455,9 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
             'Do not introduce calendar times unless calendar state explicitly permits it.'
         )
         calendar_state = disposition['calendar']
-        logger.info('[calendar-state] %s: %s source=deepseek reason=%s',
-                    conversation.contact, calendar_state['state'], calendar_state['reason'])
+        log_event(logger, 'sms.calendar.state_resolved', conversation_id=conversation.id,
+                  source='deepseek', state=calendar_state['state'],
+                  should_fetch_availability=calendar_state['should_fetch_availability'])
 
         scheduling_context = ''
         scheduling_fallback_reply = ''
@@ -400,11 +474,13 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
                 )
                 if calendar_state['state'] == 'call_accepted':
                     scheduling_fallback_reply = calendar_client.safe_available_offer(availability)
-                    logger.info('[calendar-tool] DeepSeek confirmed call consent; offering live slots to %s: %s',
-                                conversation.contact, scheduling_fallback_reply)
+                    log_event(logger, 'sms.calendar.offer_prepared', conversation_id=conversation.id,
+                              slot_count=len(availability.get('slots') or []))
                 else:
                     action = bobbie.resolve_calendar_action(conversation, history, availability, calendar_state)
-                    logger.info('[calendar-tool] resolved action for %s: %s', conversation.contact, action)
+                    log_event(logger, 'sms.calendar.action_resolved', conversation_id=conversation.id,
+                              action=action.get('action'), consent=action.get('consent'),
+                              start_at=action.get('start_at'), end_at=action.get('end_at'))
                     consent_confirmed = (calendar_state['state'] == 'booking_confirmed'
                                          or action.get('consent') in ('offered_slot_selected', 'confirmed_exact'))
                     if action.get('action') == 'book' and consent_confirmed:
@@ -423,28 +499,30 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
                         )
                         _log_status_change(
                             session, conversation, previous_status, 'location_discussion')
-                        logger.info(
-                            '[calendar-tool] time selected for %s; waiting for agent location approval',
-                            conversation.contact,
-                        )
+                        log_event(logger, 'sms.location_approval.requested',
+                                  conversation_id=conversation.id,
+                                  lead_id=_lead_id_for(session, conversation),
+                                  start_at=action.get('start_at'), end_at=action.get('end_at'))
                         return
                     elif action.get('action') == 'ask_confirmation':
                         label = calendar_client._short_label(action.get('label') or '')
                         scheduling_fallback_reply = f'{label} is open. Should I book it for me to stop by?'
-                        logger.info('[calendar-tool] asking final booking confirmation for %s: %s',
-                                    conversation.contact, scheduling_fallback_reply)
+                        log_event(logger, 'sms.calendar.confirmation_requested',
+                                  conversation_id=conversation.id, label=label)
                     elif action.get('action') == 'offer_alternatives':
                         scheduling_fallback_reply = (
                             f"That time isn’t open. {calendar_client.safe_available_offer(availability)}")
-                        logger.info('[calendar-tool] requested time unavailable for %s: %s',
-                                    conversation.contact, scheduling_fallback_reply)
+                        log_event(logger, 'sms.calendar.alternatives_prepared',
+                                  conversation_id=conversation.id)
                     elif action.get('action') == 'resolution_failed':
                         scheduling_fallback_reply = ('I couldn’t verify that calendar selection just now. '
                                                      'Please resend the exact day and time you chose.')
-                        logger.warning('[calendar-tool] resolver unavailable for %s; no availability claim made',
-                                       conversation.contact)
+                        log_event(logger, 'sms.calendar.resolution_failed', level=logging.WARNING,
+                                  conversation_id=conversation.id)
             except Exception as error:
-                logger.error('Calendar scheduling unavailable for %s: %s', conversation.contact, error)
+                log_event(logger, 'sms.calendar.failed', level=logging.ERROR,
+                          conversation_id=conversation.id, error_type=type(error).__name__,
+                          error=str(error))
                 scheduling_context = ('The live calendar is currently unavailable. Do not claim availability or a '
                                       'booking, and do not invent or repeat a time.')
         elif calendar_state['state'] == 'call_declined':
@@ -456,7 +534,8 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
             conversation, history, scheduling_context, disposition_control, fallback_plan)
 
         if contains_unbooked_confirmation(reply) or (not last_availability and contains_time_proposal(reply)):
-            logger.warning('[calendar-tool] blocked unbooked confirmation for %s: %s', conversation.contact, reply)
+            log_event(logger, 'sms.ai.safety_rewrite', level=logging.WARNING,
+                      conversation_id=conversation.id, reason='unbooked_confirmation')
             if last_availability and calendar_state['should_fetch_availability']:
                 reply = calendar_client.safe_available_offer(last_availability)
             elif calendar_state['state'] == 'call_accepted':
@@ -465,8 +544,8 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
                 reply = 'I haven’t scheduled anything, and I won’t invent a time.'
 
         if calendar_state['state'] == 'call_declined' and contains_scheduling_pressure(reply):
-            logger.warning('[calendar-state] blocked scheduling pressure after refusal for %s: %s',
-                           conversation.contact, reply)
+            log_event(logger, 'sms.ai.safety_rewrite', level=logging.WARNING,
+                      conversation_id=conversation.id, reason='pressure_after_refusal')
             retry_context = (f'{scheduling_context}\nThe previous draft improperly reintroduced a call. '
                              'Reply directly by text without mentioning a call, meeting, schedule, appointment, '
                              'email, or future follow-up.')
@@ -478,30 +557,38 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
                                                   scheduling_context, disposition_control)
 
         if contains_unbooked_confirmation(reply) or (not last_availability and contains_time_proposal(reply)):
-            logger.warning('[calendar-tool] reviewer rewrite violated calendar safety for %s: %s',
-                           conversation.contact, reply)
+            log_event(logger, 'sms.ai.review_rewrite', level=logging.WARNING,
+                      conversation_id=conversation.id, reason='calendar_safety')
             reply = (calendar_client.safe_available_offer(last_availability)
                      if last_availability and calendar_state['should_fetch_availability']
                      else 'I can’t verify a calendar time right now, so I won’t suggest or confirm one.')
         if calendar_state['state'] == 'call_declined' and contains_scheduling_pressure(reply):
-            logger.warning('[calendar-state] reviewer rewrite reintroduced scheduling after refusal for %s',
-                           conversation.contact)
+            log_event(logger, 'sms.ai.review_rewrite', level=logging.WARNING,
+                      conversation_id=conversation.id, reason='pressure_after_refusal')
             reply = 'Understood—I’ll keep this to text and answer what I can here.'
 
-        send_and_store_message(session, conversation, reply, 'ai.reply')
+        outbound = send_and_store_message(session, conversation, reply, 'ai.reply')
         if is_conversation_closing(reply):
             hand_to_broker(session, conversation)
             mark_lead_completed(session, conversation)
-            logger.info('Bobbie closed the conversation with %s; AI autopilot stopped', conversation.contact)
-        logger.info('AI reply sent to %s', conversation.contact)
+            log_event(logger, 'sms.ai.autopilot_stopped', conversation_id=conversation.id,
+                      reason='closing_reply')
+        log_event(logger, 'sms.ai.completed', conversation_id=conversation.id,
+                  outcome='reply_sent', message_id=outbound.id,
+                  text_chars=len(reply))
     except AiUnavailableError as error:
         # Nothing is sent when the model is unreachable; autopilot stays on so the
         # next inbound message retries once DeepSeek is configured again.
-        logger.error('[bobbie] no reply sent for conversation %s — AI unavailable: %s', conversation_id, error)
+        log_event(logger, 'sms.ai.failed', level=logging.ERROR,
+                  conversation_id=conversation_id, stage='model',
+                  error_type=type(error).__name__, error=str(error))
     except SmsDeliveryError as error:
-        logger.error('[bobbie] reply generated but delivery failed for conversation %s: %s',
-                     conversation_id, error)
+        log_event(logger, 'sms.ai.failed', level=logging.ERROR,
+                  conversation_id=conversation_id, stage='delivery',
+                  error_type=type(error).__name__, error=str(error))
     except Exception as error:
-        logger.error('AI reply failed for conversation %s: %s', conversation_id, error)
+        logger.exception(
+            'event=sms.ai.failed conversation_id=%s stage=unexpected error_type=%s error=%s',
+            conversation_id, type(error).__name__, error)
     finally:
         session.close()

@@ -61,18 +61,28 @@ production delivery, or monitoring subscriptions.
 
 ## Saved data
 
-Archives live under `storage/integrations/batchdata/<integration-id>/runs/<run-id>`
-(or `BATCHDATA_STORAGE_ROOT`). Discovery saves per-call requests/responses plus
-`properties/properties.json` and `properties/properties_csv.csv`. Selected stages save
-per-source requests/responses plus consolidated `selected_results.json`. Data → Saved
+Archives use local storage (`BATCHDATA_STORAGE_ROOT`) or private Cloudflare R2
+(`BATCHDATA_STORAGE_BACKEND=r2`) without changing the database schema. The existing
+`batchdata_saved_files.relative_path` column stores the archive key. R2 reads fall back
+to local storage so files created before the switch remain available.
+
+New archives are append-only and partitioned by `mode=<live|sandbox>`, fetch or receipt
+date, run, dataset and webhook classification (`new`, `updated`, `duplicate`, `failed`).
+Each accepted webhook delivery saves a redacted payload plus metadata containing its
+classification, provider property ID, processing status and payload hash. Existing raw
+JSON database fields remain populated for now; R2 is the durable archive and no new
+migration is required. Discovery saves per-call requests/responses plus raw
+`properties.json`, normalized `properties_normalized.json`, and `properties_csv.csv`
+datasets. Selected stages save per-property requests/responses plus consolidated
+`selected_results.json`. Data → Saved
 Properties displays readable summary tables; View property includes the immutable
 snapshot and cached detail/contact stage data. Activity → Provider Calls shows exact
 requests/responses. History → Saved Files offers View and Download file. Lists paginate
 25 records per page.
 
 The authenticated APIs `/properties/{id}` and `/saved-files/{id}/content` provide
-saved detail/file views. File access is limited to registered files within the archive
-root. Tokens remain server-side and absent from saved request archives.
+saved detail/file views. File access is limited to registered, safe archive keys.
+Tokens remain server-side and absent from saved request archives.
 
 ## Monitoring
 

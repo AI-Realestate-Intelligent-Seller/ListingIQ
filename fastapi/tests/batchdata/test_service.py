@@ -110,7 +110,7 @@ class FakeClient:
 
 @pytest.mark.parametrize("combination,expected_unique", [("OR", 3), ("AND", 1)])
 def test_normal_product_flow_uses_current_fields_in_sandbox(
-    tmp_path, monkeypatch, combination, expected_unique
+    tmp_path, monkeypatch, caplog, combination, expected_unique
 ):
     monkeypatch.setenv("BATCHDATA_API_MODE", "sandbox")
     monkeypatch.setenv("BATCHDATA_STORAGE_ROOT", str(tmp_path / "archive"))
@@ -131,7 +131,16 @@ def test_normal_product_flow_uses_current_fields_in_sandbox(
             rows_per_category=10,
             combination=combination,
         )
-        preview = service.quick_lists(payload)
+        with caplog.at_level(__import__("logging").INFO):
+            preview = service.quick_lists(payload)
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("event=batchdata.plan.created" in message for message in messages)
+        assert any(
+            "event=batchdata.preview.ready" in message
+            and "provider_calls_executed=0" in message
+            and "archive_writes=0" in message
+            for message in messages
+        )
         assert service.client.calls == []
         assert preview["call_plan"]["property_search_calls"] == 4
         assert preview["call_plan"]["maximum_returned_rows"] == 20
@@ -142,7 +151,10 @@ def test_normal_product_flow_uses_current_fields_in_sandbox(
         assert result["actual_cost"] == 0
         assert result["unique_properties"] == expected_unique
         assert len(result["provider_calls"]) == 4
-        assert db.query(SavedFile).count() == 10
+        assert db.query(SavedFile).count() == 11
+        assert (
+            db.query(SavedFile).filter_by(kind="properties_normalized").one()
+        )
         import csv
         import json
 

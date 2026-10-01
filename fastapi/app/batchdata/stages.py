@@ -167,14 +167,19 @@ def selected_stage(service, product, payload):
                 actual_cost=0,
             )
             service.db.add(call)
-            service._save_file(run.id, str(prop.id), "request", planned["request"])
+            archive_product = (
+                f"{stage_key}/property={prop.provider_property_id}"
+            )
+            service._save_file(
+                run.id, archive_product, "request", planned["request"]
+            )
             service.db.commit()
             response, request_id = service.client.request(
                 "POST", planned["endpoint"], planned["request"]
             )
             call.response_json = _redact(response)
             call.request_id = request_id
-            service._save_file(run.id, str(prop.id), "response", response)
+            service._save_file(run.id, archive_product, "response", response)
             service.db.commit()
             if stage_key == "details":
                 rows = _rows(response)

@@ -1,7 +1,10 @@
 
+import logging
+import time
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from .logger import set_request_context, setup_logging
+from .logger import get_logger, log_event, set_request_context, setup_logging
 from .routes import (
     ai,
     assignments,
@@ -30,6 +33,7 @@ from .reminder.worker import start_reminder_worker
 app = FastAPI(title="ListingIQ API")
 
 setup_logging()
+logger = get_logger(__name__)
 
 
 app.add_middleware(
@@ -43,9 +47,32 @@ app.add_middleware(
 
 @app.middleware("http")
 async def add_request_context(request: Request, call_next):
-    # generate session id per request
+    """Correlate every API request and record its outcome and duration."""
     set_request_context(session_id=None, user_id=None)
-    response = await call_next(request)
+    started = time.perf_counter()
+    log_event(logger, 'http.request.started', method=request.method, path=request.url.path)
+    try:
+        response = await call_next(request)
+    except Exception as error:
+        log_event(
+            logger,
+            'http.request.failed',
+            level=logging.ERROR,
+            method=request.method,
+            path=request.url.path,
+            duration_ms=round((time.perf_counter() - started) * 1000, 2),
+            error_type=type(error).__name__,
+            error=str(error),
+        )
+        raise
+    log_event(
+        logger,
+        'http.request.completed',
+        method=request.method,
+        path=request.url.path,
+        status_code=response.status_code,
+        duration_ms=round((time.perf_counter() - started) * 1000, 2),
+    )
     # expose session id to clients
     try:
         from .logger import session_id_var
@@ -123,6 +150,9 @@ app.include_router(
 @app.on_event("startup")
 def startup_event():
     init_db()
+    # Alembic loads its own logging config while checking migrations. Restore
+    # the application level afterwards so request lifecycle logs remain visible.
+    setup_logging()
     from .db import SessionLocal
     from .propertyradar.service import initialize
 

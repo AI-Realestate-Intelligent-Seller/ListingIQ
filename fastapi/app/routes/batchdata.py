@@ -3,7 +3,7 @@ import hashlib
 import hmac
 import json
 import os
-from pathlib import Path
+import uuid
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -34,12 +34,22 @@ from ..batchdata.service import (
     operation_lock,
     property_table_row,
 )
+from ..batchdata.storage import (
+    ArchiveCollisionError,
+    StorageConfigurationError,
+    configured_storage,
+    json_bytes,
+    read_with_fallback,
+    webhook_archive_key,
+)
+from ..logger import get_logger, log_event, set_request_context
 from ..models import PlatformAuditLog, User
 from .auth import get_db
 from .platform_admin import audit, require_platform_admin
 
 router = APIRouter(dependencies=[Depends(require_platform_admin)])
 webhook_router = APIRouter()
+logger = get_logger(__name__)
 
 
 def service(db: Session = Depends(get_db)):
@@ -119,9 +129,41 @@ def validate_monitoring(
 
 
 def product_call(action: str, operation, payload, s: Service, actor: User):
+    set_request_context(user_id=str(actor.id))
+    fields = {
+        "action": action,
+        "actor_id": actor.id,
+        "mode": s.api_mode,
+        "confirmed": bool(getattr(payload, "confirmed", False)),
+        "category_count": len(getattr(payload, "selected_categories", []) or []),
+        "location_count": len(getattr(payload, "locations", []) or []),
+        "property_count": len(getattr(payload, "property_ids", []) or []),
+    }
+    log_event(logger, "batchdata.product.requested", **fields)
     try:
         with operation_lock(s.db):
+            log_event(logger, "batchdata.operation_lock.acquired", action=action)
             result = operation(payload)
+            plan = result.get("call_plan", {})
+            is_preview = result.get("status") == "Preview"
+            log_event(
+                logger,
+                "batchdata.product.preview.completed"
+                if is_preview
+                else "batchdata.product.execution.completed",
+                **fields,
+                run_id=result.get("id"),
+                status=result.get("status"),
+                planned_provider_calls=len(plan.get("calls", [])),
+                maximum_returned_rows=plan.get("maximum_returned_rows", 0),
+                estimated_cost=result.get("estimated_cost", 0),
+                actual_cost=result.get("actual_cost", 0),
+                returned_records=result.get("returned_records", 0),
+                unique_properties=result.get("unique_properties", 0),
+                provider_calls_executed=0 if is_preview else len(result.get("provider_calls", [])),
+                db_run_created=not is_preview,
+                archive_writes=0 if is_preview else None,
+            )
             audit(
                 s.db,
                 actor,
@@ -131,11 +173,44 @@ def product_call(action: str, operation, payload, s: Service, actor: User):
                 payload.reason or None,
             )
             s.db.commit()
+            log_event(logger, "batchdata.audit.persisted", action=action, actor_id=actor.id)
             return result
     except UnsafeOperation as error:
+        log_event(
+            logger,
+            "batchdata.product.rejected",
+            level=__import__("logging").WARNING,
+            **fields,
+            reason=str(error),
+        )
         raise HTTPException(409, str(error)) from None
     except ProviderError as error:
+        log_event(
+            logger,
+            "batchdata.provider.failed",
+            level=__import__("logging").ERROR,
+            **fields,
+            error=str(error),
+        )
         raise HTTPException(502, str(error)) from None
+    except ArchiveCollisionError as error:
+        log_event(
+            logger,
+            "batchdata.archive.collision",
+            level=__import__("logging").ERROR,
+            **fields,
+            error=str(error),
+        )
+        raise HTTPException(409, str(error)) from None
+    except StorageConfigurationError as error:
+        log_event(
+            logger,
+            "batchdata.archive.configuration_failed",
+            level=__import__("logging").ERROR,
+            **fields,
+            error=str(error),
+        )
+        raise HTTPException(503, str(error)) from None
 
 
 @router.post("/products/quick-lists/search", response_model=ProductRunResponse)
@@ -352,15 +427,15 @@ def saved_file_content(file_id: int, s: Service = Depends(service)):
     row = s.db.get(SavedFile, file_id)
     if row is None:
         raise HTTPException(404, "Saved file not found")
-    root = Path(
-        os.getenv("BATCHDATA_STORAGE_ROOT", "storage/integrations/batchdata")
-    ).resolve()
-    target = (root / row.relative_path).resolve()
-    if not target.is_relative_to(root) or not target.is_file():
-        raise HTTPException(404, "Saved file not available")
-    content = target.read_text(encoding="utf-8")
+    try:
+        content = read_with_fallback(row.relative_path).decode("utf-8")
+    except FileNotFoundError:
+        raise HTTPException(404, "Saved file not available") from None
+    except StorageConfigurationError as error:
+        raise HTTPException(503, str(error)) from None
     properties = []
-    if target.suffix == ".json":
+    suffix = os.path.splitext(row.relative_path)[1].lower()
+    if suffix == ".json":
         value = json.loads(content)
         try:
             rows = value if isinstance(value, list) else _rows(value)
@@ -377,12 +452,51 @@ def saved_file_content(file_id: int, s: Service = Depends(service)):
                     properties.append(property_table_row(raw))
         except (UnsafeOperation, AttributeError):
             pass
-    elif target.suffix == ".csv":
+    elif suffix == ".csv":
         import csv
         import io
 
         properties = list(csv.DictReader(io.StringIO(content)))
-    return {"name": target.name, "content": content, "properties": properties}
+    return {
+        "name": os.path.basename(row.relative_path),
+        "content": content,
+        "properties": properties,
+    }
+
+
+def archive_webhook(db, clean, classification, event_key, provider_id, status):
+    received_at = __import__("datetime").datetime.now(
+        __import__("datetime").timezone.utc
+    )
+    delivery_id = uuid.uuid4().hex
+    metadata = {
+        "classification": classification,
+        "event_key": event_key,
+        "provider_property_id": str(provider_id) if provider_id else None,
+        "received_at": received_at.isoformat(),
+        "processing_status": status,
+        "payload_sha256": hashlib.sha256(json_bytes(clean)).hexdigest(),
+    }
+    storage = configured_storage()
+    for name, value in (("payload", clean), ("metadata", metadata)):
+        key = webhook_archive_key(
+            os.getenv("BATCHDATA_API_MODE", "live"),
+            classification,
+            event_key,
+            delivery_id,
+            name,
+            received_at,
+        )
+        content = json_bytes(value)
+        storage.write(key, content)
+        db.add(
+            SavedFile(
+                run_id=None,
+                kind=f"webhook_{classification}_{name}"[:60],
+                relative_path=key,
+                size_bytes=len(content),
+            )
+        )
 
 
 @webhook_router.post("/batchdata", status_code=202)
@@ -422,7 +536,21 @@ async def receive(request: Request, db: Session = Depends(get_db)):
     key = digest({"event_id": event_key}) if event_key else digest(clean)
     existing = db.query(WebhookEvent).filter_by(idempotency_key=key).one_or_none()
     if existing:
+        try:
+            archive_webhook(
+                db,
+                clean,
+                "duplicate",
+                key,
+                existing.provider_property_id,
+                "Duplicate",
+            )
+            db.commit()
+        except Exception as error:
+            db.rollback()
+            raise HTTPException(503, "BatchData webhook archive failed") from error
         return {"accepted": True, "status": "Duplicate", "event_id": existing.id}
+
     provider_id = clean.get("_id") or clean.get("propertyId")
     if not provider_id and isinstance(clean.get("property"), dict):
         provider_id = clean["property"].get("_id")
@@ -433,6 +561,7 @@ async def receive(request: Request, db: Session = Depends(get_db)):
         raw_payload=clean,
     )
     db.add(event)
+    classification = "failed"
     if provider_id:
         prop = (
             db.query(Property)
@@ -453,13 +582,27 @@ async def receive(request: Request, db: Session = Depends(get_db)):
             )
             db.add(prop)
             event.status = "Waiting for Skip Trace"
+            classification = "new"
         else:
             event.status = "Update Received"
+            classification = "updated"
     else:
         event.status = "Failed"
         event.error_message = "Property ID is required"
     event.processed_at = __import__("datetime").datetime.now(
         __import__("datetime").timezone.utc
     )
-    db.commit()
+    try:
+        archive_webhook(
+            db,
+            clean,
+            classification,
+            key,
+            provider_id,
+            event.status,
+        )
+        db.commit()
+    except Exception as error:
+        db.rollback()
+        raise HTTPException(503, "BatchData webhook archive failed") from error
     return {"accepted": True, "status": event.status, "event_id": event.id}

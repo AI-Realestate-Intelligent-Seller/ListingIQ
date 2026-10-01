@@ -7,10 +7,10 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
-from pathlib import Path
 
 from sqlalchemy import func, update
 
+from ..logger import get_logger, log_event
 from ..propertyradar.models import IntegrationConfig, utcnow
 from .client import Client
 from .config import (
@@ -30,6 +30,9 @@ from .models import (
     SavedFile,
     WebhookEvent,
 )
+from .storage import configured_storage, run_archive_key
+
+logger = get_logger(__name__)
 
 
 class UnsafeOperation(ValueError):
@@ -349,6 +352,16 @@ class Service:
         )
 
     def _product_plan(self, product: str, payload: ProductRequest):
+        log_event(
+            logger,
+            "batchdata.plan.started",
+            product=product,
+            mode=self.api_mode,
+            category_count=len(payload.selected_categories),
+            location_count=len(payload.locations),
+            rows_per_category=payload.rows_per_category,
+            combination=payload.combination,
+        )
         definitions = {
             "quick_lists": ("quickListsEnabled", "quickListUnitCost", None),
             "basic_property": ("basicPropertyEnabled", "basicPropertyUnitCost", None),
@@ -393,7 +406,7 @@ class Service:
         maximum = payload.rows_per_category * len(calls)
         calls = _location_calls(calls, payload.locations, payload.rows_per_category)
         total = unit_cost * maximum
-        return {
+        plan = {
             "mode": self.api_mode,
             "combination": payload.combination,
             "property_search_calls": len(calls),
@@ -404,6 +417,16 @@ class Service:
             "skip_trace": None,
             "estimated_cost": float(total),
         }
+        log_event(
+            logger,
+            "batchdata.plan.created",
+            product=product,
+            mode=self.api_mode,
+            planned_provider_calls=len(calls),
+            maximum_returned_rows=maximum,
+            estimated_cost=float(total),
+        )
+        return plan
 
     def _preview_run(self, plan):
         return {
@@ -421,6 +444,19 @@ class Service:
     def _run_product(self, product: str, payload: ProductRequest):
         plan = self._product_plan(product, payload)
         if not payload.confirmed:
+            log_event(
+                logger,
+                "batchdata.preview.ready",
+                product=product,
+                mode=self.api_mode,
+                planned_provider_calls=len(plan["calls"]),
+                maximum_returned_rows=plan["maximum_returned_rows"],
+                estimated_cost=plan["estimated_cost"],
+                provider_calls_executed=0,
+                run_records_created=0,
+                provider_records_created=0,
+                archive_writes=0,
+            )
             return self._preview_run(plan)
         if len(payload.reason.strip()) < 3:
             raise UnsafeOperation("Paid execution requires confirmation and a reason")
@@ -434,6 +470,15 @@ class Service:
         )
         self.db.add(run)
         self.db.commit()
+        log_event(
+            logger,
+            "batchdata.run.persisted",
+            run_id=run.id,
+            product=product,
+            mode=self.api_mode,
+            status=run.status,
+            estimated_cost=float(run.estimated_cost),
+        )
         return self.execute(run.id)
 
     def quick_lists(self, payload: ProductRequest):
@@ -524,6 +569,15 @@ class Service:
         self.db.add(reservation)
         run.status = "Running"
         self.db.commit()
+        log_event(
+            logger,
+            "batchdata.budget.reserved",
+            run_id=run.id,
+            estimate=float(estimate),
+            spent=float(spent),
+            already_reserved=float(reserved),
+            monthly_cap=float(cfg["monthlySpendCap"]),
+        )
         return reservation
 
     def execute(self, run_id):
@@ -535,6 +589,14 @@ class Service:
         if run.call_plan.get("mode", "live") != self.api_mode:
             raise UnsafeOperation("API mode changed; preview and approve a new run")
         sandbox = self.api_mode == "sandbox"
+        log_event(
+            logger,
+            "batchdata.execution.started",
+            run_id=run.id,
+            mode=self.api_mode,
+            planned_provider_calls=len(run.call_plan.get("calls", [])),
+            estimated_cost=float(run.estimated_cost),
+        )
         reservation = self._reserve(run)
         actual = Decimal(0)
         returned = 0
@@ -542,6 +604,18 @@ class Service:
         try:
             for call_index, planned in enumerate(run.call_plan["calls"]):
                 product = planned.get("product")
+                log_event(
+                    logger,
+                    "batchdata.provider_call.started",
+                    run_id=run.id,
+                    call_number=call_index + 1,
+                    total_calls=len(run.call_plan["calls"]),
+                    product=product,
+                    endpoint=planned["endpoint"],
+                    category=planned.get("category"),
+                    location=planned.get("location"),
+                    maximum_rows=planned.get("maximum_rows"),
+                )
                 if product in {
                     "quick_lists",
                     "basic_property",
@@ -556,6 +630,15 @@ class Service:
                         "POST", planned["endpoint"], planned["request"]
                     )
                 rows = _rows(response)
+                log_event(
+                    logger,
+                    "batchdata.provider_call.completed",
+                    run_id=run.id,
+                    call_number=call_index + 1,
+                    product=product,
+                    request_id=request_id,
+                    returned_records=len(rows),
+                )
                 unit = Decimal(str(planned["estimated_cost"])) / Decimal(
                     str(planned["maximum_rows"])
                 )
@@ -575,7 +658,14 @@ class Service:
                     request_id=request_id,
                 )
                 self.db.add(call)
-                archive_product = f"{planned['category']}-{call_index}"
+                archive_product = "/".join(
+                    (
+                        "quick-lists",
+                        f"category={planned['category']}",
+                        f"location={planned.get('location', 'combined')}",
+                        f"call={call_index}",
+                    )
+                )
                 self._save_file(run.id, archive_product, "request", planned["request"])
                 self._save_file(run.id, archive_product, "response", response)
                 for item in rows:
@@ -592,8 +682,26 @@ class Service:
                         "categories"
                     ].append(planned["category"])
                 self.db.commit()
+                log_event(
+                    logger,
+                    "batchdata.api_call.persisted",
+                    run_id=run.id,
+                    api_call_id=call.id,
+                    request_id=request_id,
+                    returned_records=len(rows),
+                    actual_cost=float(call_cost),
+                )
             new_properties = []
             duplicate_count = returned - len(unique)
+            log_event(
+                logger,
+                "batchdata.deduplication.completed",
+                run_id=run.id,
+                returned_records=returned,
+                unique_provider_ids=len(unique),
+                duplicate_records=duplicate_count,
+                combination=run.call_plan.get("combination"),
+            )
             if run.call_plan.get("combination") == "AND":
                 required = set(run.selected_categories)
                 unique = {
@@ -658,6 +766,15 @@ class Service:
                     else:
                         self.db.add(Membership(property_id=prop.id, category=category))
             self.db.commit()
+            log_event(
+                logger,
+                "batchdata.properties.persisted",
+                run_id=run.id,
+                provider=self.property_provider,
+                unique_properties=len(unique),
+                new_properties=len(new_properties),
+                existing_properties=len(unique) - len(new_properties),
+            )
             run.status = "Completed"
             run.actual_cost = actual
             run.returned_records = returned
@@ -673,6 +790,18 @@ class Service:
             reservation.status = "reconciled"
             reservation.reconciled_at = utcnow()
             self.db.commit()
+            log_event(
+                logger,
+                "batchdata.execution.completed",
+                run_id=run.id,
+                mode=self.api_mode,
+                status=run.status,
+                returned_records=returned,
+                unique_properties=len(unique),
+                duplicate_records=duplicate_count,
+                actual_cost=float(actual),
+                archive_backend=configured_storage().backend,
+            )
             result = self.run_value(run)
             result["properties"] = [property_table_row(row) for row in export_rows]
             return result
@@ -685,6 +814,15 @@ class Service:
             reservation = self.db.query(Reservation).filter_by(run_id=run_id).one()
             reservation.status = "reconciliation_required"
             self.db.commit()
+            log_event(
+                logger,
+                "batchdata.execution.failed",
+                level=__import__("logging").ERROR,
+                run_id=run_id,
+                error_type=type(error).__name__,
+                error=str(error),
+                reconciliation_required=True,
+            )
             raise
 
     def test_connection(self):
@@ -701,6 +839,7 @@ class Service:
     def export_properties(self, run_id, rows):
         self._save_file(run_id, "properties", "properties", rows)
         table = [property_table_row(row) for row in rows]
+        self._save_file(run_id, "properties", "properties_normalized", table)
         output = io.StringIO()
         writer = csv.DictWriter(output, fieldnames=list(property_table_row({})))
         writer.writeheader()
@@ -718,26 +857,41 @@ class Service:
         )
 
     def _save_file(self, run_id, product, name, value, extension="json"):
-        root = Path(
-            os.getenv("BATCHDATA_STORAGE_ROOT", "storage/integrations/batchdata")
+        relative = run_archive_key(
+            self.api_mode, run_id, product, name, extension
         )
-        relative = (
-            Path(str(self.row.id)) / "runs" / run_id / product / f"{name}.{extension}"
-        )
-        target = root / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
         content = (
             value
             if extension == "csv"
             else json.dumps(_redact(value), indent=2, sort_keys=True, default=str)
         )
-        target.write_text(content, encoding="utf-8")
+        encoded = content.encode("utf-8")
+        storage = configured_storage()
+        log_event(
+            logger,
+            "batchdata.archive.write.started",
+            run_id=run_id,
+            backend=storage.backend,
+            kind=name,
+            archive_key=relative,
+            size_bytes=len(encoded),
+        )
+        storage.write(relative, encoded)
+        log_event(
+            logger,
+            "batchdata.archive.write.completed",
+            run_id=run_id,
+            backend=storage.backend,
+            kind=name,
+            archive_key=relative,
+            size_bytes=len(encoded),
+        )
         self.db.add(
             SavedFile(
                 run_id=run_id,
                 kind=name,
-                relative_path=str(relative),
-                size_bytes=len(content.encode()),
+                relative_path=relative,
+                size_bytes=len(encoded),
             )
         )
 

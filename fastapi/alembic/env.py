@@ -8,7 +8,9 @@ from app.db import Base
 from app.core.config import settings
 
 config = context.config
-fileConfig(config.config_file_name)
+# Alembic runs inside the Uvicorn process during application startup. Keep
+# Uvicorn and application loggers alive when loading Alembic's own formatter.
+fileConfig(config.config_file_name, disable_existing_loggers=False)
 config.set_main_option('sqlalchemy.url', settings['database']['url'])
 
 target_metadata = Base.metadata
