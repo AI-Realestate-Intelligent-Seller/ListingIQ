@@ -15,6 +15,15 @@ const AppointmentLocationMap = dynamic(
   { ssr: false, loading: () => <div className="appointment-map-loading">Loading map…</div> },
 );
 
+// The broker's own clock: slots, days and labels all follow the browser timezone.
+const LOCAL_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
+const dayFormat = new Intl.DateTimeFormat(undefined, {
+  weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: LOCAL_TIMEZONE,
+});
+const timeFormat = new Intl.DateTimeFormat(undefined, {
+  hour: "numeric", minute: "2-digit", timeZone: LOCAL_TIMEZONE,
+});
+
 type AppointmentDialogProps = {
   followUp: FollowUp | null;
   accessToken: string;
@@ -23,13 +32,14 @@ type AppointmentDialogProps = {
 };
 
 /**
- * Books one of the broker's own open slots. The slots come from the same
- * availability endpoint Bobbie uses, so a manual booking can never collide with
- * a time she is offering.
+ * Books one of the broker's own open slots, any time of day, in their local
+ * timezone. The slots come from the same availability endpoint Bobbie uses, so
+ * a manual booking can never collide with a time she is offering.
  */
 export function AppointmentDialog({ followUp, accessToken, onClose, onBook }: AppointmentDialogProps) {
   const [slots, setSlots] = useState<CalendarSlot[]>([]);
   const [timezone, setTimezone] = useState("");
+  const [day, setDay] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [address, setAddress] = useState("");
@@ -48,11 +58,12 @@ export function AppointmentDialog({ followUp, accessToken, onClose, onBook }: Ap
     setIsGeocoding(false);
     setErrorMessage("");
 
-    getAvailability(accessToken)
+    getAvailability(accessToken, { allDay: true, timezone: LOCAL_TIMEZONE })
       .then((availability) => {
         if (cancelled) return;
         setSlots(availability.slots);
         setTimezone(availability.timezone);
+        setDay(availability.slots.length ? dayFormat.format(new Date(availability.slots[0].start_at)) : "");
       })
       .catch((error: unknown) => {
         if (cancelled) return;
@@ -70,6 +81,9 @@ export function AppointmentDialog({ followUp, accessToken, onClose, onBook }: Ap
   }, [isOpen, accessToken]);
 
   if (!followUp) return null;
+
+  const days = [...new Set(slots.map((slot) => dayFormat.format(new Date(slot.start_at))))];
+  const daySlots = slots.filter((slot) => dayFormat.format(new Date(slot.start_at)) === day);
 
   async function previewAddress(): Promise<void> {
     const exactAddress = address.trim();
@@ -116,6 +130,7 @@ export function AppointmentDialog({ followUp, accessToken, onClose, onBook }: Ap
         title: String(form.get("title") ?? "").trim() || undefined,
         address: resolvedAddress.address,
         notify: form.get("notify") === "on",
+        timezone: LOCAL_TIMEZONE,
       });
     } catch (error) {
       setErrorMessage(
@@ -149,11 +164,26 @@ export function AppointmentDialog({ followUp, accessToken, onClose, onBook }: Ap
 
         <form onSubmit={handleSubmit}>
           <label className="sms-field">
-            <span>Open times{timezone ? ` (${timezone})` : ""}</span>
-            <select name="slot" required disabled={isSaving || isLoading || slots.length === 0}>
-              {slots.map((slot) => (
+            <span>Date</span>
+            <select
+              value={day}
+              onChange={(event) => setDay(event.target.value)}
+              disabled={isSaving || isLoading || slots.length === 0}
+            >
+              {days.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="sms-field">
+            <span>Time{timezone ? ` (${timezone})` : ""}</span>
+            <select key={day} name="slot" required disabled={isSaving || isLoading || daySlots.length === 0}>
+              {daySlots.map((slot) => (
                 <option key={slot.start_at} value={slot.start_at}>
-                  {slot.label}
+                  {timeFormat.format(new Date(slot.start_at))}
                 </option>
               ))}
             </select>
@@ -161,7 +191,7 @@ export function AppointmentDialog({ followUp, accessToken, onClose, onBook }: Ap
               {isLoading
                 ? "Loading your calendar…"
                 : slots.length === 0
-                  ? "You have no open weekday slots in the booking window."
+                  ? "You have no open slots in the booking window."
                   : "Only times that are still free on your calendar are listed."}
             </small>
           </label>

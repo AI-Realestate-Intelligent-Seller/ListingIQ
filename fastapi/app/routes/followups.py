@@ -399,7 +399,8 @@ def book_appointment(
         try:
             service.send_and_store_message(
                 session, conversation,
-                calendar_service.confirmation_message(booking, host=host or None),
+                calendar_service.confirmation_message(booking, host=host or None,
+                                                     timezone_name=payload.timezone or current_user.timezone),
                 'broker.booking', True)
             notified = True
         except service.SmsDeliveryError as error:

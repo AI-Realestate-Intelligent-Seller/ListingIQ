@@ -86,8 +86,19 @@ export function deleteConversation(
   return deleteJson<{ ok: boolean }>(`${SMS}/conversations/${conversationId}`, accessToken);
 }
 
-export function getAvailability(accessToken: string): Promise<CalendarAvailability> {
-  return getJson<CalendarAvailability>(`${SMS}/calendar/availability`, accessToken);
+/**
+ * Free meeting slots. `allDay` lists the whole day (not just Bobbie's business
+ * hours) laid out in `timezone`, for a broker booking by hand.
+ */
+export function getAvailability(
+  accessToken: string,
+  options: { allDay?: boolean; timezone?: string } = {},
+): Promise<CalendarAvailability> {
+  const query = new URLSearchParams();
+  if (options.allDay) query.set("all_day", "true");
+  if (options.timezone) query.set("timezone", options.timezone);
+  const suffix = query.toString() ? `?${query}` : "";
+  return getJson<CalendarAvailability>(`${SMS}/calendar/availability${suffix}`, accessToken);
 }
 
 export function listBookings(accessToken: string): Promise<Booking[]> {

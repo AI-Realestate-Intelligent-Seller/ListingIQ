@@ -221,11 +221,11 @@ def health_stores():
         import redis
 
         client = redis.Redis.from_url(settings["redis_url"], socket_connect_timeout=2)
-        report["redis"] = {"ok": bool(client.ping()), "url": settings["redis_url"]}
+        report["redis"] = {"ok": bool(client.ping()), "url": settings["redis_url"].split("@")[-1]}
     except Exception as error:
         report["redis"] = {
             "ok": False,
-            "url": settings["redis_url"],
+            "url": settings["redis_url"].split("@")[-1],
             "error": str(error)[:200],
         }
 

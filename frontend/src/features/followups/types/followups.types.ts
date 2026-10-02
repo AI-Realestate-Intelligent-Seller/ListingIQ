@@ -62,6 +62,8 @@ export type AppointmentPayload = {
   address: string;
   /** Text the owner the confirmation and the appointment map link. */
   notify: boolean;
+  /** The booker's timezone; the owner's confirmation text uses it. */
+  timezone?: string;
 };
 
 export type GeocodedAppointmentAddress = {

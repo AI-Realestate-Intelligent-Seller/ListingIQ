@@ -36,6 +36,16 @@ def _zone():
     return ZoneInfo(name) if ZoneInfo else timezone.utc
 
 
+def _zone_named(name: str | None):
+    """A user's IANA timezone, or the configured default when missing or invalid."""
+    if name and ZoneInfo:
+        try:
+            return ZoneInfo(name), name
+        except (KeyError, ValueError):
+            pass
+    return _zone(), settings['ai']['timezone']
+
+
 def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
 
@@ -63,12 +73,16 @@ def _busy_ranges(session, user_id: int) -> list:
 
 
 def list_available_slots(session, user_id: int, days: int | None = None,
-                         slot_minutes: int | None = None) -> list:
-    """Unbooked weekday slots from 9 AM to 6 PM in the configured timezone."""
+                         slot_minutes: int | None = None, timezone_name: str | None = None,
+                         all_day: bool = False) -> list:
+    """Unbooked weekday slots, 9 AM to 6 PM in the configured timezone.
+
+    A broker booking by hand passes `all_day` for every day of the week around
+    the clock, and their own timezone so days and labels match their clock.
+    """
     days = days or settings['sms']['calendar_days']
     slot_minutes = slot_minutes or settings['sms']['calendar_slot_minutes']
-    zone = _zone()
-    timezone_name = settings['ai']['timezone']
+    zone, timezone_name = _zone_named(timezone_name)
     now_utc = datetime.now(timezone.utc)
     local_today = now_utc.astimezone(zone).date()
     busy = _busy_ranges(session, user_id)
@@ -76,10 +90,16 @@ def list_available_slots(session, user_id: int, days: int | None = None,
     slots = []
     for offset in range(days):
         day = local_today + timedelta(days=offset)
-        if day.weekday() >= 5:
+        if day.weekday() >= 5 and not all_day:
             continue
-        cursor = datetime.combine(day, WORKDAY_START, zone)
-        day_end = datetime.combine(day, WORKDAY_END, zone)
+        # Step in UTC so a daylight-saving change never skips or repeats a slot.
+        if all_day:
+            cursor = datetime.combine(day, clock_time(0, 0), zone)
+            day_end = datetime.combine(day + timedelta(days=1), clock_time(0, 0), zone)
+        else:
+            cursor = datetime.combine(day, WORKDAY_START, zone)
+            day_end = datetime.combine(day, WORKDAY_END, zone)
+        cursor, day_end = cursor.astimezone(timezone.utc), day_end.astimezone(timezone.utc)
         while cursor + timedelta(minutes=slot_minutes) <= day_end:
             end = cursor + timedelta(minutes=slot_minutes)
             start_utc, end_utc = cursor.astimezone(timezone.utc), end.astimezone(timezone.utc)
@@ -88,19 +108,20 @@ def list_available_slots(session, user_id: int, days: int | None = None,
                 slots.append({
                     'start_at': _iso(start_utc),
                     'end_at': _iso(end_utc),
-                    'label': cursor.strftime(f'%A, %B %d, %Y at %I:%M %p {timezone_name}'),
+                    'label': cursor.astimezone(zone).strftime(f'%A, %B %d, %Y at %I:%M %p {timezone_name}'),
                 })
             cursor = end
     return slots
 
 
-def availability(session, user_id: int) -> dict:
-    zone = _zone()
+def availability(session, user_id: int, timezone_name: str | None = None,
+                 all_day: bool = False) -> dict:
+    zone, timezone_name = _zone_named(timezone_name)
     return {
-        'timezone': settings['ai']['timezone'],
+        'timezone': timezone_name,
         'current_time': datetime.now(zone).isoformat(),
         'slot_minutes': settings['sms']['calendar_slot_minutes'],
-        'slots': list_available_slots(session, user_id),
+        'slots': list_available_slots(session, user_id, timezone_name=timezone_name, all_day=all_day),
     }
 
 
@@ -277,16 +298,18 @@ def map_url(address: str) -> str:
     return f"https://www.google.com/maps/search/?api=1&query={quote_plus(address)}"
 
 
-def confirmation_message(booking: dict, host: str | None = None) -> str:
+def confirmation_message(booking: dict, host: str | None = None, timezone_name: str | None = None) -> str:
     """The confirmation SMS for a booking.
 
     `host` is who the owner is actually meeting. It defaults to Bobbie because
     she books the overwhelming majority of meetings, but a broker or agent
     booking by hand must be named as themselves — telling an owner they are
     meeting Bobbie when a person arranged it is simply untrue.
+
+    Times are written in `timezone_name`, the booker's own timezone, so the
+    owner's text matches the calendar of the person they are meeting.
     """
-    zone = _zone()
-    timezone_name = settings['ai']['timezone']
+    zone, timezone_name = _zone_named(timezone_name)
     start = datetime.fromisoformat(booking['start_at'].replace('Z', '+00:00')).astimezone(zone)
     end = datetime.fromisoformat(booking['end_at'].replace('Z', '+00:00')).astimezone(zone)
     # First name only, as in the initial outreach: the full legal name reads

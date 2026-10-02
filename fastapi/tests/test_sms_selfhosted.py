@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from zoneinfo import ZoneInfo
 
 from app.core.config import settings
 from app.models import Booking, Conversation, Lead, Message
@@ -91,6 +92,47 @@ def test_availability_is_generated_in_process(client, make_user, auth_header, se
         assert datetime.fromisoformat(slot['start_at'].replace('Z', '+00:00')) > datetime.now(timezone.utc)
 
 
+def _local_times(availability, zone_name):
+    zone = ZoneInfo(zone_name)
+    return [datetime.fromisoformat(slot['start_at'].replace('Z', '+00:00')).astimezone(zone)
+            for slot in availability['slots']]
+
+
+def test_default_availability_keeps_business_hours(client, make_user, auth_header, session, no_network):
+    broker = make_user(BROKER_EMAIL, role='broker')
+    availability = calendar_client.fetch_availability(session, broker.id)
+
+    hours = {start.hour for start in _local_times(availability, settings['ai']['timezone'])}
+    assert min(hours) >= 9 and max(hours) < 18
+
+
+def test_manual_booking_lists_the_whole_day_in_the_brokers_timezone(client, make_user, auth_header, no_network):
+    make_user(BROKER_EMAIL, role='broker')
+    response = client.get('/api/v1/sms/calendar/availability',
+                          params={'all_day': 'true', 'timezone': 'Asia/Karachi'},
+                          headers=auth_header(BROKER_EMAIL))
+    assert response.status_code == 200, response.text
+    availability = response.json()
+
+    assert availability['timezone'] == 'Asia/Karachi'
+    starts = _local_times(availability, 'Asia/Karachi')
+    # Every half hour from midnight to 11:30 PM local time is offered.
+    full_day = {(start.hour, start.minute) for start in starts if start.date() == starts[-1].date()}
+    assert len(full_day) == 48
+    # Weekends included.
+    assert {start.weekday() for start in starts} == set(range(7))
+    assert availability['slots'][0]['label'].endswith('Asia/Karachi')
+
+
+def test_manual_booking_falls_back_for_an_unknown_timezone(client, make_user, auth_header, no_network):
+    make_user(BROKER_EMAIL, role='broker')
+    response = client.get('/api/v1/sms/calendar/availability',
+                          params={'all_day': 'true', 'timezone': 'Not/AZone'},
+                          headers=auth_header(BROKER_EMAIL))
+    assert response.status_code == 200
+    assert response.json()['timezone'] == settings['ai']['timezone']
+
+
 def test_booking_persists_and_removes_the_slot(client, make_user, auth_header, session, no_network):
     broker = make_user(BROKER_EMAIL, role='broker')
     slot = calendar_client.fetch_availability(session, broker.id)['slots'][0]
@@ -153,8 +195,9 @@ def test_calendar_endpoints_are_scoped_to_the_caller(client, make_user, auth_hea
     assert client.get('/api/v1/sms/calendar/availability').status_code == 401
 
 
-def test_ai_time_selection_waits_for_agent_location_approval(
-        client, make_user, auth_header, session, monkeypatch):
+@pytest.mark.parametrize('calendar_state', ['call_accepted', 'time_proposed', 'booking_confirmed'])
+def test_bobbie_hands_meetings_to_a_person_without_touching_the_calendar(
+        client, make_user, auth_header, session, monkeypatch, calendar_state):
     broker = make_user(BROKER_EMAIL, role='broker')
     agent = make_user('agent@linchpinglobal.net', role='agent')
     conversation = Conversation(
@@ -191,11 +234,6 @@ def test_ai_time_selection_waits_for_agent_location_approval(
     ])
     session.commit()
 
-    slot = {
-        'start_at': '2026-09-30T14:00:00Z',
-        'end_at': '2026-09-30T14:30:00Z',
-        'label': 'Sep 30 at 9:00 AM',
-    }
     monkeypatch.setattr(bobbie, 'analyze_conversation_disposition', lambda *_: {
         'action': 'continue',
         'intent': 'schedule_visit',
@@ -206,21 +244,21 @@ def test_ai_time_selection_waits_for_agent_location_approval(
         'next_step': 'schedule',
         'qualification_focus': '',
         'calendar': {
-            'state': 'time_proposed',
+            'state': calendar_state,
             'should_fetch_availability': True,
             'requested_time_text': '9:00',
             'reason': 'owner selected the offered slot',
         },
         'reason': 'owner selected the offered slot',
     })
-    monkeypatch.setattr(calendar_client, 'fetch_availability', lambda *_: {
-        'timezone': 'America/Chicago', 'current_time': '', 'slot_minutes': 30, 'slots': [slot]})
-    monkeypatch.setattr(bobbie, 'resolve_calendar_action', lambda *_: {
-        **slot, 'action': 'book', 'consent': 'offered_slot_selected'})
-    monkeypatch.setattr(calendar_client, 'create_booking',
-                        lambda *_: pytest.fail('AI must not create the booking before location approval'))
+    no_calendar = lambda *_args, **_kwargs: pytest.fail('Bobbie must not use the calendar')
+    monkeypatch.setattr(calendar_client, 'fetch_availability', no_calendar)
+    monkeypatch.setattr(calendar_client, 'create_booking', no_calendar)
+    monkeypatch.setattr(bobbie, 'resolve_calendar_action', no_calendar)
+    sent = []
     monkeypatch.setattr(service, 'send_and_store_message',
-                        lambda *_: pytest.fail('AI must not send a booking confirmation'))
+                        lambda _session, _conversation, text, event_type, *rest: sent.append((text, event_type))
+                        or Message(id=1))
 
     service.process_ai_reply(conversation.id, '9:00 works for me')
 
@@ -231,6 +269,11 @@ def test_ai_time_selection_waits_for_agent_location_approval(
     assert updated.lead_status == 'location_discussion'
     assert updated.meeting_booked is False
     assert session.query(Booking).count() == 0
+    assert len(sent) == 1
+    text, event_type = sent[0]
+    assert event_type == 'ai.reply'
+    assert 'someone from our team' in text.lower()
+    assert not any(char.isdigit() for char in text), 'Bobbie must not propose a time'
 
     followup = client.get(
         f'/api/v1/followups/{conversation.id}',

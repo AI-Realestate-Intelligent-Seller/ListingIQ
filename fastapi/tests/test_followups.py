@@ -1,10 +1,11 @@
 """Tests for the Follow-ups board: only replied threads, and the decisions on them."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from app.models import Booking, Conversation, Lead, Message
+from app.models import Booking, Conversation, Lead, Message, User
 from app.sms import service
 
 BROKER_EMAIL = 'ather.shamim@linchpinglobal.net'
@@ -396,6 +397,33 @@ def test_an_opted_out_owner_cannot_be_booked(client, make_user, auth_header, sen
                            headers=headers)
     assert response.status_code == 409
     assert 'opted out' in response.json()['detail']
+
+
+@pytest.mark.parametrize('saved_zone, sent_zone, expected', [
+    ('Asia/Karachi', None, 'Asia/Karachi'),           # the zone saved at login
+    ('Asia/Karachi', 'America/Denver', 'America/Denver'),  # the dialog's zone wins
+])
+def test_owner_confirmation_uses_the_bookers_timezone(client, make_user, auth_header, session, sent_sms,
+                                                      saved_zone, sent_zone, expected):
+    make_user(BROKER_EMAIL, role='broker')
+    session.query(User).filter(User.email == BROKER_EMAIL).update({'timezone': saved_zone})
+    session.commit()
+    headers = auth_header(BROKER_EMAIL)
+    conversation_id = start_conversation(client, headers)
+    owner_replies(client)
+    start = (datetime.utcnow() + timedelta(days=1)).replace(hour=15, minute=0, second=0, microsecond=0)
+
+    response = client.post(f'{FOLLOWUPS_URL}/{conversation_id}/appointment',
+                           json={'start_at': start.isoformat() + 'Z',
+                                 'end_at': (start + timedelta(minutes=30)).isoformat() + 'Z',
+                                 'address': APPOINTMENT_ADDRESS, 'notify': True, 'timezone': sent_zone},
+                           headers=headers)
+    assert response.status_code == 200, response.text
+
+    local = start.replace(tzinfo=timezone.utc).astimezone(ZoneInfo(expected))
+    text = sent_sms[-1]['text']
+    assert f"{local.strftime('%I:%M %p')}–" in text
+    assert expected in text
 
 
 def test_a_failed_confirmation_still_reports_the_booking(client, make_user, auth_header, session,

@@ -17,7 +17,7 @@ from ..core.config import settings
 from ..db import SessionLocal
 from ..logger import get_logger, log_event
 from ..models import Conversation, Lead, Message
-from . import bobbie, calendar_client
+from . import bobbie
 from .deepseek import AiUnavailableError
 from .classifier import classify_lead_message, finalized_lead_status, is_opt_out, merge_lead_status
 from .scheduling import (
@@ -473,7 +473,7 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
             'If it is answer_only, do not ask a question. If it is offer_call, do not qualify further: acknowledge '
             'what is already known and make one low-pressure request to visit the property in person without '
             'proposing a time (a phone call only if the owner has declined a visit or asked for a call). '
-            'Do not introduce calendar times unless calendar state explicitly permits it.'
+            'Never propose, offer or confirm a day or time; a person from the team arranges every meeting.'
         )
         calendar_state = disposition['calendar']
         log_event(logger, 'sms.calendar.state_resolved', conversation_id=conversation.id,
@@ -481,88 +481,33 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
                   should_fetch_availability=calendar_state['should_fetch_availability'])
 
         scheduling_context = ''
-        scheduling_fallback_reply = ''
-        last_availability = None
-
         if calendar_state['should_fetch_availability']:
-            try:
-                availability = calendar_client.fetch_availability(session, conversation.user_id)
-                last_availability = availability
-                scheduling_context = (
-                    f"{calendar_client.prompt_context(availability)}\n"
-                    f"Calendar state from DeepSeek: {calendar_state['state']}. "
-                    'No booking exists unless the booking API succeeds.'
-                )
-                if calendar_state['state'] == 'call_accepted':
-                    scheduling_fallback_reply = calendar_client.safe_available_offer(availability)
-                    log_event(logger, 'sms.calendar.offer_prepared', conversation_id=conversation.id,
-                              slot_count=len(availability.get('slots') or []))
-                else:
-                    action = bobbie.resolve_calendar_action(conversation, history, availability, calendar_state)
-                    log_event(logger, 'sms.calendar.action_resolved', conversation_id=conversation.id,
-                              action=action.get('action'), consent=action.get('consent'),
-                              start_at=action.get('start_at'), end_at=action.get('end_at'))
-                    consent_confirmed = (calendar_state['state'] == 'booking_confirmed'
-                                         or action.get('consent') in ('offered_slot_selected', 'confirmed_exact'))
-                    if action.get('action') == 'book' and consent_confirmed:
-                        # A selected time is not approval to assume the property
-                        # address is the meeting location. Bobbie pauses without
-                        # creating a calendar row or sending a confirmation; the
-                        # assigned person negotiates the location and uses the
-                        # manual appointment action to send the final details.
-                        previous_status = conversation.lead_status
-                        hand_to_broker(session, conversation)
-                        update_lead_progress(
-                            session, conversation,
-                            lead_status='location_discussion',
-                            meeting_booked=False,
-                            processed_at=None,
-                        )
-                        _log_status_change(
-                            session, conversation, previous_status, 'location_discussion')
-                        log_event(logger, 'sms.location_approval.requested',
-                                  conversation_id=conversation.id,
-                                  lead_id=_lead_id_for(session, conversation),
-                                  start_at=action.get('start_at'), end_at=action.get('end_at'))
-                        return
-                    elif action.get('action') == 'ask_confirmation':
-                        label = calendar_client._short_label(action.get('label') or '')
-                        scheduling_fallback_reply = f'{label} is open. Should I book it for me to stop by?'
-                        log_event(logger, 'sms.calendar.confirmation_requested',
-                                  conversation_id=conversation.id, label=label)
-                    elif action.get('action') == 'offer_alternatives':
-                        scheduling_fallback_reply = (
-                            f"That time isn’t open. {calendar_client.safe_available_offer(availability)}")
-                        log_event(logger, 'sms.calendar.alternatives_prepared',
-                                  conversation_id=conversation.id)
-                    elif action.get('action') == 'resolution_failed':
-                        scheduling_fallback_reply = ('I couldn’t verify that calendar selection just now. '
-                                                     'Please resend the exact day and time you chose.')
-                        log_event(logger, 'sms.calendar.resolution_failed', level=logging.WARNING,
-                                  conversation_id=conversation.id)
-            except Exception as error:
-                log_event(logger, 'sms.calendar.failed', level=logging.ERROR,
-                          conversation_id=conversation.id, error_type=type(error).__name__,
-                          error=str(error))
-                scheduling_context = ('The live calendar is currently unavailable. Do not claim availability or a '
-                                      'booking, and do not invent or repeat a time.')
-        elif calendar_state['state'] == 'call_declined':
+            # Bobbie never schedules. Once the owner agrees to meet (or names a
+            # time), she says a person will follow up and steps back; the
+            # assigned broker/agent sets the time and place from Follow-ups.
+            reply = 'Great, thank you. Someone from our team will text you shortly to set up a time that works.'
+            outbound = send_and_store_message(session, conversation, reply, 'ai.reply')
+            previous_status = conversation.lead_status
+            hand_to_broker(session, conversation)
+            update_lead_progress(session, conversation, lead_status='location_discussion',
+                                 meeting_booked=False, processed_at=None)
+            _log_status_change(session, conversation, previous_status, 'location_discussion')
+            log_event(logger, 'sms.ai.completed', conversation_id=conversation.id,
+                      outcome='meeting_handed_to_human', calendar_state=calendar_state['state'],
+                      message_id=outbound.id)
+            return
+        if calendar_state['state'] == 'call_declined':
             scheduling_context = ('The recipient declined or deferred a meeting. Answer their latest question directly. '
                                   'Do not offer times, ask for a visit or a call, or pressure them to schedule.')
 
         fallback_plan = {'next_step': disposition['next_step']}
-        reply = scheduling_fallback_reply or bobbie.generate_ai_reply(
+        reply = bobbie.generate_ai_reply(
             conversation, history, scheduling_context, disposition_control, fallback_plan)
 
-        if contains_unbooked_confirmation(reply) or (not last_availability and contains_time_proposal(reply)):
+        if contains_unbooked_confirmation(reply) or contains_time_proposal(reply):
             log_event(logger, 'sms.ai.safety_rewrite', level=logging.WARNING,
                       conversation_id=conversation.id, reason='unbooked_confirmation')
-            if last_availability and calendar_state['should_fetch_availability']:
-                reply = calendar_client.safe_available_offer(last_availability)
-            elif calendar_state['state'] == 'call_accepted':
-                reply = 'The live calendar is unavailable, so I can’t offer a verified time right now.'
-            else:
-                reply = 'I haven’t scheduled anything, and I won’t invent a time.'
+            reply = 'I haven’t scheduled anything, and I won’t invent a time.'
 
         if calendar_state['state'] == 'call_declined' and contains_scheduling_pressure(reply):
             log_event(logger, 'sms.ai.safety_rewrite', level=logging.WARNING,
@@ -577,12 +522,10 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
         reply = bobbie.review_and_repair_ai_reply(conversation, history, reply, disposition,
                                                   scheduling_context, disposition_control)
 
-        if contains_unbooked_confirmation(reply) or (not last_availability and contains_time_proposal(reply)):
+        if contains_unbooked_confirmation(reply) or contains_time_proposal(reply):
             log_event(logger, 'sms.ai.review_rewrite', level=logging.WARNING,
                       conversation_id=conversation.id, reason='calendar_safety')
-            reply = (calendar_client.safe_available_offer(last_availability)
-                     if last_availability and calendar_state['should_fetch_availability']
-                     else 'I can’t verify a calendar time right now, so I won’t suggest or confirm one.')
+            reply = 'I haven’t scheduled anything, and I won’t invent a time.'
         if calendar_state['state'] == 'call_declined' and contains_scheduling_pressure(reply):
             log_event(logger, 'sms.ai.review_rewrite', level=logging.WARNING,
                       conversation_id=conversation.id, reason='pressure_after_refusal')

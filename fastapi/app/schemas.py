@@ -279,6 +279,8 @@ class FollowUpAppointmentRequest(BaseModel):
     address: str = Field(..., min_length=5, max_length=500)
     # Text the owner the confirmation and the appointment map link.
     notify: bool = True
+    # The booker's IANA timezone, so the owner's text matches the time they picked.
+    timezone: Optional[str] = Field(None, max_length=64)
 
 class FollowUpAppointmentResult(BaseModel):
     booking: dict

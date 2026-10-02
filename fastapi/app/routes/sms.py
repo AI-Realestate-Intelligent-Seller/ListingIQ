@@ -97,9 +97,17 @@ def _serialize(session: Session, conversation: Conversation) -> dict:
 
 
 @router.get('/calendar/availability')
-def calendar_availability(current_user: User = Depends(get_current_user), session: Session = Depends(get_db)):
-    """Open meeting slots for this broker — the same data Bobbie offers."""
+def calendar_availability(all_day: bool = False, timezone: str | None = None,
+                          current_user: User = Depends(get_current_user), session: Session = Depends(get_db)):
+    """Open meeting slots for this broker — the same data Bobbie offers.
+
+    `all_day` is for booking by hand: every free slot around the clock, laid
+    out in the broker's own timezone (the browser's, else the one saved at login).
+    """
     _require_sms_access(current_user)
+    if all_day:
+        return calendar_service.availability(
+            session, current_user.id, timezone_name=timezone or current_user.timezone, all_day=True)
     return calendar_client.fetch_availability(session, current_user.id)
 
 
