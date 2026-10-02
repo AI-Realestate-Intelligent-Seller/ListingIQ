@@ -1,6 +1,7 @@
 from pydantic import BaseModel, EmailStr, Field, validator
 from typing import List, Optional
 from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Roles a Head of Brokerage is allowed to hand out through an invitation.
 INVITABLE_ROLES = ('broker', 'agent')
@@ -9,6 +10,16 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8)
     full_name: Optional[str]
+    timezone: Optional[str] = Field(default=None, max_length=100)
+
+    @validator('timezone')
+    def valid_timezone(cls, value):
+        if value is not None:
+            try:
+                ZoneInfo(value)
+            except (ZoneInfoNotFoundError, ValueError):
+                raise ValueError('Use a valid IANA timezone, such as Asia/Karachi.')
+        return value
 
 class UserRegister(BaseModel):
     email: EmailStr
@@ -31,6 +42,7 @@ class UserOut(BaseModel):
     is_active: Optional[bool]
     role: str
     created_at: Optional[datetime]
+    timezone: Optional[str] = None
 
     class Config:
         orm_mode = True

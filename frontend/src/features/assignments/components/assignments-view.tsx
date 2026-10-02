@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { readAuthSession } from "@/features/auth/lib/auth-storage";
 import { assignLead, listAssignments, roundRobinAssignments } from "../api/assignments-api";
 import type { AssignmentLead, AssignmentsResponse } from "../types/assignments.types";
+import { NotificationBell } from "@/features/dashboard/components/notification-bell";
 
 function activity(value: string | null): string {
   if (!value) return "—";
@@ -109,6 +110,7 @@ export function AssignmentsView() {
       <header className="assignments-header">
         <div><span>TEAM WORKFLOW</span><h1 className="view-title">Assignments</h1><p>Assign replied leads to agents linked to you.</p></div>
         <div className="assignments-header-actions">
+          <NotificationBell />
           <strong>{data.leads.length} replied {data.leads.length === 1 ? "lead" : "leads"}</strong>
           <button className="button" type="button" disabled={isLoading || isAutoAssigning || data.agents.length === 0 || !data.leads.some((lead) => lead.assignee_id === null)} onClick={() => void autoAssign()}>
             {isAutoAssigning ? "Assigning…" : "Round Robin · Automatic Assignment"}

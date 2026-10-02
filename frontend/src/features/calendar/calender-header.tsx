@@ -4,7 +4,8 @@ import { readAuthSession } from "../../features/auth/lib/auth-storage";
 import { CalendarView } from './type';
 import { formatMonthYear } from './date-utils';
 import styles from '../../styles/calender.module.css';
-//import { enablePushNotifications,checkPushStatus } from "./push-notification";
+import { NotificationBell } from '../dashboard/components/notification-bell';
+
 
 
 interface CalendarHeaderProps {
@@ -93,7 +94,9 @@ export function CalendarHeader({
         </div>
       </div>
 
-      
+      <div className={styles.calendarHeaderRight}>
+        <NotificationBell />
+      </div>
     </div>
   );
 }

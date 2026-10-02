@@ -7,6 +7,7 @@ import { Toast } from "@/components/toast/toast";
 import { clearAuthSession, readAuthSession } from "@/features/auth/lib/auth-storage";
 import { endSession, markActivity, watchSession } from "@/features/auth/lib/session-guard";
 import * as api from "../api";
+
 import type { AuditEvent, Engineering, FeatureFlag, Operations, Organization, PlatformOverview, PlatformUser } from "../types";
 
 type Tab = "integrations" | "overview" | "organizations" | "users" | "product" | "operations" | "support" | "security" | "engineering";
@@ -65,7 +66,7 @@ export function PlatformAdminView({ children }: { children?: React.ReactNode }) 
 
   return <main className="platform-shell">
     <aside className="platform-sidebar"><Brand light/><div className="platform-badge">INTERNAL CONSOLE</div><nav>{[...new Set(nav.map(i=>i.group))].map(group=><section key={group}><span>{group}</span>{nav.filter(i=>i.group===group).map(i=><button key={i.id} className={tab===i.id?"active":""} onClick={()=>choose(i.id)}>{i.label}</button>)}</section>)}</nav><button className="platform-logout" onClick={logout}>Sign out</button></aside>
-    <section className="platform-main">{!children ? <header><div><span>LISTINGIQ PLATFORM</span><h1>{nav.find(i=>i.id===tab)?.label}</h1><p>Internal product and customer operations.</p></div><button className="button secondary" onClick={()=>void load()}>Refresh</button></header> : null}
+    <section className="platform-main">{!children ? <header><div><span>LISTINGIQ PLATFORM</span><h1>{nav.find(i=>i.id===tab)?.label}</h1><p>Internal product and customer operations.</p></div><div className="dashboard-header-actions"><button className="button secondary" onClick={()=>void load()}>Refresh</button></div></header> : null}
       {notice?<Toast message={notice} tone="success" onDone={()=>setNotice("")}/>:null}{error?<div className="platform-error" role="alert">{error}</div>:null}{loading?<div className="platform-loading">Loading platform data…</div>:null}
       {!loading && tab === "integrations" ? children : null}
       {!loading&&!error&&tab==="overview"&&overview?<><div className="platform-metrics">{[["Organizations",overview.organizations],["Active customers",overview.active_organizations],["Customer users",overview.users],["Total leads",overview.leads],["Campaigns",overview.campaigns],["Messages",overview.messages]].map(([l,v])=><article key={l}><span>{l}</span><strong>{Number(v).toLocaleString()}</strong></article>)}</div><div className="platform-card"><h2>Platform pulse</h2><div className="platform-pulse"><div><strong>{overview.new_users_30d}</strong><span>new users in 30 days</span></div><div><strong>{overview.pending_invitations}</strong><span>pending invitations</span></div><div><strong>{overview.active_users}</strong><span>active customer users</span></div></div></div></>:null}

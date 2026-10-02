@@ -11,6 +11,7 @@ import { ConfirmDialog, type ConfirmRequest } from "@/components/dialog/confirm-
 import { ApiRequestError } from "@/lib/api/http-client";
 
 import { createCampaignDraft } from "@/features/campaigns/api/campaigns-api";
+import { NotificationBell } from "@/features/dashboard/components/notification-bell";
 
 import {
   deleteLeads,
@@ -954,7 +955,9 @@ useEffect(() => {
                 (isFiltered ? ` · ${leadsToShow.length} shown` : "")}
           </p>
         </div>
-        <div
+        <div className="dashboard-header-actions">
+          <NotificationBell />
+          <div
           className={`leads-import-dropzone${isDraggingFile ? " dragging" : ""}${
             isImporting || pendingFile !== null ? " disabled" : ""
           }`}
@@ -982,6 +985,7 @@ useEffect(() => {
           >
             {isImporting ? "Importing…" : "Choose file"}
           </button>
+        </div>
         </div>
       </header>
 

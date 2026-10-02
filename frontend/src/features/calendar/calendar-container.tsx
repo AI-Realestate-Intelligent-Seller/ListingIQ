@@ -1,60 +1,58 @@
-'use client';
+"use client";
 
 import {
   useState,
   useCallback,
   useEffect,
   useRef,
-} from 'react';
+} from "react";
 
 import {
   CalendarView,
   CalendarEvent,
-} from './type';
+} from "./type";
 
 import {
   fetchCalendarEvents,
-} from './calender-api';
+} from "./calender-api";
 
 import {
   addMonths,
   addDays,
   isSameDay,
-} from './date-utils';
+} from "./date-utils";
 
 import {
   CalendarHeader,
-} from './calender-header';
+} from "./calender-header";
 
 import {
   MonthView,
-} from './month-view';
+} from "./month-view";
 
 import {
   WeekView,
-} from './week-view';
+} from "./week-view";
 
 import {
   DayView,
-} from './day-view';
+} from "./day-view";
 
 import {
   CalendarSidebar,
-} from './calendar-sidebar';
+} from "./calendar-sidebar";
 
 import {
   CalendarEventDetail,
-} from './calender-event';
-
-import {
-  readAuthSession,
-} from '../auth/lib/auth-storage';
+} from "./calender-event";
 
 
-import PushNotifications from "./push-notification"
-import styles from '../../styles/calender.module.css';
+import styles from "../../styles/calender.module.css";
 
-export function CalendarContainer() {
+
+export function CalendarContainer({ focusBookingId = null }: { focusBookingId?: number | null }) {
+  const focusedBookingRef = useRef<number | null>(null);
+  const [focusError, setFocusError] = useState("");
   const [currentDate, setCurrentDate] =
     useState<Date>(new Date());
 
@@ -62,7 +60,7 @@ export function CalendarContainer() {
     useState<Date>(new Date());
 
   const [view, setView] =
-    useState<CalendarView>('month');
+    useState<CalendarView>("month");
 
   const [activeEvent, setActiveEvent] =
     useState<CalendarEvent | null>(null);
@@ -73,204 +71,132 @@ export function CalendarContainer() {
   const [loadingEvents, setLoadingEvents] =
     useState(false);
 
-  const websocketRef =
-    useRef<WebSocket | null>(null);
 
   /*
    * Load calendar events from REST API.
    */
-  const loadCalendarEvents = useCallback(async () => {
-    try {
-      setLoadingEvents(true);
+  const loadCalendarEvents = useCallback(
+    async () => {
+      try {
+        setLoadingEvents(true);
 
-      const calendarEvents =
-        await fetchCalendarEvents();
+        const calendarEvents =
+          await fetchCalendarEvents();
 
-      setEvents(calendarEvents);
-    } catch (error) {
-      console.error(
-        'Failed to load calendar:',
-        error
-      );
+        setEvents(calendarEvents);
+        if (focusBookingId !== null && focusedBookingRef.current !== focusBookingId) {
+          const booking = calendarEvents.find((event) => event.id === String(focusBookingId));
+          if (booking) {
+            const date = new Date(`${booking.date}T12:00:00`);
+            setCurrentDate(date);
+            setSelectedDate(date);
+            setActiveEvent(booking);
+            focusedBookingRef.current = focusBookingId;
+            setFocusError("");
+          } else {
+            setFocusError("This booking is no longer available in your calendar.");
+          }
+        }
 
-      setEvents([]);
-    } finally {
-      setLoadingEvents(false);
-    }
-  }, []);
+      } catch (error) {
+        console.error(
+          "Failed to load calendar:",
+          error,
+        );
 
- 
+        setEvents([]);
+
+      } finally {
+        setLoadingEvents(false);
+      }
+    },
+    [focusBookingId],
+  );
+
+
+  /*
+   * Initial calendar load.
+   */
   useEffect(() => {
     loadCalendarEvents();
   }, [loadCalendarEvents]);
 
 
-
-  
+  /*
+   * Listen for calendar events coming from
+   * the shared/global WebSocket provider.
+   *
+   * The CalendarContainer no longer creates
+   * or manages its own WebSocket connection.
+   */
   useEffect(() => {
-    const session = readAuthSession();
-
-    if (!session?.access_token) {
-    
-
-      return;
-    }
-
-    const apiUrl =
-      process.env.NEXT_PUBLIC_API_URL;
-
-    if (!apiUrl) {
-      console.error(
-        'Calendar WebSocket: NEXT_PUBLIC_API_URL is not configured'
-      );
-
-      return;
-    }
-
-    /*
-     * Convert API URL to WebSocket URL.
-     */
-    const wsBaseUrl = apiUrl
-      .replace(/^http:\/\//, 'ws://')
-      .replace(/^https:\/\//, 'wss://')
-      .replace(/\/api\/v1\/?$/, '')
-      .replace(/\/$/, '');
-
-    const wsUrl =
-      `${wsBaseUrl}/ws/calendar`;
-
-  
-
-    
-    const websocket =
-      new WebSocket(wsUrl);
-
-    websocketRef.current =
-      websocket;
-
-  
-    websocket.onopen = () => {
-   
-
-     
-      websocket.send(
-        JSON.stringify({
-          type: 'auth',
-          token: session.access_token,
-        })
-      );
+    const handleCalendarEvent = async () => {
+      await loadCalendarEvents();
     };
 
-   
-    websocket.onmessage = async (event) => {
-      try {
-        const message =
-          JSON.parse(event.data);
+    window.addEventListener(
+      "listingiq-calendar-event",
+      handleCalendarEvent,
+    );
 
-       
-
-        if (
-          message.type === 'authenticated'
-        ) {
-         
-
-          return;
-        }
-
-        if (
-          message.type === 'booking_created' ||
-          message.type === 'booking_updated' ||
-          message.type === 'booking_deleted'
-        ) {
-         
-          await loadCalendarEvents();
-        }
-      } catch (error) {
-        console.error(
-          'Calendar WebSocket message error:',
-          error
-        );
-      }
-    };
-
-    /*
-     * WebSocket error.
-     */
-    websocket.onerror = (error) => {
-      console.error(
-        'Calendar WebSocket error:',
-        error
-      );
-
-      console.error(
-        'WebSocket readyState:',
-        websocket.readyState
-      );
-
-      console.error(
-        'WebSocket URL:',
-        wsUrl
-      );
-    };
-
-   
-    websocket.onclose = (event) => {
-     
-
-      websocketRef.current =
-        null;
-    };
     return () => {
-     
-
-      websocket.close();
-
-      websocketRef.current =
-        null;
+      window.removeEventListener(
+        "listingiq-calendar-event",
+        handleCalendarEvent,
+      );
     };
   }, [loadCalendarEvents]);
 
-  
+
+  /*
+   * Previous period.
+   */
   const handlePrev = useCallback(() => {
-    if (view === 'month') {
+    if (view === "month") {
       setCurrentDate(
         (date) =>
-          addMonths(date, -1)
+          addMonths(date, -1),
       );
-    } else if (view === 'week') {
+    } else if (view === "week") {
       setCurrentDate(
         (date) =>
-          addDays(date, -7)
+          addDays(date, -7),
       );
     } else {
       setCurrentDate(
         (date) =>
-          addDays(date, -1)
+          addDays(date, -1),
       );
     }
   }, [view]);
 
 
+  /*
+   * Next period.
+   */
   const handleNext = useCallback(() => {
-    if (view === 'month') {
+    if (view === "month") {
       setCurrentDate(
         (date) =>
-          addMonths(date, 1)
+          addMonths(date, 1),
       );
-    } else if (view === 'week') {
+    } else if (view === "week") {
       setCurrentDate(
         (date) =>
-          addDays(date, 7)
+          addDays(date, 7),
       );
     } else {
       setCurrentDate(
         (date) =>
-          addDays(date, 1)
+          addDays(date, 1),
       );
     }
   }, [view]);
 
-  
+
+  /*
+   * Jump back to today.
+   */
   const handleToday = useCallback(() => {
     const now = new Date();
 
@@ -278,22 +204,29 @@ export function CalendarContainer() {
     setSelectedDate(now);
   }, []);
 
-  
+
+  /*
+   * Select calendar date.
+   */
   const handleSelectDate = useCallback(
     (date: Date) => {
       setSelectedDate(date);
       setCurrentDate(date);
 
       if (!isSameDay(date, selectedDate)) {
-        // setView('day');
+        // Optional:
+        // setView("day");
       }
     },
-    [selectedDate]
+    [selectedDate],
   );
+
 
   return (
     <div>
-     < PushNotifications/>
+
+
+
       <CalendarHeader
         currentDate={currentDate}
         view={view}
@@ -303,9 +236,24 @@ export function CalendarContainer() {
         onToday={handleToday}
       />
 
+
+      {focusError ? <p role="status">{focusError}</p> : null}
+      {loadingEvents ? (
+        <div
+          style={{
+            padding: "8px 0",
+            fontSize: "12px",
+          }}
+        >
+          Loading calendar...
+        </div>
+      ) : null}
+
+
       <div className={styles.calendarLayout}>
         <div>
-          {view === 'month' && (
+
+          {view === "month" && (
             <MonthView
               year={currentDate.getFullYear()}
               month={currentDate.getMonth()}
@@ -316,7 +264,8 @@ export function CalendarContainer() {
             />
           )}
 
-          {view === 'week' && (
+
+          {view === "week" && (
             <WeekView
               date={currentDate}
               onSelectEvent={setActiveEvent}
@@ -324,14 +273,17 @@ export function CalendarContainer() {
             />
           )}
 
-          {view === 'day' && (
+
+          {view === "day" && (
             <DayView
               date={currentDate}
               onSelectEvent={setActiveEvent}
               events={events}
             />
           )}
+
         </div>
+
 
         <CalendarSidebar
           currentDate={currentDate}
@@ -340,7 +292,9 @@ export function CalendarContainer() {
           onSelectEvent={setActiveEvent}
           events={events}
         />
+
       </div>
+
 
       {activeEvent && (
         <CalendarEventDetail
@@ -350,6 +304,7 @@ export function CalendarContainer() {
           }
         />
       )}
+
     </div>
   );
 }
