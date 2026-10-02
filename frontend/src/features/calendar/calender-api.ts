@@ -46,7 +46,7 @@ function inferEventType(title: string): CalendarEventType {
  * America/Chicago
  * America/New_York
  */
-function getBrowserTimeZone(): string {
+export function getBrowserTimeZone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone;
 }
 
@@ -77,7 +77,7 @@ function formatLocalDate(dateTime: string): string {
  * 2026-09-10T15:58:00Z
  * Asia/Karachi → 08:58 PM
  */
-function formatLocalTime(dateTime: string): string {
+export function formatLocalTime(dateTime: string): string {
   const date = new Date(dateTime);
 
   return new Intl.DateTimeFormat("en-US", {
@@ -149,7 +149,7 @@ export async function fetchCalendarEvents(): Promise<CalendarEvent[]> {
 
   const responseText = await response.text();
 
- 
+
 
   if (!response.ok) {
     throw new Error(
@@ -164,13 +164,13 @@ export async function fetchCalendarEvents(): Promise<CalendarEvent[]> {
 
   const browserTimeZone = getBrowserTimeZone();
 
- 
+
 
   const mappedEvents = data.map(
     mapBookingToCalendarEvent
   );
 
- 
+
   return mappedEvents;
 }
-  
+

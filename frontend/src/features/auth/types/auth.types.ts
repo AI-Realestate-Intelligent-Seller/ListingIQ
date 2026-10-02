@@ -14,6 +14,7 @@ export type AuthUser = {
   is_verified: boolean;
   is_active: boolean;
   created_at: string;
+  timezone?: string | null;
 };
 
 export type AuthResponse = {
@@ -27,6 +28,7 @@ export type AuthResponse = {
 export type LoginPayload = {
   email: string;
   password: string;
+  timezone?: string;
 };
 
 export type RegisterPayload = LoginPayload & {

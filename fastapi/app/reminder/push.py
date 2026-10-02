@@ -5,6 +5,7 @@ from pywebpush import webpush, WebPushException
 from sqlalchemy.orm import Session
 
 from ..models import PushSubscription
+from .actions import notification_action, dashboard_url
 
 
 def send_web_push(
@@ -12,6 +13,7 @@ def send_web_push(
     title: str,
     body: str,
     url: str = "/calendar",
+    conversation_id: int | None = None,
 ):
     vapid_private_key = os.getenv("VAPID_PRIVATE_KEY")
     vapid_email = os.getenv("VAPID_EMAIL")
@@ -27,15 +29,27 @@ def send_web_push(
         )
 
     payload = json.dumps(
+    {
+        "title": title,
+        "body": body,
+        "url": dashboard_url(notification_action(action_url=url, conversation_id=conversation_id)),
+        "action": notification_action(action_url=url, conversation_id=conversation_id),
+        "conversation_id": conversation_id,
+    }
+)
+
+    print(
+        "[WEB PUSH ATTEMPT]",
         {
             "title": title,
             "body": body,
-            "url": url,
-        }
+            "url": url or "/calendar",
+            "endpoint": subscription.get("endpoint", "")[:50],
+        },
     )
 
     try:
-        webpush(
+        response = webpush(
             subscription_info=subscription,
             data=payload,
             vapid_private_key=vapid_private_key,
@@ -44,19 +58,36 @@ def send_web_push(
             },
         )
 
-        print("[WEB PUSH] Notification sent")
+        print(
+            "[WEB PUSH SUCCESS]",
+            response.status_code
+            if response is not None
+            else "no-response-object",
+        )
+
+        return response
 
     except WebPushException as exc:
-        print(f"[WEB PUSH ERROR] {exc}")
+        print(
+            "[WEB PUSH ERROR]",
+            repr(exc),
+        )
+
+        if exc.response is not None:
+            print(
+                "[WEB PUSH RESPONSE]",
+                exc.response.status_code,
+                exc.response.text,
+            )
+
         raise
-
-
 def send_push_to_user(
-    db: Session,
+    db,
     user_id: int,
     title: str,
     body: str,
-    url: str = "/calendar",
+    url: str | None = None,
+    conversation_id: int | None = None,
 ):
     subscriptions = (
         db.query(PushSubscription)
@@ -86,17 +117,17 @@ def send_push_to_user(
 
         try:
             send_web_push(
-                subscription=subscription_info,
-                title=title,
-                body=body,
-                url=url,
-            )
+    subscription=subscription_info,
+    title=title,
+    body=body,
+    url=url or "/calendar",
+    conversation_id=conversation_id,
+)
 
             sent_count += 1
 
         except WebPushException as exc:
 
-            # 410 = subscription has expired/unsubscribed
             if (
                 exc.response is not None
                 and exc.response.status_code == 410
@@ -121,7 +152,8 @@ def send_push_to_user(
     print(
         f"[WEB PUSH] "
         f"Sent to user={user_id} | "
-        f"subscriptions={sent_count}"
+        f"subscriptions={sent_count} | "
+
     )
 
     return sent_count

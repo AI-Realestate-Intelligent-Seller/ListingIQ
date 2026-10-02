@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app import db  # noqa: E402
 from app.auth import hash_password  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import (AiRun, Booking, Campaign, Conversation, FeatureFlag, Invitation, Lead,  # noqa: E402
+from app.models import (AiRun, Booking, Campaign, Conversation, FeatureFlag, Invitation, Lead, LeadEvent,  # noqa: E402
                         Message, PlatformAuditLog, User)
 
 
@@ -34,6 +34,7 @@ def _database():
     db.Base.metadata.create_all(bind=db.engine)
     yield
     db.Base.metadata.drop_all(bind=db.engine)
+    db.engine.dispose()
     _TEST_DB.unlink(missing_ok=True)
     shutil.rmtree(_TEST_UPLOADS, ignore_errors=True)
 
@@ -44,6 +45,7 @@ def clean_tables():
     try:
         session.query(PlatformAuditLog).delete()
         session.query(FeatureFlag).delete()
+        session.query(LeadEvent).delete()
         session.query(Lead).delete()
         session.query(Message).delete()
         session.query(Conversation).delete()

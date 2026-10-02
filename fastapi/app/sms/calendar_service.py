@@ -11,15 +11,15 @@ from uuid import uuid4
 from urllib.parse import quote_plus
 
 from sqlalchemy.exc import IntegrityError
-from ..routes.websocket import broadcast_calendar_event_sync
+from ..routes.websocket import broadcast_calendar_event_sync,broadcast_notification_event_sync
 try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover
     ZoneInfo = None
-
+from ..reminder.notification import notify_user
 from ..core.config import settings
 from ..logger import get_logger
-from ..models import Booking,BookingReminder
+from ..models import Booking,BookingReminder,User
 
 logger = get_logger(__name__)
 
@@ -119,21 +119,15 @@ def create_booking(
     calendar through WebSocket.
     """
 
-    # Parse start/end time
-
-
     start = _parse(start_at, "start_at")
     end = _parse(end_at, "end_at")
 
-    
     # Validate time
- 
 
     if end <= start:
         raise ValueError(
             "end_at must be later than start_at"
         )
-
     # Maximum meeting duration = 4 hours
     if (end - start).total_seconds() > 4 * 60 * 60:
         raise ValueError(
@@ -149,15 +143,11 @@ def create_booking(
         )
         .first()
     )
-
     if overlap:
         raise SlotTakenError(
             "That time overlaps an existing booking"
         )
-
     # Create booking
-   
-
     booking = Booking(
         user_id=user_id,
         phone=phone,
@@ -171,11 +161,8 @@ def create_booking(
     )
 
     session.add(booking)
-
-
 # Get the booking ID without committing yet
     session.flush()
-
 
 # Create booking reminder
 
@@ -191,7 +178,6 @@ def create_booking(
         start - timedelta(minutes=10),
     ),
 ]
-
     for reminder_type, scheduled_for in reminders:
       scheduled_for_naive = scheduled_for.replace(tzinfo=None)
 
@@ -209,10 +195,7 @@ def create_booking(
 
         session.add(reminder)
 
-
-
     # Save booking
-
 
     try:
         session.commit()
@@ -221,22 +204,38 @@ def create_booking(
         raise SlotTakenError(
             "That time overlaps an existing booking"
         )
-
-
     # Refresh booking from database
-
 
     session.refresh(booking)
 
-
     # Convert booking to API format
-
-
     booking_data = serialize(booking)
 
-    # SEND WEBSOCKET EVENT
-    
+    # Create in-app notification + Web Push
 
+    zone = _zone()
+    recipient = session.get(User, user_id)
+    if recipient and recipient.timezone and ZoneInfo:
+        try:
+            zone = ZoneInfo(recipient.timezone)
+        except (KeyError, ValueError):
+            pass  # Keep the configured fallback for an invalid saved timezone.
+    start_local = start.astimezone(zone)
+
+    notify_user(
+    session=session,
+    user_id=user_id,
+    booking_id=booking.id,
+    notification_type="booking_created",
+    title="New booking created",
+    message=(
+        f"{name or phone} booked "
+        f"{booking.title} for "
+        f"{start_local.strftime('%b %d, %Y at %I:%M %p')} {zone}."
+    ),
+    action_url=f"/dashboard?view=calendar&booking_id={booking.id}",
+    send_push=True,
+)
     broadcast_calendar_event_sync(
         user_id=user_id,
         event_type="booking_created",

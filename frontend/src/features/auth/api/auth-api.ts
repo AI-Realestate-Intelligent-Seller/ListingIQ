@@ -28,7 +28,10 @@ const TEAM_ENDPOINTS = {
 } as const;
 
 export function login(payload: LoginPayload): Promise<AuthResponse> {
-  return postJson<AuthResponse, LoginPayload>(AUTH_ENDPOINTS.login, payload);
+  return postJson<AuthResponse, LoginPayload>(AUTH_ENDPOINTS.login, {
+    ...payload,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  });
 }
 
 export function register(payload: RegisterPayload): Promise<RegistrationResponse> {

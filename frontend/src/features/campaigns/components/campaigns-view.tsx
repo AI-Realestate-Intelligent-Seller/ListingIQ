@@ -12,6 +12,7 @@ import { ApiRequestError } from "@/lib/api/http-client";
 import { deleteCampaign, fetchCampaign, listCampaigns } from "../api/campaigns-api";
 import type { Campaign, CampaignDetail } from "../types/campaigns.types";
 import { CampaignComposer } from "./campaign-composer";
+import { NotificationBell } from "@/features/dashboard/components/notification-bell";
 
 const CAMPAIGNS_PER_PAGE = 5;
 
@@ -198,6 +199,7 @@ export function CampaignsView({
               : "Overview of Campaigns."}
           </p>
         </div>
+        <NotificationBell />
       </header>
 
       {notice ? <p className="campaigns-notice" role="status">{notice}</p> : null}

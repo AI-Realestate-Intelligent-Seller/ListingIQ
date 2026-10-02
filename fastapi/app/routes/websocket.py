@@ -323,3 +323,59 @@ def broadcast_calendar_event_sync(
             f"Calendar WebSocket broadcast failed: "
             f"{error}"
         )
+
+
+
+
+
+async def broadcast_notification_event(
+    user_id: int,
+    notification: dict,
+):
+    await calendar_manager.send_to_user(
+        user_id,
+        {
+            "type": "notification_created",
+            "notification": notification,
+        },
+    )
+
+def broadcast_notification_event_sync(
+    user_id: int,
+    notification: dict,
+):
+    loop = calendar_manager.loop
+
+    if loop is None:
+        print(
+            "Notification WebSocket broadcast skipped: "
+            "no active WebSocket event loop"
+        )
+        return
+
+    if loop.is_closed():
+        print(
+            "Notification WebSocket broadcast skipped: "
+            "event loop is closed"
+        )
+        return
+
+    try:
+        asyncio.run_coroutine_threadsafe(
+            broadcast_notification_event(
+                user_id=user_id,
+                notification=notification,
+            ),
+            loop,
+        )
+
+        print(
+            f"Notification WebSocket broadcast scheduled: "
+            f"user_id={user_id}"
+        )
+
+    except Exception as error:
+        print(
+            f"Notification WebSocket broadcast failed: "
+            f"{error}"
+        )

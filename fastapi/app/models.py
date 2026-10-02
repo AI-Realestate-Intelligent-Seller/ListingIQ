@@ -121,26 +121,65 @@ class Conversation(Base):
 
 class Message(Base):
     __tablename__ = 'messages'
+
     id = Column(Integer, primary_key=True, index=True)
-    conversation_id = Column(Integer, ForeignKey('conversations.id'))
+
+    conversation_id = Column(
+        Integer,
+        ForeignKey('conversations.id'),
+        index=True,
+    )
+
     direction = Column(String(20))
+
     from_number = Column(String(50))
     to_number = Column(String(50))
+
     text = Column(Text)
     status = Column(String(50))
-    event_type = Column(String(100))
-    # The campaign that sent this message, for outreach sent by one. A thread
-    # can carry outreach from more than one campaign when an owner has more
-    # than one property, so delivery is attributed per message, not per thread.
-    campaign_id = Column(Integer, ForeignKey('campaigns.id'), nullable=True, index=True)
-    # Normalised address this outreach was about (see app.leads.address). The
-    # thread's own property_key only holds the latest one, so the claim on a
-    # property has to live on the message: messages are history, a conversation
-    # is a moving present.
-    property_key = Column(String(500), nullable=True, index=True)
-    telnyx_id = Column(String(128), nullable=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    event_type = Column(String(100), index=True)
+
+    # NEW:
+    # Exact human user who sent this message.
+    # NULL for AI, customer, system and historical messages.
+    sender_user_id = Column(
+        Integer,
+        ForeignKey('users.id'),
+        nullable=True,
+        index=True,
+    )
+
+    campaign_id = Column(
+        Integer,
+        ForeignKey('campaigns.id'),
+        nullable=True,
+        index=True,
+    )
+
+    property_key = Column(
+        String(500),
+        nullable=True,
+        index=True,
+    )
+
+    telnyx_id = Column(
+        String(128),
+        nullable=True,
+        index=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        index=True,
+    )
+
     conversation = relationship('Conversation')
+
+    sender_user = relationship(
+        'User',
+        foreign_keys=[sender_user_id],
+    )
 
 class Booking(Base):
     __tablename__ = 'bookings'
@@ -442,8 +481,6 @@ class Notification(Base):
         index=True,
     )
 
-    # unique=True already provides lookup support.
-    # Remove index=True.
     reminder_id = Column(
         Integer,
         ForeignKey(
@@ -486,6 +523,17 @@ class Notification(Base):
         String(500),
         nullable=True,
     )
+    conversation_id = Column(
+    Integer,
+    ForeignKey("conversations.id"),
+    nullable=True,
+    )
+
+    unread_count = Column(
+    Integer,
+    nullable=False,
+    default=1,
+     )
 
     # Keep if notification history is ordered by created time.
     created_at = Column(

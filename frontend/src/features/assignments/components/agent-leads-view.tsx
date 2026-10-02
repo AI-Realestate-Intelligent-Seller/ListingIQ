@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { readAuthSession } from "@/features/auth/lib/auth-storage";
 import { listMyAssignedLeads, updateMyLeadStage } from "../api/assignments-api";
 import type { AssignmentLead, AssignmentStage } from "../types/assignments.types";
+import { NotificationBell } from "@/features/dashboard/components/notification-bell";
 
 const STAGES: { value: AssignmentStage; label: string }[] = [
   { value: "new", label: "New" },
@@ -22,7 +23,8 @@ function activity(value: string | null): string {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
 }
 
-export function AgentLeadsView() {
+export function AgentLeadsView({ focusLeadId = null }: { focusLeadId?: number | null }) {
+  const focusedRowRef = useRef<HTMLTableRowElement | null>(null);
   const [leads, setLeads] = useState<AssignmentLead[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [savingId, setSavingId] = useState<number | null>(null);
@@ -30,6 +32,12 @@ export function AgentLeadsView() {
   const [stageMenuPosition, setStageMenuPosition] = useState({ top: 0, left: 0 });
   const [error, setError] = useState("");
   const stageMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (isLoading || focusLeadId === null) return;
+    focusedRowRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+    focusedRowRef.current?.focus({ preventScroll: true });
+  }, [isLoading, focusLeadId, leads]);
 
   useEffect(() => {
     const session = readAuthSession();
@@ -91,7 +99,10 @@ export function AgentLeadsView() {
     <section className="assignments-view agent-leads-view">
       <header className="assignments-header">
         <div><span>MY WORK</span><h1 className="view-title">Leads</h1><p>Assigned leads organized by campaign.</p></div>
-        <strong>{leads.length} assigned {leads.length === 1 ? "lead" : "leads"}</strong>
+        <div className="dashboard-header-actions">
+          <NotificationBell />
+          <strong>{leads.length} assigned {leads.length === 1 ? "lead" : "leads"}</strong>
+        </div>
       </header>
       {campaigns.map(([campaign, rows]) => (
         <section className="agent-campaign-group" key={campaign}>
@@ -100,7 +111,10 @@ export function AgentLeadsView() {
             <table className="leads-table agent-leads-table">
               <thead><tr><th>Owner / Property</th><th>Signals</th><th>Stage</th><th>Last activity</th><th>Phone</th></tr></thead>
               <tbody>{rows.map((lead) => (
-                <tr key={lead.id}>
+                <tr key={lead.id}
+                  ref={lead.id === focusLeadId ? focusedRowRef : undefined}
+                  tabIndex={lead.id === focusLeadId ? -1 : undefined}
+                  style={lead.id === focusLeadId ? { outline: "2px solid var(--accent)", outlineOffset: "-2px" } : undefined}>
                   <td><strong>{lead.owner_name || lead.phone || "Unnamed owner"}</strong><span className="leads-address">{lead.property_address || "No address on file"}{lead.area ? ` · ${lead.area}` : ""}</span></td>
                   <td><span className="leads-signals">{lead.signals.length ? lead.signals.map((signal) => <span key={signal.key} className="leads-signal">{signal.label}</span>) : <span className="leads-none">—</span>}</span></td>
                   <td><button
@@ -130,6 +144,9 @@ export function AgentLeadsView() {
         </section>
       ))}
       {isLoading ? <p className="sms-muted">Loading assigned leads…</p> : null}
+      {!isLoading && !error && focusLeadId !== null && !leads.some((lead) => lead.id === focusLeadId) ? (
+        <p role="status">This lead is no longer assigned to you.</p>
+      ) : null}
       {!isLoading && leads.length === 0 ? <div className="leads-empty agent-leads-empty"><div>◎</div><h3>No leads assigned yet</h3><p>Leads will appear here after your Area Broker assigns them to you.</p></div> : null}
       {error ? <p className="sms-toast error" role="alert">{error}</p> : null}
       {openStageId !== null ? createPortal((() => {

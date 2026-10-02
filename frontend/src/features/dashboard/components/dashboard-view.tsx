@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Brand } from "@/components/brand/brand";
 import {
@@ -19,7 +19,11 @@ import { AgentLeadsView } from "@/features/assignments/components/agent-leads-vi
 import { getAgentOverview, getBrokerOverview, getMyBroker } from "@/features/assignments/api/assignments-api";
 import type { AgentOverview, BrokerOverview } from "@/features/assignments/types/assignments.types";
 import { CalendarContainer } from "@/features/calendar/calendar-container";
-type DashboardTab = "overview" | "directory" | "assignments" | "leads" | "campaigns" | "followups"|"calendar";
+import { NotificationBell} from "./notification-bell";
+import { UpcomingEvents } from "./upcoming-events";
+import {RealtimeProvider} from"../realtimeProvider/realtimeProvider"
+import { NotificationProvider} from "./notification-provider"
+import { actionFromUrl, parseNotificationAction, type DashboardTab, type NotificationAction } from "./notification-action";
 
 type InviteDropdownProps = {
   name: string;
@@ -46,7 +50,7 @@ function InviteDropdown({ name, label, value, placeholder = "Select", options,
     window.addEventListener("pointerdown", close);
     return () => window.removeEventListener("pointerdown", close);
   }, [open]);
- 
+
   return (
     <div className={`invite-dropdown${open ? " open" : ""}`} ref={rootRef}>
       <input type="hidden" name={name} value={value} />
@@ -187,6 +191,9 @@ export function DashboardView() {
   const [isNavOpen, setIsNavOpen] = useState(false);
   /** Set when the Lead Pool sends the broker to a particular SMS thread. */
   const [focusConversationId, setFocusConversationId] = useState<number | null>(null);
+  const [focusBookingId, setFocusBookingId] = useState<number | null>(null);
+  const [focusLeadId, setFocusLeadId] = useState<number | null>(null);
+  const [notificationNavigationId, setNotificationNavigationId] = useState(0);
   /** The draft the Lead Pool just created, waiting to be composed in Campaigns. */
   const [draftCampaignId, setDraftCampaignId] = useState<number | null>(null);
   /** Set when Campaigns sends the broker to one campaign's replies. */
@@ -201,6 +208,8 @@ export function DashboardView() {
   useEffect(() => {
     const session = readAuthSession();
     if (!session) {
+      const action = actionFromUrl(window.location.pathname + window.location.search);
+      if (action) sessionStorage.setItem("listingiq-pending-notification", JSON.stringify(action));
       router.replace("/login");
       return;
     }
@@ -209,7 +218,7 @@ export function DashboardView() {
       return;
     }
     if (params.role && params.role !== session.user.role) {
-      router.replace(`/dashboard/${session.user.role}`);
+      router.replace(`/dashboard/${session.user.role}${window.location.search}`);
       return;
     }
     markActivity();
@@ -292,7 +301,42 @@ export function DashboardView() {
       });
     return () => controller.abort();
   }, [user?.role]);
+useEffect(() => {
+  if (user?.role !== "agent") return;
 
+  const refreshUpcomingEvents = () => {
+    const session = readAuthSession();
+
+    if (!session) return;
+
+    getAgentOverview(
+      session.access_token
+    )
+      .then((response) => {
+        setAgentOverview(response);
+        setAgentOverviewError("");
+      })
+      .catch((reason: unknown) => {
+        setAgentOverviewError(
+          reason instanceof Error
+            ? reason.message
+            : "Could not refresh upcoming events."
+        );
+      });
+  };
+
+  window.addEventListener(
+    "listingiq-calendar-event",
+    refreshUpcomingEvents
+  );
+
+  return () => {
+    window.removeEventListener(
+      "listingiq-calendar-event",
+      refreshUpcomingEvents
+    );
+  };
+}, [user?.role]);
   // End the session after 8 hours of inactivity, refreshing the access token
   // silently for as long as the user keeps working.
   useEffect(() => {
@@ -363,8 +407,7 @@ export function DashboardView() {
 
   /** Choosing a tab closes the drawer so the phone lands on the content. */
   function openTab(tab: DashboardTab): void {
-    setView(tab);
-    setIsNavOpen(false);
+    navigateDashboard({ view: tab });
   }
 
   /**
@@ -372,9 +415,73 @@ export function DashboardView() {
    * available, but no cross-page action depends on it.
    */
   function openConversation(conversationId: number): void {
-    setFocusConversationId(conversationId);
-    setView("followups");
+    navigateDashboard({ view: "followups", conversation_id: conversationId });
   }
+
+  const navigateDashboard = useCallback((action: NotificationAction) => {
+    const session = readAuthSession();
+    const role = session?.user.role;
+    let target = action.view;
+    if (target === "assignments" && role === "agent") target = "leads";
+    if ((target === "directory" && role !== "hob") ||
+        (target === "assignments" && role !== "broker") ||
+        (target === "campaigns" && role === "agent")) target = "overview";
+    setFocusConversationId(action.conversation_id ?? null);
+    setFocusBookingId(action.booking_id ?? null);
+    setFocusLeadId(action.lead_id ?? null);
+    setFollowUpCampaignId(action.view === "followups" ? action.campaign_id ?? null : null);
+    setDraftCampaignId(action.view === "campaigns" ? action.campaign_id ?? null : null);
+    setNotificationNavigationId((current) => current + 1);
+    setView(target);
+    setIsNavOpen(false);
+    const destination: NotificationAction = { view: target };
+    if (target === action.view) {
+      const keys = target === "followups" ? ["conversation_id", "campaign_id"] as const
+        : target === "calendar" ? ["booking_id"] as const
+        : target === "leads" || target === "assignments" ? ["lead_id"] as const
+        : target === "campaigns" ? ["campaign_id"] as const : [];
+      for (const key of keys) {
+        const id = action[key];
+        if (id !== undefined) destination[key] = id;
+      }
+    }
+    try {
+      if (session) sessionStorage.setItem(`listingiq-dashboard:${session.user.id}`, JSON.stringify(destination));
+    } catch { /* Navigation still works when browser storage is unavailable. */ }
+    // Consume incoming push links without exposing dashboard state in the URL.
+    const url = new URL(window.location.href);
+    for (const key of ["view", "conversation_id", "booking_id", "lead_id", "campaign_id"]) {
+      url.searchParams.delete(key);
+    }
+    window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    let pendingAction: NotificationAction | null = null;
+    let savedAction: NotificationAction | null = null;
+    try {
+      pendingAction = parseNotificationAction(JSON.parse(sessionStorage.getItem("listingiq-pending-notification") || "null"));
+      sessionStorage.removeItem("listingiq-pending-notification");
+      savedAction = parseNotificationAction(JSON.parse(sessionStorage.getItem(`listingiq-dashboard:${user.id}`) || "null"));
+    } catch { /* Ignore expired or malformed navigation state. */ }
+    const initialAction = actionFromUrl(window.location.pathname + window.location.search) ?? pendingAction ?? savedAction;
+    if (initialAction) {
+      // Hydrate navigation from browser URL/storage after authentication.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      navigateDashboard(initialAction);
+    }
+    const handlePushNavigation = (event: MessageEvent) => {
+      if (event.data?.type !== "NOTIFICATION_NAVIGATE") return;
+      const action = parseNotificationAction(event.data.action) ?? actionFromUrl(event.data.url);
+      if (action) {
+        navigateDashboard(action);
+        event.ports[0]?.postMessage({ handled: true });
+      }
+    };
+    navigator.serviceWorker?.addEventListener("message", handlePushNavigation);
+    return () => navigator.serviceWorker?.removeEventListener("message", handlePushNavigation);
+  }, [user, navigateDashboard]);
 
   function logout(): void {
     clearAuthSession();
@@ -386,6 +493,8 @@ export function DashboardView() {
   const brokerageDomain = user.email.split("@")[1];
 
   return (
+    <RealtimeProvider>
+      <NotificationProvider onNavigate={navigateDashboard}>
     <main className={`dashboard-shell${isNavOpen ? " nav-open" : ""}`}>
       {/* Phone only: a bar that holds the drawer toggle above the content. */}
       <header className="dashboard-topbar">
@@ -530,6 +639,7 @@ export function DashboardView() {
             screens that carry their own headings and need the vertical space. */}
         {view === "overview" ? (
           <header className="dashboard-header">
+
             <div>
               <span>{user.role.toUpperCase()} WORKSPACE</span>
               <h1 className="view-title">Good to see you, {user.first_name}.</h1>
@@ -538,19 +648,22 @@ export function DashboardView() {
                 {user.role === "agent" ? ` · Area Broker: ${agentBrokerName || "Not assigned"}` : ""}
               </p>
             </div>
-            <div className="dashboard-avatar" aria-label={user.full_name}>
-              {user.first_name.charAt(0)}{user.last_name.charAt(0)}
+
+            <div className="dashboard-header-actions">
+              <NotificationBell />
+              <div className="dashboard-avatar" aria-label={user.full_name}>
+                {user.first_name.charAt(0)}{user.last_name.charAt(0)}
+              </div>
             </div>
           </header>
         ) : null}
 
-        {view === "leads" && user.role === "agent" ? <AgentLeadsView /> : null}
+        {view === "leads" && user.role === "agent" ? <AgentLeadsView key={notificationNavigationId} focusLeadId={focusLeadId} /> : null}
 
         {view === "leads" && user.role !== "agent" ? (
           <LeadPool
             onDraftCampaign={(campaignId) => {
-              setDraftCampaignId(campaignId);
-              setView("campaigns");
+              navigateDashboard({ view: "campaigns", campaign_id: campaignId });
             }}
             onOpenConversation={openConversation}
           />
@@ -628,9 +741,7 @@ export function DashboardView() {
             draftId={draftCampaignId}
             onDraftHandled={() => setDraftCampaignId(null)}
             onOpenFollowUps={(campaignId) => {
-              setFocusConversationId(null);
-              setFollowUpCampaignId(campaignId);
-              setView("followups");
+              navigateDashboard({ view: "followups", campaign_id: campaignId });
             }}
             onOpenConversation={openConversation}
           />
@@ -638,12 +749,13 @@ export function DashboardView() {
 
         {view === "followups" ? (
           <FollowUpsBoard
+            key={notificationNavigationId}
             focusConversationId={focusConversationId}
             campaignId={followUpCampaignId}
           />
         ) : null}
-        
-      {view === "calendar" ? <CalendarContainer /> : null}
+
+      {view === "calendar" ? <CalendarContainer key={notificationNavigationId} focusBookingId={focusBookingId} /> : null}
         {view === "overview" ? (
         <>
         <section className="dashboard-panel">
@@ -719,6 +831,32 @@ export function DashboardView() {
                   <div><strong>{formatResponseTime(agentOverview.average_handling_seconds)}</strong><small>Average handling time</small></div>
                 </div>
               </article>
+              <article className="agent-analytics-card">
+  <div>
+    <span>RESPONSE PERFORMANCE</span>
+    <h3>Customer replies</h3>
+  </div>
+
+  <div className="agent-paired-metrics">
+    <div>
+      <strong>
+        {formatResponseTime(
+          agentOverview.average_response_seconds
+        )}
+      </strong>
+      <small>Average response time</small>
+    </div>
+
+    <div>
+      <strong>
+        {agentOverview.reply_rate != null
+          ? `${agentOverview.reply_rate}%`
+          : "—"}
+      </strong>
+      <small>Reply rate</small>
+    </div>
+  </div>
+</article>
 
               <article className="agent-analytics-card">
                 <div><span>FOLLOW-UP WORKLOAD</span><h3>Replies needing action</h3></div>
@@ -734,7 +872,12 @@ export function DashboardView() {
                   <div><label><span>Completed leads</span><b>{agentOverview.completed_leads}</b></label><i><span style={{ width: `${agentOverview.completion_rate}%` }} /></i></div>
                 </div>
               </article>
+              <UpcomingEvents
+                events={agentOverview.upcoming_events}
+                onOpenCalendar={(bookingId) => navigateDashboard({ view: "calendar", booking_id: bookingId })}
+              />
             </div>
+
           ) : null}
           {user.role === "agent" && !agentOverview && !agentOverviewError ? <p className="sms-muted">Loading assignment analytics…</p> : null}
           {user.role === "agent" && agentOverviewError ? <p className="sms-toast error" role="alert">{agentOverviewError}</p> : null}
@@ -780,5 +923,7 @@ export function DashboardView() {
         ) : null}
       </section>
     </main>
+    </NotificationProvider>
+    </RealtimeProvider>
   );
 }

@@ -29,6 +29,7 @@ from ..sms.knowledge import search_bobbie_knowledge
 from ..sms.knowledge_index import bobbie_knowledge
 from ..sms.outreach import build_initial_outreach, build_single_lead_context
 from .auth import get_current_user, get_db
+from ..reminder.notification import list_notifications, update_notification_read_status, mark_conversation_notifications_read, read_all_notifications
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -238,7 +239,7 @@ def send_message(
         service.hand_to_broker(session, conversation)
 
     try:
-        return service.send_and_store_message(session, conversation, text, 'broker.message')
+        return service.send_and_store_message(session, conversation, text, 'broker.message',sender_user_id=current_user.id)
     except service.SmsDeliveryError as error:
         raise HTTPException(status_code=502, detail=str(error))
 
@@ -295,45 +296,62 @@ def delete_conversation(conversation_id: int, current_user: User = Depends(get_c
 
 
 
-class FakeBookingCreate(BaseModel):
-    phone: str
-    name: str
-    title: str = "Fake Test Meeting"
-    start_at: str
-    end_at: str
-
-@router.post('/calendar/bookings')
-def create_fake_booking(
-    payload: FakeBookingCreate,
+@router.get("/notification/all-notifications")
+def get_all_notifications(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
 ):
-    """
-    Create a test/fake booking for the currently authenticated user.
+    print(current_user.id)
+    notifications = list_notifications(session, current_user.id)
+    from fastapi.encoders import jsonable_encoder
+    from ..reminder.actions import action_for_notification
 
-    The user_id is taken from the JWT and cannot be supplied by the client.
-    """
-    _require_sms_access(current_user)
+    return {"notifications": [
+        {**jsonable_encoder(notification), "action": action_for_notification(notification)}
+        for notification in notifications
+    ]}
+@router.patch("/notification/read-all")
+def mark_all_notifications_read(
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+):
+    return read_all_notifications(session, current_user.id)
 
-    try:
-        booking = calendar_service.create_booking(
-            session=session,
-            user_id=current_user.id,
-            phone=payload.phone,
-            name=payload.name,
-            title=payload.title,
-            start_at=payload.start_at,
-            end_at=payload.end_at,
-        )
-    except calendar_service.SlotTakenError as error:
-        raise HTTPException(
-            status_code=409,
-            detail=str(error),
-        )
-    except ValueError as error:
-        raise HTTPException(
-            status_code=400,
-            detail=str(error),
-        )
 
-    return booking
+class NotificationStatusRequest(BaseModel):
+    notification_id: int
+
+
+@router.post("/notification/updateStatus")
+def update_read_status(
+    payload: NotificationStatusRequest,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+):
+    updated_notification = update_notification_read_status(
+        session,
+        current_user.id,
+        payload.notification_id,
+    )
+
+    return {
+        "notification": updated_notification
+    }
+@router.patch(
+    "/notification/conversation/{conversation_id}/read"
+)
+def mark_converstaion(
+    conversation_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+):
+    marked_conversation=mark_conversation_notifications_read(
+        session,
+        conversation_id,
+        current_user
+    )
+    return{
+        "ok": True,
+        "conversation_id": conversation_id,
+        "length":marked_conversation
+    }
