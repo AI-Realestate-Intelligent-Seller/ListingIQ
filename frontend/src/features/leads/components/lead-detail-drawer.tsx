@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { fetchLead } from "../api/leads-api";
 import type { LeadDetail, LeadStage } from "../types/leads.types";
@@ -25,13 +25,113 @@ const LEAD_STATUS_LABELS: Record<string, string> = {
 
 /** "listing_price" -> "Listing price"; the vendor's own keys stay recognisable. */
 function attributeLabel(key: string): string {
-  const words = key.replace(/[_-]+/g, " ").trim();
+  const acronyms: Record<string, string> = {
+    akas: "Aliases",
+    dnc: "DNC",
+    dob: "DOB",
+    id: "ID",
+    tcpa: "TCPA",
+  };
+  const known = acronyms[key.toLowerCase()];
+  if (known) return known;
+  const words = key
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .trim();
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
-/** Trailing ".0" on every number is spreadsheet noise, not data. */
-function attributeValue(value: string): string {
-  return /^-?\d+\.0$/.test(value) ? value.slice(0, -2) : value;
+/**
+ * Imported CSV facts are usually strings, while provider-distributed leads
+ * can contain booleans, arrays and nested objects. Convert every JSON value to
+ * readable text before it reaches JSX so React never receives a raw object.
+ */
+function scalarValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "—";
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (typeof value === "number" || typeof value === "bigint") {
+    return String(value);
+  }
+  if (typeof value === "string") {
+    // Trailing ".0" on every number is spreadsheet noise, not data.
+    return /^-?\d+\.0$/.test(value) ? value.slice(0, -2) : value;
+  }
+  return String(value);
+}
+
+function attributeValue(value: unknown): ReactNode {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "—";
+    return (
+      <div className="leads-detail-array">
+        {value.map((item, index) => {
+          const isGroup = item !== null && typeof item === "object";
+          return isGroup ? (
+            <details className="leads-detail-nested-group leads-detail-array-item" key={index}>
+              <summary>Record {index + 1}</summary>
+              <div className="leads-detail-group-content">{attributeValue(item)}</div>
+            </details>
+          ) : (
+            <div className="leads-detail-array-item" key={index}>{attributeValue(item)}</div>
+          );
+        })}
+      </div>
+    );
+  }
+  if (value !== null && typeof value === "object") {
+    const fields = Object.entries(value as Record<string, unknown>);
+    if (fields.length === 0) return "—";
+    return (
+      <dl className="leads-detail-nested">
+        {fields.map(([key, item]) => {
+          const isGroup = item !== null && typeof item === "object";
+          return isGroup ? (
+            <div className="leads-detail-nested-row" key={key}>
+              <details className="leads-detail-nested-group">
+                <summary>{attributeLabel(key)}</summary>
+                <div className="leads-detail-group-content">{attributeValue(item)}</div>
+              </details>
+            </div>
+          ) : (
+            <div key={key}>
+              <dt>{attributeLabel(key)}</dt>
+              <dd>{attributeValue(item)}</dd>
+            </div>
+          );
+        })}
+      </dl>
+    );
+  }
+  return scalarValue(value);
+}
+
+type DetailSectionProps = {
+  title: string;
+  children: ReactNode;
+  defaultOpen?: boolean;
+  fullWidth?: boolean;
+  summaryValue?: ReactNode;
+};
+
+function DetailSection({
+  title,
+  children,
+  defaultOpen = false,
+  fullWidth = false,
+  summaryValue,
+}: DetailSectionProps) {
+  return (
+    <details
+      className={`leads-drawer-section leads-detail-section${fullWidth ? " leads-detail-full" : ""}`}
+      open={defaultOpen}
+    >
+      <summary>
+        <span>{title}</span>
+        {summaryValue ? <span className="leads-detail-summary-value">{summaryValue}</span> : null}
+      </summary>
+      <div className="leads-detail-section-content">{children}</div>
+    </details>
+  );
 }
 
 function formatMoment(value: string | null): string {
@@ -72,9 +172,8 @@ type LeadDetailDrawerProps = {
 };
 
 /**
- * A right-hand panel with everything known about one property and its owner.
- * Fixed-position and full-height, so it behaves the same on a laptop and a
- * phone — only its width changes.
+ * A large in-page modal with everything known about one property and owner.
+ * It leaves the underlying workspace in place and owns its own scrolling.
  */
 export function LeadDetailDrawer({
   leadId,
@@ -92,6 +191,7 @@ export function LeadDetailDrawer({
   useEffect(() => {
     if (leadId === null) return;
     const controller = new AbortController();
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset request state when the selected lead changes
     setIsLoading(true);
     setErrorMessage("");
     fetchLead(leadId, accessToken, controller.signal)
@@ -114,6 +214,15 @@ export function LeadDetailDrawer({
     return () => window.removeEventListener("keydown", onKey);
   }, [leadId, onClose]);
 
+  useEffect(() => {
+    if (leadId === null) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [leadId]);
+
   const isOpen = leadId !== null;
   // Keep the previous lead mounted while a new one loads so the panel never blinks.
   const shown = lead && lead.id === leadId ? lead : null;
@@ -126,7 +235,7 @@ export function LeadDetailDrawer({
         onClick={onClose}
       />
       <aside
-        className={`leads-drawer${isOpen ? " open" : ""}`}
+        className={`leads-drawer leads-detail-modal${isOpen ? " open" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-label="Lead details"
@@ -148,8 +257,7 @@ export function LeadDetailDrawer({
 
           {shown ? (
             <>
-              <section className="leads-drawer-section">
-                <h4>Property</h4>
+              <DetailSection title="Property" defaultOpen>
                 <dl className="leads-facts">
                   <div>
                     <dt>Address</dt>
@@ -160,31 +268,34 @@ export function LeadDetailDrawer({
                     <dd>{shown.area || "Not on file"}</dd>
                   </div>
                 </dl>
-              </section>
+              </DetailSection>
 
-              <section className="leads-drawer-section">
-                <h4>Owner</h4>
+              <DetailSection title="Ownership & contacts" defaultOpen>
                 <dl className="leads-facts">
                   <div>
-                    <dt>Name</dt>
+                    <dt>Property owners</dt>
                     <dd>{shown.owner_name || "Not on file"}</dd>
                   </div>
                   <div>
-                    <dt>Phone</dt>
-                    <dd>
-                      {shown.phone ? (
-                        <a href={`tel:${shown.phone}`}>{shown.phone}</a>
-                      ) : (
-                        "Not on file"
-                      )}
+                    <dt>Contacts</dt>
+                    <dd className="leads-owner-contacts">
+                      {shown.phone_numbers.length > 0 ? shown.phone_numbers.map((contact) => (
+                        <span className="leads-owner-contact" key={contact.phone}>
+                          <span>{contact.owner_name || shown.owner_name || "Owner not identified"}</span>
+                          {contact.dnc ? (
+                            <span>{contact.phone} <strong>DNC</strong></span>
+                          ) : (
+                            <a href={`tel:${contact.phone}`}>{contact.phone}</a>
+                          )}
+                        </span>
+                      )) : "Not on file"}
                     </dd>
                   </div>
                 </dl>
-              </section>
+              </DetailSection>
 
               {Object.keys(shown.details).length > 0 ? (
-                <section className="leads-drawer-section">
-                  <h4>Property details</h4>
+                <DetailSection title="Property details" fullWidth>
                   <dl className="leads-facts">
                     {Object.entries(shown.details).map(([key, value]) => (
                       <div key={key}>
@@ -194,13 +305,13 @@ export function LeadDetailDrawer({
                     ))}
                   </dl>
                   <p className="leads-drawer-note">
-                    From the import. Bobbie may cite these facts, and nothing beyond them.
+                    From the provider/import. Raw contact and provider evidence is for broker review;
+                    Bobbie is grounded only in the approved property facts.
                   </p>
-                </section>
+                </DetailSection>
               ) : null}
 
-              <section className="leads-drawer-section">
-                <h4>Signals</h4>
+              <DetailSection title="Signals" defaultOpen>
                 {shown.signals.length === 0 ? (
                   <p className="leads-drawer-note">No signals on this record.</p>
                 ) : (
@@ -210,25 +321,25 @@ export function LeadDetailDrawer({
                     ))}
                   </div>
                 )}
-              </section>
+              </DetailSection>
 
               {shown.outreach_reason ? (
-                <section className="leads-drawer-section">
-                  <h4>Outreach reason</h4>
+                <DetailSection title="Outreach reason">
                   <p className="leads-reason">{shown.outreach_reason}</p>
                   <p className="leads-drawer-note">
                     Came with the lead. Bobbie opens with this rather than a generic line.
                   </p>
-                </section>
+                </DetailSection>
               ) : null}
 
-              <section className="leads-drawer-section">
-                <h4>
-                  Score
+              <DetailSection
+                title="Score"
+                summaryValue={(
                   <span className={`leads-score ${shown.score >= 80 ? "strong" : shown.score >= 70 ? "fair" : "plain"}`}>
                     {shown.score}
                   </span>
-                </h4>
+                )}
+              >
                 <ul className="leads-score-breakdown">
                   {shown.score_breakdown.map((part) => (
                     <li key={part.label}>
@@ -241,10 +352,9 @@ export function LeadDetailDrawer({
                   A transparent sum of signals and contactability — it orders your review
                   queue, it does not predict a sale.
                 </p>
-              </section>
+              </DetailSection>
 
-              <section className="leads-drawer-section">
-                <h4>Status</h4>
+              <DetailSection title="Status" defaultOpen>
                 <dl className="leads-facts">
                   <div>
                     <dt>Stage</dt>
@@ -267,11 +377,10 @@ export function LeadDetailDrawer({
                     <dd>{formatMoment(shown.refreshed_at)}</dd>
                   </div>
                 </dl>
-              </section>
+              </DetailSection>
 
               {shown.conversation ? (
-                <section className="leads-drawer-section">
-                  <h4>Conversation</h4>
+                <DetailSection title="Conversation">
                   <dl className="leads-facts">
                     <div>
                       <dt>Handled by</dt>
@@ -301,7 +410,7 @@ export function LeadDetailDrawer({
                       <cite>{formatMoment(shown.conversation.latest_message_at)}</cite>
                     </blockquote>
                   ) : null}
-                </section>
+                </DetailSection>
               ) : null}
             </>
           ) : null}

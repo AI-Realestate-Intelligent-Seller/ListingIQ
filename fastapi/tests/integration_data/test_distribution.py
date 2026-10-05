@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from pathlib import Path
@@ -16,7 +17,8 @@ from app.db import Base
 from app.dealmachine import models as dm
 from app.integration_data import service
 from app.integration_data.models import CombinedProperty, DistributionRun
-from app.models import Lead, PlatformAuditLog, User
+from app.leads import service as lead_service
+from app.models import Campaign, Lead, PlatformAuditLog, User
 from app.propertyradar import models as pr
 from app.routes import integration_data as routes
 from app.routes.integration_data import DistributionRequest, router
@@ -209,6 +211,152 @@ def test_live_distribution_is_atomic_tenant_scoped_and_idempotent(db):
     assert {row.brokerage_id for row in db.query(CombinedProperty)} == {"A", "B"}
     assert service.preview_distribution(db, request())["allocated"] == 0
 
+
+def test_batch_contact_metadata_and_owner_phone_relationship_survive_distribution(db):
+    row = batch_property(db, "BD-CONTACT")
+    row.operational_copy = {
+        "_quick_lists_run": "discovery",
+        "_stages": {"contacts": {"status": "completed", "data": [{
+          "property": {"owners": [
+            {"name": {"full": "Christopher Theobald"}},
+            {"name": {"full": "Moriah Theobald"}},
+        ]},
+        "persons": [{
+            "name": {
+                "full": "Moriah M Garrity",
+                "akas": [{"full": "Moriah Theobald", "rank": 1}],
+            },
+            "emails": [{"email": "owner@example.com", "rank": 1}],
+            "phones": [
+                {"number": "2193748814", "dnc": False, "reachable": False,
+                 "carrier": "Indiana Bell", "type": "Land Line"},
+                {"number": "2193843336", "dnc": True, "reachable": True,
+                 "carrier": "Verizon", "type": "Mobile"},
+                {"number": "8504193904", "dnc": False, "reachable": True,
+                 "carrier": "Eliska", "type": "Mobile"},
+            ],
+            "propertyOwner": True,
+          }],
+        }]}}
+    }
+    db.commit()
+
+    source = service.source_records(db, "batchdata", "live")[0]
+    assert source["data"]["provider_property_details"]["_id"] == "BD-CONTACT"
+    assert source["data"]["provider_property_details"]["address"]["city"] == "Chicago"
+    assert source["data"]["contacts"][0]["owner_name"] == "Moriah Theobald"
+    assert source["data"]["contacts"][0]["emails"][0]["email"] == "owner@example.com"
+    assert source["data"]["contact_match_metadata"][0]["property"]["owners"][1][
+        "name"
+    ]["full"] == "Moriah Theobald"
+    assert {phone["owner_name"] for phone in source["data"]["phones"]} == {
+        "Moriah Theobald"
+    }
+
+    service.combine(db, "live")
+    plan = service.preview_distribution(db, request())
+    service.distribute(
+        db,
+        request(confirmed=True, reason="contact metadata test",
+                preview_hash=plan["preview_hash"]),
+        1,
+    )
+    lead = db.query(Lead).filter_by(source="provider_distribution").one()
+    details = json.loads(lead.details)
+    assert details["contacts"][0]["owner_name"] == "Moriah Theobald"
+    assert details["_phone_numbers"][1]["dnc"] is True
+    assert details["_phone_numbers"][0]["carrier"] == "Indiana Bell"
+    approved = lead_service.conversation_property_details(lead)
+    assert "provider_property_details" not in approved
+    assert "contacts" not in approved
+    assert approved["address"] == "123 Main Street, Chicago, IL, 60601"
+
+    # A row distributed before rich contact metadata existed is repaired from
+    # the immutable provider/source records without redistributing the lead.
+    lead.details = json.dumps({
+        "address": details["address"],
+        "phones": [
+            {"number": phone["number"], "dnc": phone["dnc"]}
+            for phone in details["phones"]
+        ],
+        "_phone_numbers": [
+            {"phone": phone["number"], "number": phone["number"],
+             "dnc": phone["dnc"]}
+            for phone in details["phones"]
+        ],
+    })
+    lead.refreshed_at = None
+    db.commit()
+    assert service.backfill_distributed_leads(db, [lead]) is True
+    repaired = json.loads(lead.details)
+    assert repaired["provider_property_details"]["_id"] == "BD-CONTACT"
+    assert repaired["contacts"][0]["owner_name"] == "Moriah Theobald"
+    assert {phone["owner_name"] for phone in repaired["_phone_numbers"]} == {
+        "Moriah Theobald"
+    }
+    assert lead.refreshed_at is not None
+
+    refreshed = json.loads(json.dumps(row.operational_copy))
+    refreshed["_stages"]["contacts"]["data"][0]["persons"][0]["emails"][0][
+        "tested"
+    ] = True
+    row.operational_copy = refreshed
+    db.commit()
+    assert service.combine(db, "live")["updated"] == 1
+    refreshed_details = json.loads(lead.details)
+    assert refreshed_details["contacts"][0]["emails"][0]["tested"] is True
+    assert lead.refreshed_at is not None
+
+    campaign = Campaign(
+        user_id=lead.user_id,
+        name="Legacy provider draft",
+        message_template="Hi {{first_name}}",
+        status="draft",
+    )
+    db.add(campaign)
+    db.flush()
+    legacy_details = {
+        "phones": [
+            {"number": phone["number"], "dnc": phone["dnc"]}
+            for phone in details["phones"]
+        ],
+        "_phone_numbers": [
+            {"phone": phone["number"], "number": phone["number"],
+             "dnc": phone["dnc"]}
+            for phone in details["phones"]
+        ],
+        "_campaign_original": {
+            "owner_name": "Christopher Theobald; Moriah Theobald",
+            "phone": "+12193748814",
+            "dnc": False,
+        },
+    }
+    lead.campaign_id = campaign.id
+    lead.owner_name = "Christopher Theobald; Moriah Theobald"
+    lead.details = json.dumps(legacy_details)
+    clone = Lead(
+        user_id=lead.user_id,
+        owner_name="Christopher Theobald; Moriah Theobald",
+        phone="+18504193904",
+        property_address=lead.property_address,
+        area=lead.area,
+        source="provider_distribution_contact",
+        campaign_id=campaign.id,
+        details=json.dumps({
+            "_parent_lead_id": lead.id,
+            "_phone_numbers": [{
+                "phone": "+18504193904", "number": "+18504193904", "dnc": False,
+            }],
+        }),
+    )
+    db.add(clone)
+    db.commit()
+    assert service.backfill_distributed_leads(db, [lead, clone]) is True
+    assert lead.owner_name == "Moriah Theobald"
+    assert clone.owner_name == "Moriah Theobald"
+    assert json.loads(lead.details)["_campaign_original"]["owner_name"] == (
+        "Christopher Theobald; Moriah Theobald"
+    )
 
 def test_stale_preview_and_changed_rules_are_rejected(db):
     batch_property(db, "BD1")

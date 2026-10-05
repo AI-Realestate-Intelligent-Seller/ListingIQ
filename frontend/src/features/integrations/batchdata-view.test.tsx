@@ -420,7 +420,7 @@ describe("Internal Console BatchData", () => {
     ).toBe(true);
   });
 
-  it("uses the shared six-section flow and provider data subtabs", async () => {
+  it("uses the BatchData five-section flow without Configuration", async () => {
     render(<BatchDataView detail />);
     await screen.findByText("Connection status");
     expect(screen.getByText("Free manual action")).toBeTruthy();
@@ -430,14 +430,16 @@ describe("Internal Console BatchData", () => {
         .filter((button) =>
           [
             "Connection",
-            "Configuration",
             "Data",
             "Usage & Limits",
             "Activity",
             "History",
           ].includes(button.textContent || ""),
         ),
-    ).toHaveLength(6);
+    ).toHaveLength(5);
+    expect(
+      screen.queryByRole("button", { name: "Configuration" }),
+    ).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Data" }));
     expect(screen.getByText("Paid manual action")).toBeTruthy();
     expect(
@@ -456,19 +458,4 @@ describe("Internal Console BatchData", () => {
     );
   });
 
-  it("keeps monitoring validation blocked until PAYG prices are configured", async () => {
-    render(<BatchDataView detail />);
-    await screen.findByText("Connection status");
-    fireEvent.click(screen.getByRole("button", { name: "Configuration" }));
-    expect(screen.getByText("Blocked: PAYG prices not confirmed")).toBeTruthy();
-    await waitFor(() =>
-      expect(
-        (
-          screen.getByRole("button", {
-            name: "Validate Monitoring",
-          }) as HTMLButtonElement
-        ).disabled,
-      ).toBe(true),
-    );
-  });
 });

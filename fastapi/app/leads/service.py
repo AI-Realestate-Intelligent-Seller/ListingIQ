@@ -103,7 +103,24 @@ def lead_details(lead: Lead) -> dict:
     # Supplemental contact numbers are operational metadata, not property
     # attributes, so the details drawer must not render them as a house fact.
     parsed.pop('_phone_numbers', None)
+    parsed.pop('_campaign_original', None)
+    parsed.pop('_parent_lead_id', None)
     return parsed
+
+
+def conversation_property_details(lead: Lead) -> dict:
+    """Property facts Bobbie may use, excluding raw provider/contact evidence."""
+    details = lead_details(lead)
+    for key in (
+        'contacts',
+        'contact_match_metadata',
+        'phones',
+        'provider_property_details',
+        'provider_sources',
+        'distribution_run_id',
+    ):
+        details.pop(key, None)
+    return details
 
 
 def lead_phone_numbers(lead: Lead) -> list[dict]:
@@ -121,7 +138,10 @@ def lead_phone_numbers(lead: Lead) -> list[dict]:
                     continue
                 phone = str(item['phone']).strip()
                 if phone and all(row['phone'] != phone for row in stored):
-                    stored.append({'phone': phone, 'dnc': bool(item.get('dnc'))})
+                    row = {'phone': phone, 'dnc': bool(item.get('dnc'))}
+                    if item.get('owner_name'):
+                        row['owner_name'] = str(item['owner_name'])
+                    stored.append(row)
 
     if lead.phone and all(row['phone'] != lead.phone for row in stored):
         stored.insert(0, {'phone': lead.phone, 'dnc': bool(lead.dnc)})

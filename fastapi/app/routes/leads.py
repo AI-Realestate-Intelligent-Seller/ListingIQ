@@ -259,6 +259,11 @@ def lead_detail(lead_id: int, current_user: User = Depends(get_current_user),
             .first())
     if not lead:
         raise HTTPException(status_code=404, detail='Lead not found')
+    if lead.source in {'provider_distribution', 'provider_distribution_contact'}:
+        from ..integration_data.service import backfill_distributed_leads
+        if backfill_distributed_leads(session, [lead]):
+            session.commit()
+            session.refresh(lead)
     return leads_service.detail(session, lead)
 
 

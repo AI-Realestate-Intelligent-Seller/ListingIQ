@@ -20,6 +20,7 @@ export function IntegrationNavigation({
   activeSubtab,
   onSubtabChange,
   help,
+  sections = integrationSections,
 }: {
   provider: string;
   activeSection: IntegrationSection;
@@ -28,6 +29,7 @@ export function IntegrationNavigation({
   activeSubtab: string;
   onSubtabChange: (subtab: string) => void;
   help?: ReactNode;
+  sections?: readonly IntegrationSection[];
 }) {
   return (
     <div className="integration-navigation">
@@ -36,7 +38,7 @@ export function IntegrationNavigation({
           className="pr-tabs integration-main-tabs"
           aria-label={`${provider} sections`}
         >
-          {integrationSections.map((section) => (
+          {sections.map((section) => (
             <button
               key={section}
               className={activeSection === section ? "active" : ""}

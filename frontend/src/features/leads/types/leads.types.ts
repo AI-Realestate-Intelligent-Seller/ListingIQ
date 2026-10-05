@@ -11,7 +11,7 @@ export type Lead = {
   id: number;
   owner_name: string | null;
   phone: string | null;
-  phone_numbers: { phone: string; dnc: boolean }[];
+  phone_numbers: { phone: string; dnc: boolean; owner_name?: string }[];
   property_address: string | null;
   area: string | null;
   latitude: number | null;
@@ -36,7 +36,7 @@ export type Lead = {
 export type LeadDetail = Lead & {
   refreshed_at: string | null;
   /** Property attributes from the import: beds, baths, price, … */
-  details: Record<string, string>;
+  details: Record<string, unknown>;
   score_breakdown: { label: string; points: number }[];
   conversation: {
     id: number;

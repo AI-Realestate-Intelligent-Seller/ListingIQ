@@ -1,5 +1,7 @@
 """Tests for campaigns: drafting, the message template, sending and reporting."""
 
+import json
+
 import pytest
 
 from datetime import datetime
@@ -7,7 +9,7 @@ from datetime import datetime
 from app.leads import campaign as campaign_service
 from app.leads import template as message_template
 from app.leads.address import canonical
-from app.models import Conversation, Lead, Message
+from app.models import Campaign, Conversation, Lead, Message
 from app.sms import service
 
 BROKER_EMAIL = 'ather.shamim@linchpinglobal.net'
@@ -178,6 +180,66 @@ def test_creating_a_draft_holds_the_leads_and_sends_nothing(
     assert len(previews) == 3
     assert any('4517 W Adams St' in item['text'] for item in previews)
     assert all(item['text'].startswith('Hi ') for item in previews)
+
+
+def test_provider_lead_fans_out_only_to_non_dnc_numbers_with_contact_name(
+        make_user, sent_sms, session):
+    owner = make_user(BROKER_EMAIL, role='broker')
+    phones = [
+        {'number': '+12193748814', 'dnc': False, 'owner_name': 'Moriah Theobald'},
+        {'number': '+12193843336', 'dnc': True, 'owner_name': 'Moriah Theobald'},
+        {'number': '+12196711006', 'dnc': True, 'owner_name': 'Moriah Theobald'},
+        {'number': '+18504193904', 'dnc': False, 'owner_name': 'Moriah Theobald'},
+    ]
+    lead = Lead(
+        user_id=owner.id,
+        owner_name='Christopher Theobald; Moriah Theobald',
+        phone=phones[0]['number'],
+        property_address='3811 N Kildare Ave, Chicago, IL, 60641',
+        area='Chicago',
+        source='provider_distribution',
+        details=json.dumps({'phones': phones, '_phone_numbers': [
+            {**phone, 'phone': phone['number']} for phone in phones
+        ]}),
+    )
+    session.add(lead)
+    session.flush()
+    lead_id = lead.id
+    campaign = Campaign(
+        user_id=owner.id,
+        name='Chicago owners',
+        message_template='Hi {{first_name}}, about {{address}}.',
+        status='draft',
+    )
+    session.add(campaign)
+    session.commit()
+
+    assert campaign_service.attach(session, owner, campaign, [lead_id]) == []
+    recipients = campaign_service.preview(session, owner, campaign)['recipients']
+    assert len(recipients) == 2
+    assert {row['owner_name'] for row in recipients} == {'Moriah Theobald'}
+    assert {row['phone'] for row in recipients} == {
+        '+12193748814', '+18504193904',
+    }
+
+    campaign_service.release_draft_members(session, owner, campaign)
+    session.commit()
+    session.refresh(lead)
+    assert lead.owner_name == 'Christopher Theobald; Moriah Theobald'
+    assert session.query(Lead).filter_by(
+        source=campaign_service.PROVIDER_CONTACT_SOURCE
+    ).count() == 0
+
+    assert campaign_service.attach(session, owner, campaign, [lead_id]) == []
+
+    sent = campaign_service.send(session, owner, campaign)
+    assert len(sent['started']) == 2
+    assert {payload['to'] for payload in sent_sms} == {
+        '+12193748814', '+18504193904',
+    }
+    assert session.query(Conversation).filter(
+        Conversation.name == 'Moriah Theobald'
+    ).count() == 2
 
 
 def test_a_draft_reports_the_leads_it_could_not_take(

@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 
 import requests
@@ -6,6 +7,37 @@ import requests
 
 class ProviderError(RuntimeError):
     pass
+
+
+def _error_detail(response) -> str:
+    """Extract a bounded provider validation message without dumping its body."""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+
+    candidates = []
+    if isinstance(payload, dict):
+        candidates.extend(
+            payload.get(key) for key in ("message", "error", "errors", "detail")
+        )
+        status = payload.get("status")
+        if isinstance(status, dict):
+            candidates.extend(status.get(key) for key in ("text", "message", "error"))
+    elif isinstance(payload, list):
+        candidates.append(payload)
+
+    for value in candidates:
+        if value in (None, "", [], {}):
+            continue
+        if not isinstance(value, str):
+            import json
+
+            value = json.dumps(value, default=str)
+        value = re.sub(r"\s+", " ", value).strip()
+        if value:
+            return value[:500]
+    return ""
 
 
 class Client:
@@ -35,8 +67,10 @@ class Client:
             ) from error
         request_id = response.headers.get("x-request-id", uuid.uuid4().hex)
         if response.status_code >= 400:
+            detail = _error_detail(response)
             raise ProviderError(
-                f"BatchData returned HTTP {response.status_code}; request {request_id}"
+                f"BatchData returned HTTP {response.status_code}"
+                f"{f': {detail}' if detail else ''}; request {request_id}"
             )
         try:
             value = response.json()

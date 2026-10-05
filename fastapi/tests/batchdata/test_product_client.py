@@ -1,4 +1,6 @@
-from app.batchdata.client import Client
+import pytest
+
+from app.batchdata.client import Client, ProviderError
 
 
 def test_product_methods_omit_unsupported_internal_data_types(monkeypatch):
@@ -43,3 +45,30 @@ def test_contact_enrichment_has_its_own_provider_method(monkeypatch):
     payload = {"properties": [{"_id": "P1"}]}
     client.contact_enrichment(payload)
     assert calls == [("POST", "/api/v3/property/skip-trace", payload)]
+
+
+def test_provider_validation_detail_is_preserved_without_dumping_body(monkeypatch):
+    class Response:
+        def __init__(self):
+            self.status_code = 400
+            self.headers = {"x-request-id": "provider-request"}
+
+        @staticmethod
+        def json():
+            return {
+                "message": "quickList must be a supported value",
+                "debug": "must not be exposed",
+            }
+
+    monkeypatch.setenv("BATCHDATA_API_TOKEN", "server-token")
+    monkeypatch.setattr(
+        "app.batchdata.client.requests.request", lambda *args, **kwargs: Response()
+    )
+
+    with pytest.raises(ProviderError) as caught:
+        Client().request("POST", "/api/v1/property/search", {})
+
+    message = str(caught.value)
+    assert "quickList must be a supported value" in message
+    assert "provider-request" in message
+    assert "must not be exposed" not in message

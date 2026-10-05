@@ -29,9 +29,12 @@ from . import events as lead_events
 from . import reason_suggest
 from . import template as message_template
 from .importer import normalize_phone
-from .service import derive_stage, lead_details, outreach_reason, serialize, split_signals
+from .service import (conversation_property_details, derive_stage, outreach_reason,
+                      serialize, split_signals)
 
 MAX_CAMPAIGN_SIZE = 200
+PROVIDER_LEAD_SOURCE = 'provider_distribution'
+PROVIDER_CONTACT_SOURCE = 'provider_distribution_contact'
 
 
 # Said the same way everywhere a property turns out to be spoken for, and
@@ -193,6 +196,114 @@ def create_draft(session: Session, user: User, lead_ids: list[int],
     return campaign, left_behind
 
 
+def _stored_details(lead: Lead) -> dict:
+    try:
+        parsed = json.loads(lead.details or '{}')
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _provider_contacts(lead: Lead) -> list[dict]:
+    """Contactable provider numbers, retaining the person attached to each."""
+    if lead.source != PROVIDER_LEAD_SOURCE:
+        return []
+    details = _stored_details(lead)
+    candidates = details.get('_phone_numbers') or details.get('phones') or []
+    contacts: list[dict] = []
+    seen: set[str] = set()
+    for item in candidates:
+        if not isinstance(item, dict) or item.get('dnc') in (True, 'true', 'Y', 'yes', 1):
+            continue
+        number = normalize_phone(str(item.get('phone') or item.get('number') or ''))
+        if not number or number in seen:
+            continue
+        seen.add(number)
+        contacts.append({
+            **item,
+            'phone': number,
+            'owner_name': str(item.get('owner_name') or lead.owner_name or ''),
+        })
+    if not contacts and lead.phone and not lead.dnc:
+        contacts.append({'phone': normalize_phone(lead.phone),
+                         'owner_name': lead.owner_name or ''})
+    return contacts
+
+
+def _expand_provider_lead(session: Session, lead: Lead, campaign: Campaign) -> None:
+    """Represent each allowed phone as one independently deliverable lead row."""
+    contacts = _provider_contacts(lead)
+    if not contacts:
+        return
+    details = _stored_details(lead)
+    details['_campaign_original'] = {
+        'owner_name': lead.owner_name,
+        'phone': lead.phone,
+        'dnc': bool(lead.dnc),
+    }
+    first, *remaining = contacts
+    lead.owner_name = first['owner_name'] or lead.owner_name
+    lead.phone = first['phone']
+    lead.dnc = False
+    lead.details = json.dumps(details)
+
+    for contact in remaining:
+        clone_details = {
+            **details,
+            '_parent_lead_id': lead.id,
+            '_phone_numbers': [{**contact, 'phone': contact['phone']}],
+        }
+        clone_details.pop('_campaign_original', None)
+        clone = Lead(
+            user_id=lead.user_id,
+            owner_name=contact['owner_name'] or lead.owner_name,
+            phone=contact['phone'],
+            property_address=lead.property_address,
+            area=lead.area,
+            latitude=lead.latitude,
+            longitude=lead.longitude,
+            geocoding_status=lead.geocoding_status,
+            geocoding_provider=lead.geocoding_provider,
+            geocoded_at=lead.geocoded_at,
+            normalized_address=lead.normalized_address,
+            signals=lead.signals,
+            outreach_reason=lead.outreach_reason,
+            details=json.dumps(clone_details),
+            score=lead.score,
+            source=PROVIDER_CONTACT_SOURCE,
+            dnc=False,
+            campaign_id=campaign.id,
+        )
+        session.add(clone)
+    session.flush()
+
+
+def _restore_provider_master(lead: Lead) -> None:
+    details = _stored_details(lead)
+    original = details.pop('_campaign_original', None)
+    if isinstance(original, dict):
+        lead.owner_name = original.get('owner_name')
+        lead.phone = original.get('phone')
+        lead.dnc = bool(original.get('dnc'))
+        lead.details = json.dumps(details)
+
+
+def release_draft_members(session: Session, user: User, campaign: Campaign) -> None:
+    """Return real leads to the pool and discard generated contact rows."""
+    for lead in members(session, user, campaign):
+        if lead.source == PROVIDER_CONTACT_SOURCE:
+            session.delete(lead)
+            continue
+        if lead.source == PROVIDER_LEAD_SOURCE:
+            _restore_provider_master(lead)
+        lead.campaign_id = None
+        lead_events.log_event(
+            session, lead.id, lead_events.STAGE, 'released_from_campaign',
+            actor_type='broker', actor_id=user.id,
+            from_value=campaign.name, meta={'campaign_id': campaign.id}, commit=False,
+        )
+
+
 def attach(session: Session, user: User, campaign: Campaign, lead_ids: list[int]) -> list[dict]:
     """Move the broker's own leads into this draft. Returns the ones left behind.
 
@@ -217,6 +328,8 @@ def attach(session: Session, user: User, campaign: Campaign, lead_ids: list[int]
     found = {lead.id: lead for lead in session.query(Lead)
              .filter(Lead.user_id.in_(scope), Lead.id.in_(lead_ids))
              .all()}
+    from ..integration_data.service import backfill_distributed_leads
+    backfill_distributed_leads(session, list(found.values()))
     # Naming the campaign that holds a lead is more useful than "already taken".
     held_by = {row[0]: row[1] for row in session.query(Campaign.id, Campaign.name)
                .filter(Campaign.user_id.in_(scope)).all()}
@@ -225,6 +338,7 @@ def attach(session: Session, user: User, campaign: Campaign, lead_ids: list[int]
 
     left_behind: list[dict] = []
     eligible: list[int] = []
+    projected_recipients = len(members(session, user, campaign))
     for lead_id in lead_ids:
         lead = found.get(lead_id)
         if lead is None:
@@ -236,7 +350,7 @@ def attach(session: Session, user: User, campaign: Campaign, lead_ids: list[int]
             # to fix it.
             left_behind.append({'lead_id': lead.id, 'owner_name': lead.owner_name,
                                 'reason': selection_reason(lead)})
-        elif claims.reason_for(lead):
+        elif claims.reason_for(lead) and lead.source != PROVIDER_LEAD_SOURCE:
             left_behind.append({'lead_id': lead.id, 'owner_name': lead.owner_name,
                                 'reason': claims.reason_for(lead)})
         elif lead.campaign_id is not None and lead.campaign_id != campaign.id:
@@ -244,7 +358,19 @@ def attach(session: Session, user: User, campaign: Campaign, lead_ids: list[int]
             left_behind.append({'lead_id': lead.id, 'owner_name': lead.owner_name,
                                 'reason': f'Already in the draft “{name}”.'})
         else:
+            added_recipients = (
+                len(_provider_contacts(lead))
+                if lead.source == PROVIDER_LEAD_SOURCE else 1
+            )
+            if projected_recipients + added_recipients > MAX_CAMPAIGN_SIZE:
+                left_behind.append({
+                    'lead_id': lead.id,
+                    'owner_name': lead.owner_name,
+                    'reason': f'A campaign can hold at most {MAX_CAMPAIGN_SIZE} recipients.',
+                })
+                continue
             eligible.append(lead.id)
+            projected_recipients += added_recipients
 
     if eligible:
         # One guarded statement rather than a field assignment per lead: the
@@ -276,6 +402,10 @@ def attach(session: Session, user: User, campaign: Campaign, lead_ids: list[int]
                 actor_type='broker', actor_id=user.id,
                 to_value=campaign.name, meta={'campaign_id': campaign.id},
             )
+            lead = session.get(Lead, lead_id)
+            if lead and lead.source == PROVIDER_LEAD_SOURCE:
+                _expand_provider_lead(session, lead, campaign)
+        session.commit()
     else:
         session.commit()
     return left_behind
@@ -435,6 +565,10 @@ def preview(session: Session, user: User, campaign: Campaign) -> dict:
     rendered: list[dict] = []
     skipped: list[dict] = []
     people = members(session, user, campaign)
+    from ..integration_data.service import backfill_distributed_leads
+    if backfill_distributed_leads(session, people):
+        session.commit()
+        people = members(session, user, campaign)
     claims = claims_on(session, brokerage_user_ids(session, user), people)
     template = campaign.message_template or ''
     error = ''
@@ -511,7 +645,7 @@ def _send_to_lead(session: Session, user: User, campaign: Campaign, lead: Lead,
     context['lead_source'] = 'Lead pool campaign'
     context['signals'] = split_signals(lead)
     # Imported attributes are approved facts, so Bobbie may cite them.
-    context['property_details'] = lead_details(lead)
+    context['property_details'] = conversation_property_details(lead)
     if previous_address and previous_address != lead.property_address:
         # An owner with more than one listing: both are approved facts, and
         # Bobbie needs the earlier one to make sense of "the other one".
@@ -573,7 +707,12 @@ def send(session: Session, user: User, campaign: Campaign) -> dict:
     skipped: list[dict] = []
 
     scope = brokerage_user_ids(session, user)
-    for lead in members(session, user, campaign):
+    people = members(session, user, campaign)
+    from ..integration_data.service import backfill_distributed_leads
+    if backfill_distributed_leads(session, people):
+        session.commit()
+        people = members(session, user, campaign)
+    for lead in people:
         # Checked per lead rather than once for the batch: a long send gives
         # another brokerage time to claim a number partway through it.
         blocked = _blocking_reason(lead, claims_on(session, scope, [lead]))
@@ -592,9 +731,22 @@ def send(session: Session, user: User, campaign: Campaign) -> dict:
     # to the pool rather than sitting under a campaign that never contacted it,
     # invisible in both places.
     texted = {row['lead_id'] for row in started}
-    for lead in members(session, user, campaign):
+    people = members(session, user, campaign)
+    successful_parents: set[int] = set()
+    for lead in people:
         if lead.id not in texted:
-            lead.campaign_id = None
+            continue
+        details = _stored_details(lead)
+        successful_parents.add(int(details.get('_parent_lead_id') or lead.id))
+    for lead in people:
+        if lead.id not in texted:
+            if lead.source == PROVIDER_CONTACT_SOURCE:
+                session.delete(lead)
+            elif lead.source == PROVIDER_LEAD_SOURCE and lead.id not in successful_parents:
+                _restore_provider_master(lead)
+                lead.campaign_id = None
+            elif lead.source != PROVIDER_LEAD_SOURCE:
+                lead.campaign_id = None
 
     campaign.status = 'sent'
     campaign.sent_at = datetime.utcnow()

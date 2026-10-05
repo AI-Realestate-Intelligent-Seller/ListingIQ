@@ -10,7 +10,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..leads import campaign as campaign_service
-from ..leads import events as lead_events
 from ..logger import get_logger
 from ..models import User
 from ..schemas import (
@@ -139,14 +138,8 @@ def delete_campaign(campaign_id: int, current_user: User = Depends(get_current_u
     if campaign.status != 'draft':
         raise HTTPException(status_code=400,
                             detail='A campaign that has been sent cannot be deleted.')
-    # The leads go back to the pool unattached; only the draft disappears.
-    for lead in campaign_service.members(session, current_user, campaign):
-        lead.campaign_id = None
-        lead_events.log_event(
-            session, lead.id, lead_events.STAGE, 'released_from_campaign',
-            actor_type='broker', actor_id=current_user.id,
-            from_value=campaign.name, meta={'campaign_id': campaign.id}, commit=False,
-        )
+    # Real leads return to the pool; generated provider-contact rows disappear.
+    campaign_service.release_draft_members(session, current_user, campaign)
     session.delete(campaign)
     session.commit()
     return {'deleted': campaign_id}

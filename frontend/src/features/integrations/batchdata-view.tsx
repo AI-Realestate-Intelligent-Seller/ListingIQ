@@ -22,6 +22,13 @@ const products = [
   "Basic Property Data",
   "Contact Enrichment",
 ] as const;
+const batchDataNavigationSections = [
+  "Connection",
+  "Data",
+  "Usage & Limits",
+  "Activity",
+  "History",
+] as const satisfies readonly IntegrationSection[];
 type Tab =
   | "Connection"
   | "PAYG Billing"
@@ -351,6 +358,7 @@ export function BatchDataView({ detail = false }: { detail?: boolean }) {
       </div>
       <IntegrationNavigation
         provider="BatchData"
+        sections={batchDataNavigationSections}
         activeSection={batchDataSectionFor(tab, product)}
         onSectionChange={(section) => {
           const destination = batchDataSections[section][0].id;

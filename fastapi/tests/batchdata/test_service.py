@@ -10,7 +10,12 @@ os.environ.setdefault("SECRET_KEY", "batchdata-test-key")
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.batchdata.config import Configuration, ContactEnrichmentRequest, ProductRequest
+from app.batchdata.config import (
+    PROVIDER_QUICK_LISTS,
+    Configuration,
+    ContactEnrichmentRequest,
+    ProductRequest,
+)
 from app.batchdata.models import (
     ApiCall,
     Membership,
@@ -74,7 +79,11 @@ class FakeClient:
                 ]
             }, "skip-request"
         category = body["searchCriteria"]["quickList"]
-        ids = ["P1", "P2"] if category == "fsbo" else ["P2", "P3"]
+        ids = (
+            ["P1", "P2"]
+            if category == PROVIDER_QUICK_LISTS["fsbo"]
+            else ["P2", "P3"]
+        )
         return {
             "results": [
                 {
@@ -169,7 +178,9 @@ def test_normal_product_flow_uses_current_fields_in_sandbox(
         assert {row.provider for row in db.query(Property)} == {"batchdata_sandbox"}
         for _, _, request in service.client.calls:
             assert request["searchCriteria"]["query"] in payload.locations
-            assert request["searchCriteria"]["quickList"] in payload.selected_categories
+            assert request["searchCriteria"]["quickList"] in {
+                PROVIDER_QUICK_LISTS[key] for key in payload.selected_categories
+            }
             assert request["options"] == {"take": 5, "skip": 0}
             assert "dataTypes" not in request
             assert "locations" not in request["searchCriteria"]
@@ -409,6 +420,17 @@ def test_short_sale_remains_disabled():
         assert "Short Sale" in str(error)
     else:
         raise AssertionError("Short Sale must remain unsupported")
+
+
+def test_internal_categories_map_to_batchdata_quick_list_values():
+    assert PROVIDER_QUICK_LISTS["fsbo"] == "for-sale-by-owner"
+    assert PROVIDER_QUICK_LISTS["pre_foreclosure"] == "preforeclosure"
+    assert PROVIDER_QUICK_LISTS["lis_pendens"] == "notice-of-lis-pendens"
+
+
+def test_categories_without_a_provider_quick_list_remain_disabled():
+    with pytest.raises(ValueError, match="Probate"):
+        Configuration(selectedCategories=["probate"])
 
 
 def test_initialize_repairs_legacy_short_sale_seed(tmp_path):

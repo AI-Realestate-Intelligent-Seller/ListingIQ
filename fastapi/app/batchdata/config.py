@@ -28,7 +28,28 @@ CATEGORIES = {
     "short_sale": "Short Sale",
 }
 
-UNSUPPORTED = {"short_sale"}
+# ListingIQ keeps stable internal category keys, while BatchData accepts this
+# provider-owned, hyphenated enum for Property Search quick lists.
+PROVIDER_QUICK_LISTS = {
+    "fsbo": "for-sale-by-owner",
+    "pre_foreclosure": "preforeclosure",
+    "expired": "expired-listing",
+    "pending": "pending-listing",
+    "canceled": "canceled-listing",
+    "active_auction": "active-auction",
+    "tax_default": "tax-default",
+    "vacant": "vacant",
+    "absentee_owner": "absentee-owner",
+    "high_equity": "high-equity",
+    "cash_buyer": "cash-buyer",
+    "vacant_lot": "vacant-lot",
+    "notice_of_default": "notice-of-default",
+    "lis_pendens": "notice-of-lis-pendens",
+}
+
+# Concepts without an equivalent in the current BatchData quickList enum stay
+# visible in the UI but cannot be selected as Quick Lists.
+UNSUPPORTED = set(CATEGORIES) - set(PROVIDER_QUICK_LISTS)
 LISTING_CATEGORIES = {"active", "pending", "expired", "canceled", "withdrawn"}
 FORECLOSURE_CATEGORIES = {
     "pre_foreclosure",
@@ -77,7 +98,7 @@ class Configuration(BaseModel):
     allowOverage: Literal[False] = False
     rowsPerCategory: int = Field(20, ge=1, le=20)
     selectedCategories: list[str] = Field(
-        default_factory=lambda: [key for key in CATEGORIES if key not in UNSUPPORTED],
+        default_factory=lambda: list(PROVIDER_QUICK_LISTS),
         max_items=21,
     )
     locations: list[str] = Field(default_factory=list, max_items=100)
@@ -102,8 +123,12 @@ class Configuration(BaseModel):
         unknown = set(value) - set(CATEGORIES)
         if unknown:
             raise ValueError(f"Unknown categories: {', '.join(sorted(unknown))}")
-        if set(value) & UNSUPPORTED:
-            raise ValueError("Short Sale is unsupported and must remain disabled")
+        unsupported = set(value) & UNSUPPORTED
+        if unsupported:
+            labels = ", ".join(CATEGORIES[key] for key in sorted(unsupported))
+            raise ValueError(
+                f"Unsupported BatchData Quick List categories: {labels}"
+            )
         return value
 
     @validator("locations")
@@ -137,8 +162,12 @@ class ProductRequest(BaseModel):
         unknown = set(clean) - set(CATEGORIES)
         if unknown:
             raise ValueError(f"Unknown categories: {', '.join(sorted(unknown))}")
-        if set(clean) & UNSUPPORTED:
-            raise ValueError("Short Sale is unsupported")
+        unsupported = set(clean) & UNSUPPORTED
+        if unsupported:
+            labels = ", ".join(CATEGORIES[key] for key in sorted(unsupported))
+            raise ValueError(
+                f"Unsupported BatchData Quick List categories: {labels}"
+            )
         return clean
 
     @validator("locations")

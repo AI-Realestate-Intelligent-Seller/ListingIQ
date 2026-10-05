@@ -17,6 +17,7 @@ from .config import (
     CATEGORIES,
     FORECLOSURE_CATEGORIES,
     LISTING_CATEGORIES,
+    PROVIDER_QUICK_LISTS,
     Configuration,
     ContactEnrichmentRequest,
     ProductRequest,
@@ -90,13 +91,15 @@ def initialize(db):
     )
     db.commit()
     row = db.query(IntegrationConfig).filter_by(provider="batchdata").one()
-    # Early local seeds included Short Sale before the final provider decision
-    # marked it unsupported. Normalize that saved draft instead of letting one
-    # stale selection make the entire Integrations page fail to render.
+    # Normalize legacy selections that were UI concepts rather than supported
+    # provider quick-list values. A stale selection must not prevent the
+    # Integrations page from loading.
     defaults = json.loads(Configuration().json())
     values = {**defaults, **(row.configuration_json or {})}
     values["selectedCategories"] = [
-        key for key in values.get("selectedCategories", []) if key != "short_sale"
+        key
+        for key in values.get("selectedCategories", [])
+        if key in PROVIDER_QUICK_LISTS
     ]
     normalized = json.loads(Configuration(**values).json())
     if normalized != row.configuration_json:
@@ -294,7 +297,11 @@ class Service:
             "last_error": self.row.last_error,
             "config": cfg,
             "categories": [
-                {"key": key, "label": label, "supported": key != "short_sale"}
+                {
+                    "key": key,
+                    "label": label,
+                    "supported": key in PROVIDER_QUICK_LISTS,
+                }
                 for key, label in CATEGORIES.items()
             ],
             "usage": {
@@ -387,7 +394,7 @@ class Service:
         for category in categories:
             request = {
                 "searchCriteria": {
-                    "quickList": category,
+                    "quickList": PROVIDER_QUICK_LISTS[category],
                     "query": ", ".join(payload.locations),
                 },
                 "options": {"take": payload.rows_per_category, "skip": 0},
