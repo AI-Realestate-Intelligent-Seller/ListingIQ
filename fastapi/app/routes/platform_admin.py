@@ -3,15 +3,26 @@
 import json
 import os
 import platform
+import uuid
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field, validator
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
-from ..models import (AiRun, Booking, Campaign, Conversation, FeatureFlag,
-                      Invitation, Lead, Message, PlatformAuditLog, User)
+from ..models import (
+    AiRun,
+    Campaign,
+    Conversation,
+    FeatureFlag,
+    Invitation,
+    Lead,
+    Message,
+    PlatformAuditLog,
+    User,
+)
+from . import team
 from .auth import get_current_user, get_db
 
 router = APIRouter()
@@ -46,6 +57,7 @@ def organization_rows(session: Session):
             'active_user_count': 0,
             'created_at': user.created_at,
             'is_active': False,
+            'onboarding_status': 'onboarded',
         })
         item['user_count'] += 1
         item['active_user_count'] += int(bool(user.is_active))
@@ -53,6 +65,23 @@ def organization_rows(session: Session):
         if user.role == 'hob':
             item['owner_email'] = user.email
             item['name'] = user.brokerage_name or item['name']
+    now = datetime.utcnow()
+    pending_invitations = (session.query(Invitation)
+                           .filter(Invitation.role == 'hob',
+                                   Invitation.status == 'pending',
+                                   Invitation.expires_at > now)
+                           .order_by(Invitation.created_at.asc()).all())
+    for invitation in pending_invitations:
+        grouped.setdefault(invitation.brokerage_id, {
+            'id': invitation.brokerage_id,
+            'name': invitation.brokerage_name or 'Unnamed organization',
+            'owner_email': invitation.email,
+            'user_count': 0,
+            'active_user_count': 0,
+            'created_at': invitation.created_at,
+            'is_active': False,
+            'onboarding_status': 'invited',
+        })
     return list(grouped.values())
 
 
@@ -82,6 +111,93 @@ def organizations(_: User = Depends(require_platform_admin), session: Session = 
     for row in rows:
         row['lead_count'] = lead_counts.get(row['id'], 0)
     return {'organizations': sorted(rows, key=lambda item: item['name'].lower())}
+
+
+class BrokerageOnboardingCreate(BaseModel):
+    brokerage_name: str = Field(min_length=2, max_length=255)
+    hob_email: EmailStr
+
+    @validator('brokerage_name')
+    def clean_brokerage_name(cls, value):
+        clean = value.strip()
+        if len(clean) < 2:
+            raise ValueError('Brokerage name is required.')
+        return clean
+
+
+@router.post('/organizations', status_code=201)
+def create_organization(
+    payload: BrokerageOnboardingCreate,
+    current: User = Depends(require_platform_admin),
+    session: Session = Depends(get_db),
+):
+    """Create a brokerage identity and send its HOB a one-time onboarding link."""
+    email = str(payload.hob_email).strip().lower()
+    name = payload.brokerage_name.strip()
+    now = datetime.utcnow()
+    if session.query(User).filter(func.lower(User.email) == email).first():
+        raise HTTPException(status_code=409, detail='This email is already registered.')
+    if (session.query(Invitation)
+            .filter(func.lower(Invitation.email) == email,
+                    Invitation.status == 'pending',
+                    Invitation.expires_at > now).first()):
+        raise HTTPException(status_code=409, detail='An active invitation already exists for this email.')
+    if (session.query(User)
+            .filter(func.lower(User.brokerage_name) == name.lower()).first()
+            or session.query(Invitation)
+            .filter(func.lower(Invitation.brokerage_name) == name.lower(),
+                    Invitation.role == 'hob',
+                    Invitation.status == 'pending',
+                    Invitation.expires_at > now).first()):
+        raise HTTPException(status_code=409, detail='A brokerage with this name already exists.')
+
+    brokerage_id = str(uuid.uuid4())
+    token = team.generate_token()
+    expires_at = now + timedelta(hours=team.INVITATION_TTL_HOURS)
+    invitation = Invitation(
+        email=email,
+        role='hob',
+        brokerage_id=brokerage_id,
+        brokerage_name=name,
+        invited_by=current.id,
+        assigned_broker_id=None,
+        token_hash=team.hash_token(token),
+        expires_at=expires_at,
+        status='pending',
+        created_at=now,
+    )
+    session.add(invitation)
+    session.flush()
+    try:
+        team.send_invitation_email(
+            recipient_email=email,
+            brokerage_name=name,
+            role=team.ROLE_LABELS['hob'],
+            invitation_url=team.build_invitation_url(token),
+            expires_at=expires_at.strftime('%B %d, %Y at %I:%M %p UTC'),
+        )
+    except team.EmailDeliveryError:
+        session.rollback()
+        raise HTTPException(
+            status_code=502,
+            detail='We could not send the HOB onboarding email. Please try again.',
+        ) from None
+    except Exception:
+        session.rollback()
+        team.logger.exception('hob_onboarding_email_unexpected_failure')
+        raise HTTPException(
+            status_code=502,
+            detail='We could not send the HOB onboarding email. Please try again.',
+        ) from None
+
+    audit(session, current, 'organization.onboarding_invited', 'organization',
+          brokerage_id, {'brokerage_name': name, 'hob_email': email})
+    session.commit()
+    return {
+        'message': 'Brokerage created and HOB onboarding invitation sent.',
+        'brokerage_id': brokerage_id,
+        'expires_at': expires_at,
+    }
 
 
 class ActiveUpdate(BaseModel):

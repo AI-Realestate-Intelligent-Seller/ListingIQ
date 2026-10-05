@@ -18,7 +18,6 @@ from ..auth import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token, hash_passwo
 from ..core.email import EmailDeliveryError, build_invitation_url, send_invitation_email
 from ..logger import get_logger
 from ..models import Booking, Campaign, Conversation, Invitation, Lead, Message, User
-from ..tenancy import brokerage_user_ids
 from ..schemas import (
     INVITABLE_ROLES,
     InvitationAcceptRequest,
@@ -28,6 +27,7 @@ from ..schemas import (
     InvitationValidationResponse,
     TeamDirectoryResponse,
 )
+from ..tenancy import brokerage_user_ids
 from .auth import get_current_user, get_db
 
 router = APIRouter()
@@ -35,8 +35,16 @@ logger = get_logger(__name__)
 
 INVITATION_TTL_HOURS = 48
 
-ROLE_LABELS = {'broker': 'an Area Broker', 'agent': 'an Agent'}
-ROLE_DISPLAY_NAMES = {'broker': 'Area Broker', 'agent': 'Agent'}
+ROLE_LABELS = {
+    'hob': 'the Head of Brokerage',
+    'broker': 'an Area Broker',
+    'agent': 'an Agent',
+}
+ROLE_DISPLAY_NAMES = {
+    'hob': 'Head of Brokerage',
+    'broker': 'Area Broker',
+    'agent': 'Agent',
+}
 
 INVALID_INVITATION_MESSAGE = 'This invitation is invalid or has expired.'
 
@@ -404,7 +412,7 @@ def accept_invitation(
         brokerage_id=invitation.brokerage_id,
         role=invitation.role,
         assigned_broker_id=invitation.assigned_broker_id,
-        is_head_or_owner=False,
+        is_head_or_owner=invitation.role == 'hob',
         # Delivering the invitation to this mailbox already proved ownership.
         is_verified=True,
         is_active=True,

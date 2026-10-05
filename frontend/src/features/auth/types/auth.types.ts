@@ -90,7 +90,7 @@ export type BrokerageOverview = {
 export type InvitationValidation = {
   valid: boolean;
   email: string | null;
-  role: InvitableRole | null;
+  role: InvitableRole | "hob" | null;
   role_label: string | null;
   brokerage_name: string | null;
   expires_at: string | null;

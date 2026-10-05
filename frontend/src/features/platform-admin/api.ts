@@ -1,10 +1,11 @@
 import { getJson, patchJson, postJson } from "@/lib/api/http-client";
-import type { AuditEvent, Engineering, FeatureFlag, Operations, Organization, PlatformOverview, PlatformUser } from "./types";
+import type { AuditEvent, BrokerageOnboardingResponse, Engineering, FeatureFlag, Operations, Organization, PlatformOverview, PlatformUser } from "./types";
 
 // apiBaseUrl already ends in /api/v1.
 const root = "/platform-admin";
 export const getPlatformOverview = (token: string, signal?: AbortSignal) => getJson<PlatformOverview>(`${root}/overview`, token, signal);
 export const getOrganizations = (token: string, signal?: AbortSignal) => getJson<{organizations: Organization[]}>(`${root}/organizations`, token, signal);
+export const createBrokerageOnboarding = (token: string, payload: {brokerage_name: string; hob_email: string}) => postJson<BrokerageOnboardingResponse, typeof payload>(`${root}/organizations`, payload, token);
 export const getPlatformUsers = (token: string, q = "", signal?: AbortSignal) => getJson<{users: PlatformUser[]}>(`${root}/users?q=${encodeURIComponent(q)}`, token, signal);
 export const getFeatureFlags = (token: string, signal?: AbortSignal) => getJson<{flags: FeatureFlag[]}>(`${root}/feature-flags`, token, signal);
 export const getOperations = (token: string, signal?: AbortSignal) => getJson<Operations>(`${root}/operations`, token, signal);

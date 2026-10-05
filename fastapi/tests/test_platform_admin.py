@@ -1,4 +1,13 @@
-from app.models import FeatureFlag, PlatformAuditLog
+from urllib.parse import parse_qs, urlparse
+
+from app.models import FeatureFlag, Invitation, PlatformAuditLog, User
+from app.routes.platform_admin import (
+    BrokerageOnboardingCreate,
+    create_organization,
+    organization_rows,
+)
+from app.routes.team import accept_invitation
+from app.schemas import InvitationAcceptRequest
 
 
 def test_customer_roles_cannot_access_platform_admin(client, make_user, auth_header):
@@ -36,6 +45,65 @@ def test_platform_admin_feature_flag_is_audited(client, make_user, auth_header, 
     assert response.status_code == 200
     assert session.query(FeatureFlag).one().enabled is True
     assert session.query(PlatformAuditLog).one().action == 'feature_flag.updated'
+
+
+def test_platform_admin_onboards_brokerage_hob(
+    make_user, session, sent_emails
+):
+    admin = make_user(
+        'platform@listingiq.test',
+        role='platform_admin',
+        brokerage_id=None,
+        brokerage_name=None,
+    )
+    current = session.get(User, admin.id)
+    created = create_organization(
+        BrokerageOnboardingCreate(
+            brokerage_name='Northstar Realty',
+            hob_email='owner@northstar.com',
+        ),
+        current=current,
+        session=session,
+    )
+    brokerage_id = created['brokerage_id']
+    invitation = session.query(Invitation).one()
+    assert invitation.role == 'hob'
+    assert invitation.brokerage_id == brokerage_id
+    assert invitation.token_hash
+    assert len(sent_emails) == 1
+    assert sent_emails[0]['recipient_email'] == 'owner@northstar.com'
+
+    organizations = organization_rows(session)
+    assert organizations == [
+        {
+            'id': brokerage_id,
+            'name': 'Northstar Realty',
+            'owner_email': 'owner@northstar.com',
+            'user_count': 0,
+            'active_user_count': 0,
+            'created_at': invitation.created_at,
+            'is_active': False,
+            'onboarding_status': 'invited',
+        }
+    ]
+
+    token = parse_qs(urlparse(sent_emails[0]['invitation_url']).query)['token'][0]
+    accepted = accept_invitation(
+        token,
+        InvitationAcceptRequest(
+            first_name='Nora',
+            last_name='Owner',
+            password='Password123!',
+        ),
+        session,
+    )
+    assert accepted['user'].role == 'hob'
+    assert accepted['user'].is_head_or_owner is True
+    session.expire_all()
+    owner = session.query(User).filter_by(email='owner@northstar.com').one()
+    assert owner.brokerage_id == brokerage_id
+    assert owner.is_verified is True
+    assert session.query(PlatformAuditLog).one().action == 'organization.onboarding_invited'
 
 
 def test_suspended_user_cannot_log_in(client, make_user):
