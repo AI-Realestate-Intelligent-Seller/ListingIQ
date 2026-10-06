@@ -19,12 +19,7 @@ CATEGORIES = {
     "vacant_lot": "Vacant Lot",
     "notice_of_default": "Notice of Default",
     "lis_pendens": "Lis Pendens",
-    "withdrawn": "Withdrawn",
-    "probate": "Probate",
-    "divorce": "Divorce",
-    "bankruptcy": "Bankruptcy",
-    "reo": "REO",
-    "foreclosure": "Foreclosure",
+    # Shown but disabled: BatchData has no Short Sale quick list yet.
     "short_sale": "Short Sale",
 }
 
@@ -48,7 +43,8 @@ PROVIDER_QUICK_LISTS = {
 }
 
 # Concepts without an equivalent in the current BatchData quickList enum stay
-# visible in the UI but cannot be selected as Quick Lists.
+# visible in the UI but cannot be selected as Quick Lists. Withdrawn, Probate,
+# Divorce, Bankruptcy, REO and Foreclosure are not BatchData categories at all.
 UNSUPPORTED = set(CATEGORIES) - set(PROVIDER_QUICK_LISTS)
 
 

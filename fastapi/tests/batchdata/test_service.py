@@ -11,7 +11,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.batchdata.config import (
+    CATEGORIES,
     PROVIDER_QUICK_LISTS,
+    UNSUPPORTED,
     Configuration,
     ContactEnrichmentRequest,
     ProductRequest,
@@ -415,9 +417,12 @@ def test_internal_categories_map_to_batchdata_quick_list_values():
     assert PROVIDER_QUICK_LISTS["lis_pendens"] == "notice-of-lis-pendens"
 
 
-def test_categories_without_a_provider_quick_list_remain_disabled():
-    with pytest.raises(ValueError, match="Probate"):
-        Configuration(selectedCategories=["probate"])
+def test_categories_without_a_provider_quick_list_are_not_batchdata_categories():
+    for key in ("withdrawn", "probate", "divorce", "bankruptcy", "reo", "foreclosure"):
+        assert key not in CATEGORIES
+        with pytest.raises(ValueError, match="Unknown categories"):
+            Configuration(selectedCategories=[key])
+    assert UNSUPPORTED == {"short_sale"}
 
 
 def test_initialize_repairs_legacy_short_sale_seed(tmp_path):
