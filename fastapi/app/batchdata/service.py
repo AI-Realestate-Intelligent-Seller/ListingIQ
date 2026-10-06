@@ -190,6 +190,13 @@ def _location_calls(calls, locations, rows_per_category):
     return expanded
 
 
+def _excluded_hashes(request) -> set[str]:
+    criteria = request.get("searchCriteria", {})
+    return set(
+        criteria.get("ids", {}).get("addressHash", {}).get("notInList", [])
+    )
+
+
 def _matched(payload) -> bool:
     data = payload.get("data")
     if isinstance(data, dict):
@@ -380,6 +387,34 @@ class Service:
             ),
         )
 
+    def _fetched_address_hashes(self):
+        """Address hashes of every property already saved from live BatchData.
+
+        Live results are always excluded, whatever the current mode; sandbox
+        mode also excludes its own results.
+        """
+        providers = {"batchdata", self.property_provider}
+        hashes = {
+            row[0]
+            for row in self.db.query(Property.address_hash)
+            .filter(
+                Property.provider.in_(providers),
+                Property.address_hash.isnot(None),
+                Property.address_hash != "",
+            )
+            .distinct()
+        }
+        # Older rows may have the hash only in the provider snapshot.
+        for (snapshot,) in self.db.query(Property.immutable_provider_snapshot).filter(
+            Property.provider.in_(providers),
+            or_(Property.address_hash.is_(None), Property.address_hash == ""),
+        ):
+            address = (snapshot or {}).get("address")
+            if isinstance(address, dict) and isinstance(address.get("hash"), str):
+                if address["hash"].strip():
+                    hashes.add(address["hash"].strip())
+        return sorted(hashes)
+
     def _property_search_plan(self, payload: ProductRequest):
         log_event(
             logger,
@@ -404,6 +439,8 @@ class Service:
                 "quickListUnitCost",
             )
         )
+        # Skip properties we already fetched so they are not paid for again.
+        excluded = self._fetched_address_hashes()
         calls = []
         for category in categories:
             request = {
@@ -417,6 +454,10 @@ class Service:
                     "datasets": ["basic", "listing", "quicklist"],
                 },
             }
+            if excluded:
+                request["searchCriteria"]["ids"] = {
+                    "addressHash": {"notInList": excluded}
+                }
             estimated = unit_cost * payload.rows_per_category
             calls.append(
                 {
@@ -440,6 +481,7 @@ class Service:
             "calls": calls,
             "contact_enrichment_enabled": False,
             "skip_trace": None,
+            "excluded_address_hashes": len(excluded),
             "estimated_cost": float(total),
         }
         log_event(
@@ -449,6 +491,7 @@ class Service:
             mode=self.api_mode,
             planned_provider_calls=len(calls),
             maximum_returned_rows=maximum,
+            excluded_address_hashes=len(excluded),
             estimated_cost=float(total),
         )
         return plan
@@ -611,6 +654,7 @@ class Service:
         reservation = self._reserve(run)
         actual = Decimal(0)
         returned = 0
+        skipped_existing = 0
         unique = {}
         try:
             for call_index, planned in enumerate(run.call_plan["calls"]):
@@ -664,7 +708,14 @@ class Service:
                     request_id=request_id,
                 )
                 self.db.add(call)
+                excluded = _excluded_hashes(planned["request"])
                 for item in rows:
+                    address = item.get("address")
+                    if isinstance(address, dict) and address.get("hash") in excluded:
+                        # The provider ignored the exclusion filter; keep the
+                        # saved property instead of re-importing it.
+                        skipped_existing += 1
+                        continue
                     provider_id = item.get("_id") or item.get("id")
                     if isinstance(provider_id, int) and not isinstance(
                         provider_id, bool
@@ -699,7 +750,7 @@ class Service:
                     actual_cost=float(call_cost),
                 )
             new_properties = []
-            duplicate_count = returned - len(unique)
+            duplicate_count = returned - skipped_existing - len(unique)
             log_event(
                 logger,
                 "batchdata.deduplication.completed",
@@ -707,6 +758,7 @@ class Service:
                 returned_records=returned,
                 unique_provider_ids=len(unique),
                 duplicate_records=duplicate_count,
+                skipped_existing_records=skipped_existing,
                 combination=run.call_plan.get("combination"),
             )
             if run.call_plan.get("combination") == "AND":

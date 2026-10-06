@@ -249,6 +249,74 @@ def test_property_search_deduplicates_without_implicit_skip_trace(
     engine.dispose()
 
 
+def test_property_search_excludes_already_fetched_address_hashes(tmp_path, monkeypatch):
+    monkeypatch.setenv("BATCHDATA_API_MODE", "live")
+    monkeypatch.setenv("BATCHDATA_STORAGE_ROOT", str(tmp_path / "archive"))
+    engine = create_engine(
+        f"sqlite:///{tmp_path}/test.db", connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(engine)
+    with sessionmaker(bind=engine, autoflush=False)() as db:
+        provider = FakeClient()
+        service = Service(db, provider)
+        service.save_config(
+            Configuration(
+                enabled=True, locations=["Chicago, IL"], selectedCategories=["fsbo"]
+            )
+        )
+        payload = ProductRequest(
+            selected_categories=["fsbo"], locations=["Chicago, IL"], rows_per_category=2
+        )
+        first = service.property_search(
+            payload.copy(update={"confirmed": True, "reason": "first fetch"})
+        )
+        assert first["unique_properties"] == 2
+        assert "ids" not in provider.calls[0][2]["searchCriteria"]
+
+        # The fake provider ignores the filter and returns P1/P2 again.
+        preview = service.property_search(payload)
+        assert preview["call_plan"]["excluded_address_hashes"] == 2
+        second = service.property_search(
+            payload.copy(update={"confirmed": True, "reason": "second fetch"})
+        )
+        assert provider.calls[1][2]["searchCriteria"]["ids"] == {
+            "addressHash": {"notInList": ["hash-P1", "hash-P2"]}
+        }
+        assert second["unique_properties"] == 0
+        assert second["duplicate_properties"] == 0
+        assert db.query(Property).count() == 2
+    engine.dispose()
+
+
+def test_fetched_hashes_include_all_live_properties(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path}/test.db")
+    Base.metadata.create_all(engine)
+    with sessionmaker(bind=engine, autoflush=False)() as db:
+        rows = [
+            ("batchdata", "L1", "live-1", {}),
+            ("batchdata", "L2", None, {"address": {"hash": "live-2"}}),
+            ("batchdata", "L3", "", {"address": {}}),
+            ("batchdata_sandbox", "S1", "sandbox-1", {}),
+        ]
+        for provider, provider_id, address_hash, snapshot in rows:
+            db.add(
+                Property(
+                    provider=provider,
+                    provider_property_id=provider_id,
+                    address_hash=address_hash,
+                    immutable_provider_snapshot=snapshot,
+                    operational_copy={},
+                )
+            )
+        db.commit()
+        service = Service(db, FakeClient())
+        monkeypatch.setenv("BATCHDATA_API_MODE", "live")
+        assert service._fetched_address_hashes() == ["live-1", "live-2"]
+        monkeypatch.setenv("BATCHDATA_API_MODE", "sandbox")
+        assert service._fetched_address_hashes() == ["live-1", "live-2", "sandbox-1"]
+    engine.dispose()
+
+
 def test_selected_contacts_use_verified_skip_trace_shape(tmp_path, monkeypatch):
     monkeypatch.setenv("BATCHDATA_API_MODE", "live")
     monkeypatch.setenv("BATCHDATA_STORAGE_ROOT", str(tmp_path / "archive"))
@@ -357,7 +425,7 @@ def test_selected_contacts_use_verified_skip_trace_shape(tmp_path, monkeypatch):
             db.query(ApiCall).filter_by(
                 product="contact_enrichment"
             ).one().response_json = {"changed": True}
-        service.property_search(
+        repeat = service.property_search(
             ProductRequest(
                 selected_categories=["fsbo"],
                 locations=["Chicago, IL"],
@@ -365,13 +433,13 @@ def test_selected_contacts_use_verified_skip_trace_shape(tmp_path, monkeypatch):
                 reason="repeat discovery",
             )
         )
-        reused_contacts = list(
-            (tmp_path / "archive").rglob("property=P1/contacts.json")
-        )
-        assert len(reused_contacts) == 2
-        assert any(
-            __import__("json").loads(path.read_text()).get("reused_from_run")
-            for path in reused_contacts
+        # Already-fetched properties are excluded, not re-imported.
+        assert service.client.calls[-1][2]["searchCriteria"]["ids"] == {
+            "addressHash": {"notInList": ["hash-P1", "hash-P2"]}
+        }
+        assert repeat["unique_properties"] == 0
+        assert (
+            len(list((tmp_path / "archive").rglob("property=P1/contacts.json"))) == 1
         )
         pending = Run(
             id="unknown-contact",
