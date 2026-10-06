@@ -82,15 +82,20 @@ def _stage_seconds(lead: Lead, now: datetime | None = None) -> dict[str, int]:
     return totals
 
 
-def _serialize_assignment(session: Session, lead: Lead) -> dict:
+def _serialize_assignment(session: Session, lead: Lead,
+                          campaign_names: dict[int, str] | None = None) -> dict:
     item = serialize(lead)
     item['assignee_id'] = lead.assigned_agent_id
     item['assignment_stage'] = _assignment_stage(lead)
     item['assignment_stage_changed_at'] = lead.assignment_stage_changed_at
     item['stage_seconds'] = _stage_seconds(lead)
     item['campaign_id'] = lead.campaign_id
-    campaign = session.query(Campaign).filter(Campaign.id == lead.campaign_id).first() if lead.campaign_id else None
-    item['campaign_name'] = campaign.name if campaign else 'Uncategorized'
+    if campaign_names is None:
+        campaign = session.get(Campaign, lead.campaign_id) if lead.campaign_id else None
+        name = campaign.name if campaign else None
+    else:
+        name = campaign_names.get(lead.campaign_id)
+    item['campaign_name'] = name or 'Uncategorized'
     return item
 
 
@@ -101,8 +106,13 @@ def list_assignments(
 ):
     _require_broker(current_user)
     agents = _linked_agents(session, current_user)
+    leads = _replied_leads(session, current_user)
+    # One lookup for every campaign name; a lead may point at a deleted campaign.
+    campaign_ids = {lead.campaign_id for lead in leads if lead.campaign_id}
+    campaign_names = dict(session.query(Campaign.id, Campaign.name)
+                          .filter(Campaign.id.in_(campaign_ids)).all()) if campaign_ids else {}
     return {
-        'leads': [_serialize_assignment(session, lead) for lead in _replied_leads(session, current_user)],
+        'leads': [_serialize_assignment(session, lead, campaign_names) for lead in leads],
         'agents': [
             {'id': agent.id, 'full_name': agent.full_name, 'email': agent.email}
             for agent in agents

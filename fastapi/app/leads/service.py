@@ -9,12 +9,14 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 import json
 
-from ..models import Conversation, Lead, Message, User
-from ..tenancy import brokerage_user_ids
+from ..integration_data.models import CombinedProperty
+from ..models import Conversation, Lead, LeadEvent, Message, User
+from ..tenancy import brokerage_user_ids, session_cache
 from . import address as address_key
 from .catalog import SIGNALS, signal_label
 from .importer import normalize_phone, parse_upload, score_lead
@@ -299,10 +301,22 @@ def _pool_locations(session: Session, user: User) -> list[Location]:
     including the leads the current filters hide, so this deliberately ignores
     every filter.
     """
-    rows = (session.query(Lead.property_address, Lead.area)
-            .filter(Lead.user_id.in_(brokerage_user_ids(session, user)),
-                    Lead.campaign_id.is_(None)).all())
-    return [parse_location(address, area) for address, area in rows]
+    return [parse_location(lead.property_address, lead.area) for lead in _pool_leads(session, user)]
+
+
+def _pool_leads(session: Session, user: User) -> list[Lead]:
+    """The whole unfiltered pool, read once per request.
+
+    The counts, the location menu and the town-to-ZIP crosswalk all need it, and
+    each read is a round trip to the database.
+    """
+    cache = session_cache(session)
+    key = ('pool_leads', user.id)
+    if key not in cache:
+        cache[key] = (session.query(Lead)
+                      .filter(Lead.user_id.in_(brokerage_user_ids(session, user)),
+                              Lead.campaign_id.is_(None)).all())
+    return cache[key]
 
 
 def _city_states(locations: list[Location]) -> dict[str, str]:
@@ -559,9 +573,7 @@ def facets(session: Session, user: User) -> dict:
     signal_counts: dict[str, int] = {}
     stage_counts: dict[str, int] = {}
     total = 0
-    for lead in session.query(Lead).filter(
-            Lead.user_id.in_(brokerage_user_ids(session, user)),
-            Lead.campaign_id.is_(None)).all():
+    for lead in _pool_leads(session, user):
         total += 1
         for key in split_signals(lead):
             signal_counts[key] = signal_counts.get(key, 0) + 1
@@ -766,13 +778,35 @@ def delete_leads(session: Session, user: User, lead_ids: list[int]) -> int:
     scope = brokerage_user_ids(session, user)
     deleted = 0
     for start in range(0, len(unique), DELETE_CHUNK):
+        owned = [lead_id for (lead_id,) in (
+            session.query(Lead.id)
+            .filter(Lead.user_id.in_(scope),
+                    Lead.id.in_(unique[start:start + DELETE_CHUNK]))
+            .all())]
+        if not owned:
+            continue
+        detach_lead_references(session, owned)
         deleted += (session.query(Lead)
-                    .filter(Lead.user_id.in_(scope),
-                            Lead.id.in_(unique[start:start + DELETE_CHUNK]))
+                    .filter(Lead.id.in_(owned))
                     .delete(synchronize_session=False))
     if deleted:
         session.commit()
     return int(deleted)
+
+
+def detach_lead_references(session: Session, lead_ids: list[int]) -> None:
+    """Clear rows that point at leads about to be deleted.
+
+    Postgres enforces these foreign keys (without ON DELETE), so deleting a lead
+    that still has any of them fails. The timeline events belong to the lead and
+    go with it; an integration record outlives the lead and only loses the link.
+    """
+    (session.query(LeadEvent)
+     .filter(LeadEvent.lead_id.in_(lead_ids))
+     .delete(synchronize_session=False))
+    (session.query(CombinedProperty)
+     .filter(CombinedProperty.lead_id.in_(lead_ids))
+     .update({CombinedProperty.lead_id: None}, synchronize_session=False))
 
 
 def sync_activity(session: Session, user_ids: list[int]) -> None:
@@ -781,12 +815,23 @@ def sync_activity(session: Session, user_ids: list[int]) -> None:
     Takes the brokerage's account ids rather than one, so a lead imported by a
     teammate is refreshed too.
     """
-    leads = (session.query(Lead)
-             .filter(Lead.user_id.in_(user_ids), Lead.conversation_id.isnot(None))
-             .all())
-    for lead in leads:
-        conversation = session.query(Conversation).filter(Conversation.id == lead.conversation_id).first()
-        if conversation is None:
+    # One round trip: each lead with its conversation (if it still exists) and
+    # the time of that conversation's latest message.
+    latest = (session.query(Message.conversation_id.label('conversation_id'),
+                            func.max(Message.created_at).label('created_at'))
+              .filter(Message.conversation_id.in_(
+                  session.query(Lead.conversation_id)
+                  .filter(Lead.user_id.in_(user_ids), Lead.conversation_id.isnot(None))))
+              .group_by(Message.conversation_id)
+              .subquery())
+    rows = (session.query(Lead, Conversation.id, Conversation.dnc_alert, latest.c.created_at)
+            .outerjoin(Conversation, Conversation.id == Lead.conversation_id)
+            .outerjoin(latest, latest.c.conversation_id == Lead.conversation_id)
+            .filter(Lead.user_id.in_(user_ids), Lead.conversation_id.isnot(None))
+            .all())
+    changed = False
+    for lead, conversation_id, dnc_alert, latest_at in rows:
+        if conversation_id is None:
             # The broker deleted the thread, so the contact is undone: the lead
             # leaves its campaign as well as the thread. Clearing only the
             # conversation would leave it hidden from the pool and listed under
@@ -795,13 +840,14 @@ def sync_activity(session: Session, user_ids: list[int]) -> None:
             # went with the thread.
             lead.conversation_id = None
             lead.campaign_id = None
+            changed = True
             continue
-        latest = (session.query(Message)
-                  .filter(Message.conversation_id == conversation.id)
-                  .order_by(Message.created_at.desc(), Message.id.desc())
-                  .first())
-        if latest is not None:
-            lead.last_activity_at = latest.created_at
-        if conversation.dnc_alert:
+        if latest_at is not None and lead.last_activity_at != latest_at:
+            lead.last_activity_at = latest_at
+            changed = True
+        if dnc_alert and not lead.dnc:
             lead.dnc = True
-    session.commit()
+            changed = True
+    # Committing only real changes keeps a read-only page load from writing.
+    if changed:
+        session.commit()

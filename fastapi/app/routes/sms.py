@@ -10,6 +10,7 @@ import json
 from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from ..logger import get_logger
@@ -53,23 +54,53 @@ def _owned_conversation(session: Session, conversation_id: int, user: User) -> C
     return conversation
 
 
-def _serialize(session: Session, conversation: Conversation) -> dict:
-    latest = (session.query(Message)
-              .filter(Message.conversation_id == conversation.id)
-              .order_by(Message.created_at.desc(), Message.id.desc())
-              .first())
-    count = session.query(Message).filter(Message.conversation_id == conversation.id).count()
+def _thread_summaries(session: Session, conversation_ids: list[int]) -> dict[int, tuple]:
+    """(latest message, message count, lead id) for many threads in three queries.
+
+    The database is remote, so per-thread queries made the inbox — which the
+    SMS page polls — take seconds. Ordering matches what a single thread used.
+    """
+    if not conversation_ids:
+        return {}
+    counts = dict(session.query(Message.conversation_id, func.count(Message.id))
+                  .filter(Message.conversation_id.in_(conversation_ids))
+                  .group_by(Message.conversation_id).all())
+
+    message_rank = (session.query(
+        Message.id.label('id'),
+        func.row_number().over(
+            partition_by=Message.conversation_id,
+            order_by=(Message.created_at.desc(), Message.id.desc())).label('rank'))
+        .filter(Message.conversation_id.in_(conversation_ids))
+        .subquery())
+    latest = {message.conversation_id: message for message in (
+        session.query(Message)
+        .join(message_rank, message_rank.c.id == Message.id)
+        .filter(message_rank.c.rank == 1).all())}
+
     # The pool row behind the thread, when it came from an import. It is what
     # the details panel reads, so the thread can offer the same ⓘ as the pool.
     # One phone-number thread may represent several property leads. Returning
-    # the most recently active row keeps the info action deterministic; using
-    # scalar() here raised MultipleResultsFound *after* a successful handover,
-    # which made the UI report a false server failure.
-    lead_row = (session.query(Lead.id)
-                .filter(Lead.conversation_id == conversation.id)
-                .order_by(Lead.last_activity_at.desc(), Lead.id.desc())
-                .first())
-    lead_id = lead_row[0] if lead_row else None
+    # the most recently active row keeps the info action deterministic.
+    lead_rank = (session.query(
+        Lead.id.label('id'), Lead.conversation_id.label('conversation_id'),
+        func.row_number().over(
+            partition_by=Lead.conversation_id,
+            order_by=(Lead.last_activity_at.desc(), Lead.id.desc())).label('rank'))
+        .filter(Lead.conversation_id.in_(conversation_ids))
+        .subquery())
+    lead_ids = dict(session.query(lead_rank.c.conversation_id, lead_rank.c.id)
+                    .filter(lead_rank.c.rank == 1).all())
+
+    return {conversation_id: (latest.get(conversation_id), counts.get(conversation_id, 0),
+                              lead_ids.get(conversation_id))
+            for conversation_id in conversation_ids}
+
+
+def _serialize(session: Session, conversation: Conversation, summary: tuple | None = None) -> dict:
+    if summary is None:
+        summary = _thread_summaries(session, [conversation.id])[conversation.id]
+    latest, count, lead_id = summary
     # The broker owes a reply when Bobbie has stepped back and the owner spoke last.
     awaiting = bool(
         conversation.handled_by == 'broker'
@@ -156,7 +187,9 @@ def list_conversations(current_user: User = Depends(get_current_user), session: 
                          brokerage_user_ids(session, current_user)))
                      .order_by(Conversation.created_at.desc())
                      .all())
-    return [_serialize(session, conversation) for conversation in conversations]
+    summaries = _thread_summaries(session, [conversation.id for conversation in conversations])
+    return [_serialize(session, conversation, summaries[conversation.id])
+            for conversation in conversations]
 
 
 @router.post('/conversations', response_model=SmsConversationCreated, status_code=201)

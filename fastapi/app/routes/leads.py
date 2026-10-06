@@ -311,6 +311,7 @@ def delete_lead(lead_id: int, current_user: User = Depends(get_current_user),
             .first())
     if not lead:
         raise HTTPException(status_code=404, detail='Lead not found')
+    leads_service.detach_lead_references(session, [lead.id])
     session.delete(lead)
     session.commit()
     return {'ok': True}

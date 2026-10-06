@@ -516,6 +516,32 @@ def test_bulk_delete_rejects_an_empty_selection(client, make_user, auth_header):
     assert response.status_code == 422
 
 
+def test_delete_clears_events_and_unlinks_integration_records(
+        client, make_user, auth_header, session):
+    # Postgres enforces these foreign keys; deleting a lead that still had any
+    # failed with a 500 the browser reported as "Unable to reach the server".
+    from app.integration_data.models import CombinedProperty
+    from app.models import LeadEvent
+
+    make_user(BROKER_EMAIL, role='broker')
+    headers = auth_header(BROKER_EMAIL)
+    upload(client, headers)
+    ids = [item['id'] for item in client.get(LEADS_URL, headers=headers).json()['leads']]
+    for lead_id in ids[:2]:
+        session.add(LeadEvent(lead_id=lead_id, event_category='activity', event_type='note'))
+    session.add(CombinedProperty(mode='test', property_key='k1', content_hash='h', lead_id=ids[0]))
+    session.commit()
+
+    assert client.post(f'{LEADS_URL}/delete', headers=headers,
+                       json={'lead_ids': [ids[0]]}).json() == {'deleted': 1}
+    assert client.delete(f'{LEADS_URL}/{ids[1]}', headers=headers).status_code == 200
+
+    session.expire_all()
+    assert session.query(LeadEvent).filter(LeadEvent.lead_id.in_(ids[:2])).count() == 0
+    record = session.query(CombinedProperty).filter_by(property_key='k1').one()
+    assert record.lead_id is None
+
+
 def test_deleting_a_campaigned_lead_keeps_the_conversation(
         client, make_user, auth_header, sent_sms):
     make_user(BROKER_EMAIL, role='broker')

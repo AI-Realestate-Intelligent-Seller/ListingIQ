@@ -16,6 +16,9 @@ from app.db import SessionLocal
 from .queue import process_one, recover_interrupted
 
 
+IDLE_POLL_SECONDS = 30.0
+
+
 def main() -> None:
     logger = logging.getLogger(__name__)
     with SessionLocal() as session:
@@ -29,7 +32,8 @@ def main() -> None:
                 processed = process_one(session)
         except Exception:  # noqa: BLE001 - one bad row must not stop the queue
             logger.exception('Lead geocoding worker iteration failed')
-        time.sleep(interval if processed else 3.0)
+        # Idle checks are round trips to a remote database; new leads can wait a little.
+        time.sleep(interval if processed else IDLE_POLL_SECONDS)
 
 
 def start_geocoding_worker() -> threading.Thread | None:

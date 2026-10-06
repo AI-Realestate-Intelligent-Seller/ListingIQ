@@ -14,9 +14,26 @@ query that forgets it is a visible omission rather than a silent leak.
 
 from __future__ import annotations
 
+from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from .models import User
+
+
+# Read-mostly lookups memoized on the session for the life of one transaction.
+# The database is remote, so each repeated query in a request costs a network
+# round trip; any commit or rollback drops the memo so writes are always seen.
+SESSION_CACHE_KEY = 'request_cache'
+
+
+def session_cache(session: Session) -> dict:
+    return session.info.setdefault(SESSION_CACHE_KEY, {})
+
+
+@event.listens_for(Session, 'after_commit')
+@event.listens_for(Session, 'after_rollback')
+def _drop_session_cache(session: Session) -> None:
+    session.info.pop(SESSION_CACHE_KEY, None)
 
 
 def brokerage_user_ids(session: Session, user: User) -> list[int]:
@@ -29,10 +46,14 @@ def brokerage_user_ids(session: Session, user: User) -> list[int]:
     """
     if not user.brokerage_id:
         return [user.id]
-    rows = (session.query(User.id)
-            .filter(User.brokerage_id == user.brokerage_id)
-            .all())
-    ids = [row[0] for row in rows]
+    cache = session_cache(session)
+    key = ('brokerage_user_ids', user.id, user.brokerage_id)
+    if key not in cache:
+        rows = (session.query(User.id)
+                .filter(User.brokerage_id == user.brokerage_id)
+                .all())
+        cache[key] = [row[0] for row in rows]
+    ids = list(cache[key])
     # The caller's own id is always in scope, even mid-transaction.
     if user.id not in ids:
         ids.append(user.id)
