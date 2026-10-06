@@ -93,7 +93,8 @@ class Configuration(BaseModel):
         max_items=21,
     )
     locations: list[str] = Field(default_factory=list, max_items=100)
-    combination: Literal["AND", "OR"] = "OR"
+    # Optional: only AND narrows the results; empty or OR keeps every returned page.
+    combination: Literal["AND", "OR"] | None = None
     propertySearchEnabled: bool = True
     contactEnrichmentEnabled: bool = True
     publicWebhookUrl: str = Field("", max_length=2000)
@@ -134,7 +135,8 @@ class Configuration(BaseModel):
 class ProductRequest(BaseModel):
     selected_categories: list[str] = Field(min_items=1, max_items=21)
     locations: list[str] = Field(min_items=1, max_items=100)
-    combination: Literal["AND", "OR"] = "OR"
+    # Optional: only AND narrows the results; empty or OR keeps every returned page.
+    combination: Literal["AND", "OR"] | None = None
     rows_per_category: int = Field(20, ge=1, le=20)
     confirmed: bool = False
     reason: str = Field("", max_length=500)

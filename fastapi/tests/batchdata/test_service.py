@@ -108,7 +108,7 @@ class FakeClient:
         return self.request("POST", "/api/v1/property/skip-trace", body)
 
 
-@pytest.mark.parametrize("combination,expected_unique", [("OR", 3), ("AND", 1)])
+@pytest.mark.parametrize("combination,expected_unique", [("OR", 3), ("AND", 1), (None, 3)])
 def test_normal_product_flow_uses_current_fields_in_sandbox(
     tmp_path, monkeypatch, caplog, combination, expected_unique
 ):

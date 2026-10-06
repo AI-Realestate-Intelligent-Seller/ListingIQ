@@ -73,7 +73,7 @@ type Config = {
   rowsPerCategory: number;
   selectedCategories: string[];
   locations: string[];
-  combination: "AND" | "OR";
+  combination: "AND" | "OR" | null;
   propertySearchEnabled: boolean;
   contactEnrichmentEnabled: boolean;
   publicWebhookUrl: string;
@@ -776,19 +776,23 @@ function ProductData({
                 />
               </label>
               <label>
-                Combination
+                Combination (optional)
                 <select
-                  value={draft.combination}
+                  value={draft.combination ?? ""}
                   onChange={(event) =>
-                    change("combination", event.target.value as "AND" | "OR")
+                    change(
+                      "combination",
+                      (event.target.value || null) as "AND" | "OR" | null,
+                    )
                   }
                 >
-                  <option>OR</option>
-                  <option>AND</option>
+                  <option value="">None</option>
+                  <option value="OR">OR</option>
+                  <option value="AND">AND</option>
                 </select>
                 <small>
-                  OR combines returned category pages. AND keeps properties
-                  present in every returned category page.
+                  None or OR keeps every returned category page. AND keeps
+                  only properties present in every returned category page.
                 </small>
               </label>
               <NumberField
