@@ -27,7 +27,6 @@ vi.mock("@/features/campaigns/api/campaigns-api", () => ({
 }));
 
 vi.mock("@/features/sms/api/sms-api", () => ({
-  createConversation: vi.fn(),
   listMessages: vi.fn(() => Promise.resolve([])),
   sendMessage: vi.fn(),
   setHandover: vi.fn(),
@@ -40,8 +39,9 @@ vi.mock("../api/followups-api", () => ({
   suggestReplies: vi.fn(),
 }));
 
-vi.mock("@/features/sms/components/new-conversation-dialog", () => ({
-  NewConversationDialog: () => null,
+vi.mock("@/features/dashboard/components/notification-bell", () => ({ NotificationBell: () => null }));
+vi.mock("@/features/dashboard/components/notification-provider", () => ({
+  useNotifications: () => ({ markConversationAsRead: vi.fn() }),
 }));
 vi.mock("./appointment-dialog", () => ({ AppointmentDialog: () => null }));
 vi.mock("@/features/leads/components/lead-detail-drawer", () => ({
@@ -72,5 +72,10 @@ describe("FollowUpsBoard scope filter", () => {
       expect(request.mock.calls.some((call) => call[1] === "all")).toBe(true);
     });
     expect(screen.getByRole("button", { name: "All" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("does not offer starting a new conversation", () => {
+    render(<FollowUpsBoard />);
+    expect(screen.queryByRole("button", { name: /new conversation/i })).toBeNull();
   });
 });

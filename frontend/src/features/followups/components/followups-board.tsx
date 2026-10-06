@@ -8,7 +8,7 @@ import { listCampaigns } from "@/features/campaigns/api/campaigns-api";
 import type { Campaign } from "@/features/campaigns/types/campaigns.types";
 import { readAuthSession } from "@/features/auth/lib/auth-storage";
 import { endSession } from "@/features/auth/lib/session-guard";
-import { createConversation, listMessages, sendMessage, setHandover } from "@/features/sms/api/sms-api";
+import { listMessages, sendMessage, setHandover } from "@/features/sms/api/sms-api";
 import {
   LEAD_LABELS,
   LEAD_STATUS_ORDER,
@@ -17,8 +17,7 @@ import {
   formatTime,
   initials,
 } from "@/features/sms/lib/sms-format";
-import type { LeadStatus, NewConversationPayload, SmsMessage } from "@/features/sms/types/sms.types";
-import { NewConversationDialog } from "@/features/sms/components/new-conversation-dialog";
+import type { LeadStatus, SmsMessage } from "@/features/sms/types/sms.types";
 import { ApiRequestError } from "@/lib/api/http-client";
 import { LeadDetailDrawer } from "@/features/leads/components/lead-detail-drawer";
 import { LeadTimeline } from "@/features/leads/components/lead-timeline";
@@ -107,7 +106,6 @@ export function FollowUpsBoard({
   const [isWorking, setIsWorking] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [isSchedulerOpen, setIsSchedulerOpen] = useState(false);
-  const [isNewConversationOpen, setIsNewConversationOpen] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [notice, setNotice] = useState("");
   /** Drafted replies, tagged with the thread whose history they answer. */
@@ -358,21 +356,6 @@ useEffect(() => {
   markConversationAsRead,
 ]);
 
-  async function handleCreate(payload: NewConversationPayload): Promise<void> {
-    const result = await createConversation(payload, token);
-    setIsNewConversationOpen(false);
-    setScope("all");
-    setSelectedCampaignId("");
-    setSearch("");
-    setNotice(
-      result.started
-        ? `Bobbie's introduction was sent to ${result.conversation.contact}.`
-        : `Thread created for ${result.conversation.contact}. Nothing sent yet.`,
-    );
-    setFollowUps(await listFollowUps(token, "all"));
-    setActiveId(result.conversation.id);
-  }
-
   // The first message the assignee sent by hand is where Bobbie stepped aside.
   const takeoverId =
     messages.find((message) => message.event_type === "broker.message")?.id ?? null;
@@ -501,9 +484,6 @@ useEffect(() => {
         </div>
         <div className="dashboard-header-actions">
           <NotificationBell />
-          <button className="button" type="button" onClick={() => setIsNewConversationOpen(true)}>
-            + New conversation
-          </button>
         </div>
       </header>
 
@@ -918,12 +898,6 @@ useEffect(() => {
         accessToken={token}
         onClose={() => setIsSchedulerOpen(false)}
         onBook={handleBook}
-      />
-
-      <NewConversationDialog
-        open={isNewConversationOpen}
-        onClose={() => setIsNewConversationOpen(false)}
-        onCreate={handleCreate}
       />
 
       {/* The thread is already open here, so the panel offers the property
