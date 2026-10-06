@@ -227,7 +227,7 @@ def test_batch_contact_metadata_and_owner_phone_relationship_survive_distributio
                 "akas": [{"full": "Moriah Theobald", "rank": 1}],
             },
             "emails": [{"email": "owner@example.com", "rank": 1}],
-            "phones": [
+            "phoneNumbers": [
                 {"number": "2193748814", "dnc": False, "reachable": False,
                  "carrier": "Indiana Bell", "type": "Land Line"},
                 {"number": "2193843336", "dnc": True, "reachable": True,

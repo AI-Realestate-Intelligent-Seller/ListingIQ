@@ -390,6 +390,116 @@ export function RealEstateProfile({ details, latitude, longitude, leadSignals }:
   );
 }
 
+function fullContactName(contact: Record<string, unknown>, fallback: string): string {
+  const name = objectValue(contact.name);
+  return String(
+    contact.owner_name ||
+    contact.fullName ||
+    contact.full ||
+    name.full ||
+    [contact.first, contact.middle, contact.last].filter(Boolean).join(" ") ||
+    [name.first, name.middle, name.last].filter(Boolean).join(" ") ||
+    fallback,
+  );
+}
+
+function contactDnc(phone: Record<string, unknown>): boolean | null {
+  for (const key of ["dnc", "isDnc", "isDNC", "doNotCall", "do_not_call"]) {
+    if (!Object.hasOwn(phone, key)) continue;
+    const value = phone[key];
+    if (typeof value === "boolean") return value;
+    if (typeof value === "string") {
+      if (["true", "yes", "y", "dnc", "blocked"].includes(value.toLowerCase())) return true;
+      if (["false", "no", "n", "clear"].includes(value.toLowerCase())) return false;
+    }
+  }
+  return null;
+}
+
+function OwnerContactIntelligence({
+  details,
+  ownerName,
+  leadPhones,
+}: {
+  details: Record<string, unknown>;
+  ownerName: string | null;
+  leadPhones: { phone: string; dnc: boolean; owner_name?: string }[];
+}) {
+  const provider = objectValue(details.provider_property_details);
+  const owner = objectValue(provider.owner);
+  const contacts = arrayValue(details.contacts).map(objectValue);
+  const detailPhones = arrayValue(details.phones).map((value) =>
+    typeof value === "string" ? { number: value } : objectValue(value),
+  );
+  const fallbackContact: Record<string, unknown> = {
+    owner_name: ownerName || owner.fullName || "Owner not identified",
+    phones: [
+      ...leadPhones.map((phone) => ({ ...phone, number: phone.phone })),
+      ...detailPhones,
+    ],
+    emails: arrayValue(details.emails),
+  };
+  const shownContacts = contacts.length ? contacts : [fallbackContact];
+  const ownerMailing = objectValue(owner.mailingAddress);
+  const mailingLabel = [ownerMailing.street, ownerMailing.city, ownerMailing.state, ownerMailing.zip]
+    .filter(Boolean).join(", ");
+
+  return (
+    <DetailSection title="Owner & contact details" defaultOpen fullWidth>
+      <div className="leads-owner-profile-head">
+        <div><span>PROPERTY OWNER</span><strong>{String(owner.fullName || ownerName || "Not on file")}</strong><small>{mailingLabel || "Mailing address not on file"}</small></div>
+        <span>{shownContacts.length} contact profile{shownContacts.length === 1 ? "" : "s"}</span>
+      </div>
+
+      {shownContacts.map((contact, contactIndex) => {
+        const contactPhones = [
+          ...arrayValue(contact.phones),
+          ...arrayValue(contact.phoneNumbers),
+        ].map((value) => typeof value === "string" ? { number: value } : objectValue(value));
+        const knownNumbers = new Set(contactPhones.map((phone) => String(phone.number || phone.phone || "")));
+        const supplementalPhones: Record<string, unknown>[] = leadPhones
+          .filter((phone) => !knownNumbers.has(phone.phone))
+          .map((phone) => ({ ...phone, number: phone.phone }));
+        const phones: Record<string, unknown>[] = [...contactPhones, ...supplementalPhones];
+        const emails = arrayValue(contact.emails).map((value) =>
+          typeof value === "string" ? { email: value } : objectValue(value),
+        );
+        const contactName = fullContactName(contact, ownerName || "Owner not identified");
+        return (
+          <article className="leads-contact-profile" key={`${contactName}-${contactIndex}`}>
+            <div className="leads-contact-title"><div><span>CONTACT {contactIndex + 1}</span><h4>{contactName}</h4></div><span>{phones.length} phone{phones.length === 1 ? "" : "s"} · {emails.length} email{emails.length === 1 ? "" : "s"}</span></div>
+            <div className="leads-data-table-wrap">
+              <table className="leads-data-table leads-contact-table"><thead><tr><th>Phone</th><th>DNC status</th><th>Type</th><th>Carrier</th><th>Reachable</th></tr></thead><tbody>
+                {phones.length ? phones.map((phone, phoneIndex) => {
+                  const number = String(phone.number || phone.phone || phone.value || "—");
+                  const dnc = contactDnc(phone);
+                  return <tr key={`${number}-${phoneIndex}`}>
+                    <td>{dnc === true || number === "—" ? formatPhone(number) : <a href={`tel:${number}`}>{formatPhone(number)}</a>}</td>
+                    <td><span className={`leads-dnc-state ${dnc === true ? "blocked" : dnc === false ? "clear" : "unknown"}`}>{dnc === true ? "DNC — do not contact" : dnc === false ? "Clear" : "Not provided"}</span></td>
+                    <td>{scalarValue(phone.type ?? phone.phoneType)}</td>
+                    <td>{scalarValue(phone.carrier ?? phone.carrierName)}</td>
+                    <td>{scalarValue(phone.reachable)}</td>
+                  </tr>;
+                }) : <tr><td colSpan={5}>No phone numbers on file.</td></tr>}
+              </tbody></table>
+            </div>
+            <div className="leads-data-table-wrap leads-contact-email-table">
+              <table className="leads-data-table compact"><thead><tr><th>Email</th><th>Status / type</th><th>Rank</th></tr></thead><tbody>
+                {emails.length ? emails.map((email, emailIndex) => {
+                  const address = String(email.email || email.address || email.value || "—");
+                  return <tr key={`${address}-${emailIndex}`}><td>{address === "—" ? address : <a href={`mailto:${address}`}>{address}</a>}</td><td>{scalarValue(email.status ?? email.type ?? email.emailType)}</td><td>{scalarValue(email.rank)}</td></tr>;
+                }) : <tr><td colSpan={3}>No email addresses on file.</td></tr>}
+              </tbody></table>
+            </div>
+          </article>
+        );
+      })}
+
+      <p className="leads-drawer-note">DNC is shown per phone. “Not provided” means the provider did not supply a contact restriction; it is not treated as confirmed clearance.</p>
+    </DetailSection>
+  );
+}
+
 /** Fallback wording when the caller has no stage catalog of its own to pass. */
 const DEFAULT_STAGE_LABELS: Record<string, string> = {
   ready: "Ready",
@@ -514,36 +624,20 @@ export function LeadDetailDrawer({
                 </dl>
               </DetailSection>
 
-              <DetailSection title="Ownership & contacts" defaultOpen>
-                <dl className="leads-facts">
-                  <div>
-                    <dt>Property owners</dt>
-                    <dd>{shown.owner_name || "Not on file"}</dd>
-                  </div>
-                  <div>
-                    <dt>Contacts</dt>
-                    <dd className="leads-owner-contacts">
-                      {shown.phone_numbers.length > 0 ? shown.phone_numbers.map((contact) => (
-                        <span className="leads-owner-contact" key={contact.phone}>
-                          <span>{contact.owner_name || shown.owner_name || "Owner not identified"}</span>
-                          {contact.dnc ? (
-                            <span>{contact.phone} <strong>DNC</strong></span>
-                          ) : (
-                            <a href={`tel:${contact.phone}`}>{formatPhone(contact.phone)}</a>
-                          )}
-                        </span>
-                      )) : "Not on file"}
-                    </dd>
-                  </div>
-                </dl>
-              </DetailSection>
+              <OwnerContactIntelligence
+                details={shown.details}
+                ownerName={shown.owner_name}
+                leadPhones={shown.phone_numbers}
+              />
 
               <RealEstateProfile details={shown.details} latitude={shown.latitude} longitude={shown.longitude} leadSignals={shown.signals} />
 
               {Object.keys(shown.details).length > 0 && !hasRealEstateProfile(shown.details) ? (
                 <DetailSection title="Property details" fullWidth>
                   <dl className="leads-facts">
-                    {Object.entries(shown.details).map(([key, value]) => (
+                    {Object.entries(shown.details)
+                      .filter(([key]) => !["contacts", "contact_match_metadata", "phones", "emails"].includes(key))
+                      .map(([key, value]) => (
                       <div key={key}>
                         <dt>{attributeLabel(key)}</dt>
                         <dd>{attributeValue(value)}</dd>

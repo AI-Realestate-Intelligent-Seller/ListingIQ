@@ -19,6 +19,7 @@ vi.mock("@/features/auth/lib/auth-storage", () => ({
   readAuthSession: () => ({ access_token: "test-token" }),
 }));
 vi.mock("@/features/auth/lib/session-guard", () => ({ endSession: vi.fn() }));
+vi.mock("@/features/dashboard/components/notification-bell", () => ({ NotificationBell: () => null }));
 vi.mock("@/features/campaigns/api/campaigns-api", () => ({ createCampaignDraft: vi.fn() }));
 vi.mock("../api/leads-api", () => ({
   deleteLeads: vi.fn(),
@@ -148,6 +149,41 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("LeadPool dependent location filters", () => {
+  it("opens the map when a mapped lead is clicked in the table", async () => {
+    vi.mocked(fetchLeadPool).mockResolvedValueOnce({
+      ...emptyPool,
+      leads: [{
+        id: 71,
+        owner_name: "Mapped Owner",
+        phone: "+13125550171",
+        phone_numbers: [{ phone: "+13125550171", dnc: false }],
+        property_address: "123 Main St, Chicago, IL 60601",
+        area: "Chicago",
+        latitude: 41.88,
+        longitude: -87.63,
+        geocoding_status: "success",
+        geocoding_provider: "nominatim",
+        source: "provider_distribution",
+        property_type: "Single family",
+        estimated_value: 350000,
+        listing_price: null,
+        signals: [],
+        score: 70,
+        outreach_reason: null,
+        stage: "ready",
+        last_activity_at: null,
+        conversation_id: null,
+        created_at: null,
+      }],
+      map: { mappable_count: 1, pending_count: 0, failed_count: 0 },
+      facets: { total: 1, signals: {}, stages: { ready: 1 } },
+    });
+
+    render(<LeadPool />);
+    fireEvent.click(await screen.findByRole("button", { name: "Mapped Owner" }));
+    expect(screen.getByRole("button", { name: "Hide map" })).toBeTruthy();
+  });
+
   it("shows only the selected state's cities and ZIP codes after the state changes", async () => {
     render(<LeadPool />);
 

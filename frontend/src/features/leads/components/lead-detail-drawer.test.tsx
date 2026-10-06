@@ -53,7 +53,22 @@ const distributedLead: LeadDetail = {
     provider_property_details: {
       building: { bedroomCount: 4, yearBuilt: 2024 },
       deedHistory: [{ buyers: ["THEOBALD CHRISTOPHER", "THEOBALD MORIAH"] }],
+      owner: {
+        fullName: "Christopher Theobald; Moriah Theobald",
+        mailingAddress: { street: "123 Main St", city: "Austin", state: "TX", zip: "78701" },
+      },
     },
+    contacts: [{
+      owner_name: "Moriah Theobald",
+      name: { full: "Moriah M Garrity", akas: [{ full: "Moriah Theobald" }] },
+      phones: [
+        { number: "+15551234567", dnc: false, reachable: true, type: "Mobile", carrier: "Example Wireless" },
+        { number: "+15557654321", dnc: true, reachable: false, type: "Land Line", carrier: "Example Telecom" },
+      ],
+      emails: [{ email: "moriah@example.com", status: "Valid", rank: 1 }],
+      propertyOwner: true,
+    }],
+    contact_match_metadata: [{ matched: true, confidence: "High" }],
   },
   score_breakdown: [],
   conversation: null,
@@ -78,18 +93,23 @@ describe("LeadDetailDrawer", () => {
 
     expect(screen.getByRole("dialog").classList.contains("leads-detail-modal")).toBe(true);
     expect(
-      await screen.findAllByText("Christopher Theobald; Moriah Theobald"),
-    ).toHaveLength(1);
+      (await screen.findAllByText("Christopher Theobald; Moriah Theobald")).length,
+    ).toBeGreaterThan(0);
     const propertyDetailsSummary = screen.getByText("Property details");
     const propertyDetails = propertyDetailsSummary.closest("details");
     expect(propertyDetails?.open).toBe(false);
     fireEvent.click(propertyDetailsSummary);
     expect(propertyDetails?.open).toBe(true);
-    expect(screen.getAllByText("Moriah Theobald")).toHaveLength(2);
-    expect(screen.getAllByText("DNC").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("+15551234567").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("+15557654321").length).toBeGreaterThan(0);
-    expect(screen.getByText("Example Wireless")).toBeTruthy();
+    expect(screen.getAllByText("Moriah Theobald").length).toBeGreaterThan(0);
+    expect(screen.getByText("DNC — do not contact")).toBeTruthy();
+    expect(screen.getByText("Clear")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "moriah@example.com" })).toBeTruthy();
+    expect(screen.queryByText("Complete provider contact profile")).toBeNull();
+    expect(screen.queryByText("Complete owner profile")).toBeNull();
+    expect(screen.queryByText("Contact match evidence")).toBeNull();
+    expect(screen.getByRole("link", { name: "(555) 123-4567" })).toBeTruthy();
+    expect(screen.getByText("(555) 765-4321")).toBeTruthy();
+    expect(screen.getAllByText("Example Wireless").length).toBeGreaterThan(0);
     expect(screen.getByText("batchdata")).toBeTruthy();
     expect(screen.getByText("property-1")).toBeTruthy();
     expect(screen.getByText("2024")).toBeTruthy();

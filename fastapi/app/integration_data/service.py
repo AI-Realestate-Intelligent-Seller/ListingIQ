@@ -300,7 +300,11 @@ def source_records(db, provider, mode):
                     owner_name = _person_name(person, property_owners)
                     person_phones = [
                         phone_entry(phone, owner_name=owner_name)
-                        for phone in person.get("phones", []) or []
+                        for phone in (
+                            person.get("phones")
+                            or person.get("phoneNumbers")
+                            or []
+                        )
                     ]
                     person_phones = [phone for phone in person_phones if phone]
                     phones.extend(person_phones)

@@ -145,6 +145,11 @@ def load_config():
         'max_retries': int(os.getenv(
             'GEOCODING_MAX_RETRIES', geocoding_cfg.get('max_retries', 3),
         )),
+        # The API runs the geocoding queue in-process unless this is turned off
+        # (e.g. when a dedicated `python -m app.location.worker` process runs it).
+        'worker_enabled': str(os.getenv(
+            'GEOCODING_WORKER_ENABLED', geocoding_cfg.get('worker_enabled', True),
+        )).strip().lower() not in ('0', 'false', 'no', 'off'),
     }
     cfg['redis_url'] = os.getenv('REDIS_URL', 'redis://127.0.0.1:6379')
     cfg['frontend_url'] = os.getenv('FRONTEND_URL', cfg.get('frontend_url', 'http://localhost:3000'))

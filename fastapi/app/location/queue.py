@@ -48,6 +48,8 @@ def process_one(session: Session, geocoder: Geocoder | None = None) -> bool:
     lead = (session.query(Lead)
             .filter(Lead.geocoding_status == 'pending')
             .order_by(Lead.created_at.asc(), Lead.id.asc())
+            # Several API processes may each run a worker; never claim the same row twice.
+            .with_for_update(skip_locked=True)
             .first())
     if lead is None:
         return False

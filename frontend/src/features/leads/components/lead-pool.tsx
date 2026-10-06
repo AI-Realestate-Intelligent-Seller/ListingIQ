@@ -208,6 +208,9 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
   const [notice, setNotice] = useState("");
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [showMap, setShowMap] = useState(false);
+  const [focusedLeadId, setFocusedLeadId] = useState<number | null>(null);
+  const [mapFocusToken, setMapFocusToken] = useState(0);
+  const [hoveredLeadId, setHoveredLeadId] = useState<number | null>(null);
   const [draftMapBounds, setDraftMapBounds] = useState<MapBounds | null>(null);
   const [mapBounds, setMapBounds] = useState<MapBounds | null>(null);
   const [mapPolygon, setMapPolygon] = useState<MapPoint[] | null>(null);
@@ -216,6 +219,7 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
   const [searchAreaPolygon, setSearchAreaPolygon] = useState<AreaGeometry | null>(null);
 
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const mapSectionRef = useRef<HTMLDivElement | null>(null);
   const dragDepthRef = useRef(0);
   const router = useRouter();
   const token = useMemo(() => readAuthSession()?.access_token ?? "", []);
@@ -359,6 +363,31 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
       current.includes(id) ? current.filter((item) => item !== id) : [...current, id],
     );
   }
+
+  function focusLeadOnMap(lead: Lead): void {
+    if (lead.latitude == null || lead.longitude == null) {
+      setNotice("This lead does not have a mapped location yet.");
+      return;
+    }
+    setFocusedLeadId(lead.id);
+    setMapFocusToken((value) => value + 1);
+    setShowMap(true);
+  }
+
+  // A pin clicked on the map highlights its row without moving the map again.
+  function focusLeadFromMap(leadId: number): void {
+    setFocusedLeadId(leadId);
+  }
+
+  // The focus lapses once filters remove that lead, so the map can fit the new results.
+  const activeFocusId = focusedLeadId !== null && leadsToShow.some((lead) => lead.id === focusedLeadId)
+    ? focusedLeadId
+    : null;
+
+  useEffect(() => {
+    if (!showMap || activeFocusId === null) return;
+    mapSectionRef.current?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+  }, [activeFocusId, mapFocusToken, showMap]);
 
   function toggleAll(): void {
     setSelected((current) =>
@@ -1117,7 +1146,10 @@ useEffect(() => {
             <button
               type="button"
               className="leads-clear"
-              onClick={() => setFitMapToken((value) => value + 1)}
+              onClick={() => {
+                setFocusedLeadId(null);
+                setFitMapToken((value) => value + 1);
+              }}
             >
               {searchAreaBounds ? "Fit search area" : "Fit results"}
             </button>
@@ -1134,23 +1166,28 @@ useEffect(() => {
       </div>
 
       {showMap ? (
-        <LeadMap
-          leads={leadsToShow}
-          selectedIds={selected}
-          focusLeadId={selected.length ? selected[selected.length - 1] : null}
-          fitToken={fitMapToken}
-          searchAreaBounds={searchAreaBounds}
-          searchAreaPolygon={searchAreaPolygon}
-          onToggleLead={toggleLead}
-          onViewLead={setDetailId}
-          onBoundsChange={setDraftMapBounds}
-          activePolygon={mapPolygon}
-          onPolygonApply={(polygon) => {
-            setMapBounds(null);
-            setMapPolygon(polygon);
-          }}
-          onPolygonClear={() => setMapPolygon(null)}
-        />
+        <div ref={mapSectionRef}>
+          <LeadMap
+            leads={leadsToShow}
+            selectedIds={selected}
+            focusLeadId={activeFocusId}
+            focusToken={mapFocusToken}
+            hoveredLeadId={hoveredLeadId}
+            fitToken={fitMapToken}
+            searchAreaBounds={searchAreaBounds}
+            searchAreaPolygon={searchAreaPolygon}
+            onToggleLead={toggleLead}
+            onViewLead={setDetailId}
+            onFocusLead={focusLeadFromMap}
+            onBoundsChange={setDraftMapBounds}
+            activePolygon={mapPolygon}
+            onPolygonApply={(polygon) => {
+              setMapBounds(null);
+              setMapPolygon(polygon);
+            }}
+            onPolygonClear={() => setMapPolygon(null)}
+          />
+        </div>
       ) : null}
 
       {selectedVisible.length > 0 ? (
@@ -1227,7 +1264,12 @@ useEffect(() => {
            {leadsToShow.map((lead) => {
               const isChecked = selected.includes(lead.id);
               return (
-                <tr key={lead.id} className={isChecked ? "selected" : undefined}>
+                <tr
+                  key={lead.id}
+                  className={`${isChecked ? "selected " : ""}${activeFocusId === lead.id ? "map-focused" : ""}`.trim() || undefined}
+                  onMouseEnter={() => setHoveredLeadId(lead.id)}
+                  onMouseLeave={() => setHoveredLeadId((current) => (current === lead.id ? null : current))}
+                >
                   <td className="leads-select-cell">
                     <input
                       type="checkbox"
@@ -1240,7 +1282,8 @@ useEffect(() => {
                     <button
                       type="button"
                       className="leads-owner"
-                      onClick={() => setDetailId(lead.id)}
+                      onClick={() => focusLeadOnMap(lead)}
+                      title={lead.latitude == null || lead.longitude == null ? "Map location pending" : "Locate this lead on the map"}
                     >
                       {lead.owner_name || lead.phone || "Unnamed owner"}
                     </button>

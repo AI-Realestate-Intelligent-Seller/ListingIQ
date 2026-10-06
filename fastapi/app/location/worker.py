@@ -1,6 +1,13 @@
-"""Run with ``python -m app.location.worker`` from project/fastapi."""
+"""Background lead geocoding.
+
+The API starts this on boot (see ``start_geocoding_worker``) so every lead that
+enters the pool is geocoded once and its coordinates are stored for reuse. It
+can also run standalone with ``python -m app.location.worker`` from
+project/fastapi.
+"""
 
 import logging
+import threading
 import time
 
 from app.core.config import settings
@@ -23,6 +30,14 @@ def main() -> None:
         except Exception:  # noqa: BLE001 - one bad row must not stop the queue
             logger.exception('Lead geocoding worker iteration failed')
         time.sleep(interval if processed else 3.0)
+
+
+def start_geocoding_worker() -> threading.Thread | None:
+    if not settings['geocoding']['worker_enabled']:
+        return None
+    thread = threading.Thread(target=main, daemon=True, name='geocoding-worker')
+    thread.start()
+    return thread
 
 
 if __name__ == '__main__':

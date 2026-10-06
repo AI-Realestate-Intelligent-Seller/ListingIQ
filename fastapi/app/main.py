@@ -29,6 +29,7 @@ from .routes import (
 from .routes.websocket import router as websocket_router
 from .routes.push import router as push_router
 from .reminder.worker import start_reminder_worker
+from .location.worker import start_geocoding_worker
 
 app = FastAPI(title="ListingIQ API")
 
@@ -169,6 +170,7 @@ def startup_event():
     start_followup_scheduler()
     _warm_knowledge_base()
     start_reminder_worker()
+    start_geocoding_worker()
 
 
 def _warm_knowledge_base():

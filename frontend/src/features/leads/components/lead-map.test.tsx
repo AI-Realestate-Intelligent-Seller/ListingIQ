@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { ReactNode } from "react";
+import { forwardRef, useImperativeHandle, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Lead } from "../types/leads.types";
@@ -12,6 +12,14 @@ const fakeMap = {
   flyTo: vi.fn(),
   flyToBounds: vi.fn(),
   fitBounds: vi.fn(),
+  panTo: vi.fn(),
+  invalidateSize: vi.fn(),
+  once: vi.fn((_event: string, callback: () => void) => callback()),
+};
+const fakeMarker = { getLatLng: () => ({ lat: 41.88, lng: -87.74 }), openPopup: vi.fn() };
+const fakeCluster = {
+  hasLayer: () => true,
+  zoomToShowLayer: vi.fn((_layer: unknown, callback?: () => void) => callback?.()),
 };
 const mapHandlers: Record<string, (event: { latlng: { lat: number; lng: number } }) => void> = {};
 
@@ -19,9 +27,13 @@ vi.mock("react-leaflet", () => ({
   MapContainer: ({ children }: { children: ReactNode }) => <div data-testid="map-container">{children}</div>,
   TileLayer: () => null,
   Popup: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  Marker: ({ children, eventHandlers }: { children: ReactNode; eventHandlers: { click: () => void } }) => (
-    <div role="button" tabIndex={0} data-testid="marker" onClick={eventHandlers.click}>{children}</div>
-  ),
+  Marker: forwardRef(function Marker(
+    { children, eventHandlers }: { children: ReactNode; eventHandlers: { click: () => void } },
+    ref,
+  ) {
+    useImperativeHandle(ref, () => fakeMarker);
+    return <div role="button" tabIndex={0} data-testid="marker" onClick={eventHandlers.click}>{children}</div>;
+  }),
   Polygon: ({ pathOptions }: { pathOptions: { color?: string; weight?: number; fillOpacity?: number } }) => (
     <div
       data-testid="polygon"
@@ -47,7 +59,10 @@ vi.mock("react-leaflet", () => ({
   },
 }));
 vi.mock("react-leaflet-cluster", () => ({
-  default: ({ children }: { children: ReactNode }) => <div data-testid="clusters">{children}</div>,
+  default: forwardRef(function Clusters({ children }: { children: ReactNode }, ref) {
+    useImperativeHandle(ref, () => fakeCluster);
+    return <div data-testid="clusters">{children}</div>;
+  }),
 }));
 
 const baseLead: Lead = {
@@ -83,6 +98,75 @@ afterEach(() => {
 });
 
 describe("LeadMap", () => {
+  it("expands the cluster, zooms to, and opens a table-selected lead", () => {
+    const view = render(
+      <LeadMap
+        leads={[baseLead]}
+        selectedIds={[]}
+        focusLeadId={1}
+        focusToken={1}
+        fitToken={0}
+        searchAreaBounds={null}
+        searchAreaPolygon={null}
+        onToggleLead={vi.fn()}
+        onViewLead={vi.fn()}
+        onBoundsChange={vi.fn()}
+        activePolygon={null}
+        onPolygonApply={vi.fn()}
+        onPolygonClear={vi.fn()}
+      />,
+    );
+
+    expect(fakeCluster.zoomToShowLayer).toHaveBeenCalledWith(fakeMarker, expect.any(Function));
+    expect(fakeMap.flyTo).toHaveBeenLastCalledWith({ lat: 41.88, lng: -87.74 }, 16, { duration: 0.5 });
+    expect(fakeMarker.openPopup).toHaveBeenCalled();
+    expect(fakeMap.fitBounds).not.toHaveBeenCalled();
+
+    view.rerender(
+      <LeadMap
+        leads={[baseLead]}
+        selectedIds={[]}
+        focusLeadId={1}
+        focusToken={2}
+        fitToken={0}
+        searchAreaBounds={null}
+        searchAreaPolygon={null}
+        onToggleLead={vi.fn()}
+        onViewLead={vi.fn()}
+        onBoundsChange={vi.fn()}
+        activePolygon={null}
+        onPolygonApply={vi.fn()}
+        onPolygonClear={vi.fn()}
+      />,
+    );
+    expect(fakeMap.flyTo).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports a clicked pin so the table can highlight its row", () => {
+    const toggle = vi.fn();
+    const focus = vi.fn();
+    render(
+      <LeadMap
+        leads={[baseLead]}
+        selectedIds={[]}
+        focusLeadId={null}
+        fitToken={0}
+        searchAreaBounds={null}
+        searchAreaPolygon={null}
+        onToggleLead={toggle}
+        onViewLead={vi.fn()}
+        onFocusLead={focus}
+        onBoundsChange={vi.fn()}
+        activePolygon={null}
+        onPolygonApply={vi.fn()}
+        onPolygonClear={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("marker"));
+    expect(toggle).toHaveBeenCalledWith(1);
+    expect(focus).toHaveBeenCalledWith(1);
+  });
+
   it("clusters mapped leads, renders popup facts, and ignores missing coordinates", () => {
     const toggle = vi.fn();
     render(
