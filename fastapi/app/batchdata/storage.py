@@ -6,6 +6,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit, urlunsplit
 
 
 class StorageConfigurationError(RuntimeError):
@@ -56,6 +57,38 @@ def run_archive_key(mode, run_id, product, name, extension="json", occurred_at=N
                 f"fetch-date={current.date().isoformat()}",
                 f"run={_segment(run_id)}",
                 *_dataset_parts(product),
+                f"{_segment(name)}.{_segment(extension)}",
+            )
+        )
+    )
+
+
+def property_archive_key(
+    user_id,
+    session_id,
+    category,
+    property_id,
+    name,
+    extension="json",
+    occurred_at=None,
+):
+    """Return the canonical per-property archive key.
+
+    R2 has no real directories; these segments are deliberately ordered for
+    date/user/session browsing while keeping every artifact for one property
+    together.
+    """
+    current = _utc(occurred_at)
+    return _safe_key(
+        "/".join(
+            (
+                f"fetch-date={current.date().isoformat()}",
+                f"user={_segment(user_id)}",
+                f"time={current.strftime('%H-%M-%S')}",
+                f"session={_segment(session_id)}",
+                "properties",
+                f"category={_segment(category)}",
+                f"property={_segment(property_id)}",
                 f"{_segment(name)}.{_segment(extension)}",
             )
         )
@@ -120,7 +153,10 @@ class R2Storage:
 
     def __init__(self, client=None):
         self.bucket = os.getenv("CLOUDFLARE_R2_BUCKET", "").strip()
-        self.prefix = os.getenv("BATCHDATA_R2_PREFIX", "batchdata").strip().strip("/")
+        self.prefix = os.getenv("BATCHDATA_R2_PREFIX", "").strip().strip("/")
+        self.legacy_prefix = os.getenv(
+            "BATCHDATA_R2_LEGACY_PREFIX", "batchdata"
+        ).strip().strip("/")
         endpoint = os.getenv("CLOUDFLARE_R2_ENDPOINT", "").strip()
         access_key = os.getenv("CLOUDFLARE_R2_ACCESS_KEY_ID", "").strip()
         secret_key = os.getenv("CLOUDFLARE_R2_SECRET_ACCESS_KEY", "").strip()
@@ -139,6 +175,14 @@ class R2Storage:
                 raise StorageConfigurationError(
                     "boto3 is required for BatchData R2 storage"
                 ) from error
+            # Cloudflare's S3 endpoint is account-level. Older local config
+            # included /<bucket>, which made boto3 encode the bucket a second
+            # time as the first object-key segment.
+            parsed = urlsplit(endpoint)
+            if parsed.path.strip("/") == self.bucket:
+                endpoint = urlunsplit(
+                    (parsed.scheme, parsed.netloc, "", parsed.query, parsed.fragment)
+                )
             client = boto3.client(
                 "s3",
                 endpoint_url=endpoint,
@@ -176,16 +220,34 @@ class R2Storage:
 
     def read(self, key):
         safe_key = _safe_key(key)
-        try:
-            response = self.client.get_object(
-                Bucket=self.bucket, Key=self._object_key(safe_key)
+        canonical = self._object_key(safe_key)
+        legacy_prefixed = (
+            f"{self.legacy_prefix}/{safe_key}" if self.legacy_prefix else safe_key
+        )
+        candidates = list(
+            dict.fromkeys(
+                (
+                    canonical,
+                    legacy_prefixed,
+                    f"{self.bucket}/{legacy_prefixed}",
+                    f"{self.bucket}/{canonical}",
+                )
             )
-        except Exception as error:
-            details = getattr(error, "response", {}).get("Error", {})
-            if str(details.get("Code")) in {"404", "NoSuchKey", "NotFound"}:
-                raise FileNotFoundError(safe_key) from error
-            raise
-        return response["Body"].read()
+        )
+        last_missing = None
+        for object_key in candidates:
+            try:
+                response = self.client.get_object(
+                    Bucket=self.bucket, Key=object_key
+                )
+                return response["Body"].read()
+            except Exception as error:
+                details = getattr(error, "response", {}).get("Error", {})
+                if str(details.get("Code")) in {"404", "NoSuchKey", "NotFound"}:
+                    last_missing = error
+                    continue
+                raise
+        raise FileNotFoundError(safe_key) from last_missing
 
 
 def configured_storage():

@@ -1,27 +1,54 @@
-"""Explicit, selected-property stages after Quick Lists discovery."""
+"""Explicit contact-enrichment stage after combined property search."""
 
 import uuid
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import func
 
-from .models import ApiCall, Property, Reservation, Run
+from .models import ApiCall, Membership, Property, Reservation, Run
+
+
+def _contact_results(response):
+    """Normalize BatchData's supported skip-trace response envelopes."""
+    from .service import UnsafeOperation
+
+    result = response.get("result", response.get("results"))
+    if isinstance(result, dict):
+        data = result.get("data")
+        if data is None and isinstance(result.get("persons"), list):
+            data = [result]
+        elif isinstance(data, dict):
+            data = [data]
+    elif isinstance(result, list):
+        data = result
+    else:
+        data = None
+    if not isinstance(data, list) or any(not isinstance(row, dict) for row in data):
+        raise UnsafeOperation(
+            "BatchData contact response has malformed results; reconcile before retrying"
+        )
+    return data
+
+
+def _same_address(returned, expected):
+    if not isinstance(returned, dict):
+        return False
+    return all(
+        str(returned.get(key, "")).strip().casefold() == str(value).strip().casefold()
+        for key, value in expected.items()
+    )
 
 
 def selected_stage(service, product, payload):
-    from .service import UnsafeOperation, _redact, _rows, digest, property_table_row
+    from .service import UnsafeOperation, _redact, digest, property_table_row
 
-    definitions = {
-        "basic_property": ("basicPropertyEnabled", "basicPropertyUnitCost"),
-        "listing_data": ("listingEnabled", "basicPropertyUnitCost"),
-        "pre_foreclosure": ("preForeclosureEnabled", "basicPropertyUnitCost"),
-        "contact_enrichment": ("contactEnrichmentEnabled", "contactEnrichmentUnitCost"),
-    }
-    access, price = definitions[product]
-    if not service.config[access]:
+    if product != "contact_enrichment":
         raise UnsafeOperation(
-            "Enable this product's access and save configuration first"
+            "Only contact enrichment is available after property search"
         )
+    if not service.config["contactEnrichmentEnabled"]:
+        raise UnsafeOperation("Enable contact enrichment access first")
     properties = (
         service.db.query(Property)
         .filter(
@@ -35,21 +62,18 @@ def selected_stage(service, product, payload):
         raise UnsafeOperation(
             "Select only saved BatchData properties from the current API mode"
         )
-    stage_key = "contacts" if product == "contact_enrichment" else "details"
     calls = []
-    unit = Decimal(str(service.config[price]))
+    unit = Decimal(str(service.config["contactEnrichmentUnitCost"]))
     for prop in properties:
         current = prop.operational_copy or {}
-        if not current.get("_quick_lists_run"):
+        if not (current.get("_property_search_run") or current.get("_quick_lists_run")):
             raise UnsafeOperation(
-                "Run Quick Lists first; this property has no saved discovery result"
+                "Run Property Search first; this property has no saved search result"
             )
-        stage = current.get("_stages", {}).get(stage_key, {})
-        if stage.get("status") or (
-            stage_key == "contacts" and prop.skiptrace_status in {"matched", "no_match"}
-        ):
+        stage = current.get("_stages", {}).get("contacts", {})
+        if stage.get("status") or prop.skiptrace_status in {"matched", "no_match"}:
             raise UnsafeOperation(
-                "This stage was already requested for a selected property; view its saved data or reconcile the earlier call"
+                "Contact enrichment was already requested for a selected property; view its saved data or reconcile the earlier call"
             )
         raw_address = prop.immutable_provider_snapshot.get("address", {})
         address = {
@@ -59,33 +83,45 @@ def selected_stage(service, product, payload):
         }
         if not all(address.get(key) for key in ("street", "city", "state")):
             raise UnsafeOperation(
-                "Selected property is missing street, city or state required by BatchData lookup"
+                "Selected property is missing street, city or state required by BatchData skip trace"
             )
-        key = "propertyAddress" if stage_key == "contacts" else "address"
+        archive = current.get("_archive", {})
+        membership = (
+            service.db.query(Membership)
+            .filter(Membership.property_id == prop.id)
+            .order_by(Membership.id)
+            .first()
+        )
+        archive_session_id = (
+            archive.get("session_id")
+            or current.get("_property_search_run")
+            or current.get("_quick_lists_run")
+        )
         calls.append(
             {
                 "property_id": prop.id,
                 "provider_property_id": prop.provider_property_id,
-                "endpoint": "/api/v3/property/skip-trace"
-                if stage_key == "contacts"
-                else "/api/v1/property/lookup/all-attributes",
+                "category": archive.get("primary_category")
+                or (membership.category if membership else "uncategorized"),
+                "archive_session_id": archive_session_id,
+                "endpoint": "/api/v1/property/skip-trace",
                 "product": product,
-                "request": {"requests": [{key: address}]},
+                "request": {"requests": [{"propertyAddress": address}]},
                 "estimated_cost": float(unit),
             }
         )
     plan = {
         "mode": service.api_mode,
+        "archive_user_id": service.archive_user_id or "unknown",
         "configuration_version": service.config["configurationVersion"],
-        "stage": stage_key,
+        "stage": "contacts",
         "calls": calls,
-        "property_ids": [p.id for p in properties],
+        "property_ids": [prop.id for prop in properties],
         "property_search_calls": 0,
-        "property_lookup_calls": len(calls) if stage_key == "details" else 0,
-        "maximum_skip_trace_calls": len(calls) if stage_key == "contacts" else 0,
+        "maximum_skip_trace_calls": len(calls),
         "maximum_returned_rows": len(calls),
         "estimated_cost": float(unit * len(calls)),
-        "contact_enrichment_enabled": stage_key == "contacts",
+        "contact_enrichment_enabled": True,
     }
     signature = digest(plan)
     plan["preview_hash"] = signature
@@ -93,45 +129,44 @@ def selected_stage(service, product, payload):
         return service._preview_run(plan)
     if payload.preview_hash != signature:
         raise UnsafeOperation(
-            "Selection or configuration changed; preview this stage again before confirming"
+            "Selection or configuration changed; preview contact enrichment again before confirming"
         )
     if len(payload.reason.strip()) < 3:
         raise UnsafeOperation("Execution requires confirmation and a reason")
     if not service.row.enabled:
         raise UnsafeOperation("Enable BatchData before executing")
-    if stage_key == "contacts":
-        from datetime import datetime, timezone
 
-        now = datetime.now(timezone.utc)
-        start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
-        spend, matches = (
-            service.db.query(
-                func.coalesce(func.sum(ApiCall.actual_cost), 0),
-                func.coalesce(func.sum(ApiCall.returned_records), 0),
-            )
-            .filter(ApiCall.product == product, ApiCall.created_at >= start)
-            .one()
+    now = datetime.now(timezone.utc)
+    start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+    spend, matches = (
+        service.db.query(
+            func.coalesce(func.sum(ApiCall.actual_cost), 0),
+            func.coalesce(func.sum(ApiCall.returned_records), 0),
         )
-        pending_spend = Decimal(0)
-        pending_matches = 0
-        for pending_run, pending in (
-            service.db.query(Run, Reservation)
-            .join(Reservation, Reservation.run_id == Run.id)
-            .filter(Reservation.status.in_(["reserved", "reconciliation_required"]))
-            .all()
-        ):
-            if pending_run.call_plan.get("stage") == "contacts":
-                pending_spend += Decimal(str(pending.amount))
-                pending_matches += len(pending_run.call_plan.get("property_ids", []))
-        if (
-            Decimal(str(spend)) + pending_spend + unit * len(calls)
-            > Decimal(str(service.config["skipTraceSpendCap"]))
-            or int(matches) + pending_matches + len(calls)
-            > service.config["monthlySkipTraceLimit"]
-        ):
-            raise UnsafeOperation(
-                "Selection exceeds the contact enrichment spend or match limit"
-            )
+        .filter(ApiCall.product == product, ApiCall.created_at >= start)
+        .one()
+    )
+    pending_spend = Decimal(0)
+    pending_matches = 0
+    for pending_run, pending in (
+        service.db.query(Run, Reservation)
+        .join(Reservation, Reservation.run_id == Run.id)
+        .filter(Reservation.status.in_(["reserved", "reconciliation_required"]))
+        .all()
+    ):
+        if pending_run.call_plan.get("stage") == "contacts":
+            pending_spend += Decimal(str(pending.amount))
+            pending_matches += len(pending_run.call_plan.get("property_ids", []))
+    if (
+        Decimal(str(spend)) + pending_spend + unit * len(calls)
+        > Decimal(str(service.config["skipTraceSpendCap"]))
+        or int(matches) + pending_matches + len(calls)
+        > service.config["monthlySkipTraceLimit"]
+    ):
+        raise UnsafeOperation(
+            "Selection exceeds the contact enrichment spend or match limit"
+        )
+
     run = Run(
         id=uuid.uuid4().hex,
         status="Approved",
@@ -146,11 +181,13 @@ def selected_stage(service, product, payload):
     actual = Decimal(0)
     returned = 0
     exported = []
+    call = None
+    prop = None
     try:
         for prop, planned in zip(properties, calls):
             current = dict(prop.operational_copy or {})
             stages = dict(current.get("_stages", {}))
-            stages[stage_key] = {
+            stages["contacts"] = {
                 "status": "requested",
                 "run_id": run.id,
                 "mode": service.api_mode,
@@ -167,81 +204,56 @@ def selected_stage(service, product, payload):
                 actual_cost=0,
             )
             service.db.add(call)
-            archive_product = (
-                f"{stage_key}/property={prop.provider_property_id}"
-            )
-            service._save_file(
-                run.id, archive_product, "request", planned["request"]
+            service._save_property_file(
+                run.id,
+                planned["category"],
+                prop.provider_property_id,
+                "contacts_request",
+                planned["request"],
+                archive_run_id=planned["archive_session_id"],
             )
             service.db.commit()
-            response, request_id = service.client.request(
-                "POST", planned["endpoint"], planned["request"]
-            )
+            response, request_id = service.client.contact_enrichment(planned["request"])
             call.response_json = _redact(response)
             call.request_id = request_id
-            service._save_file(run.id, archive_product, "response", response)
-            service.db.commit()
-            if stage_key == "details":
-                rows = _rows(response)
-                if service.api_mode != "sandbox" and len(rows) > 1:
-                    raise UnsafeOperation(
-                        "Lookup returned more records than reserved; reconcile before retrying"
-                    )
-                matched = [
-                    r
-                    for r in rows
-                    if str(r.get("_id") or r.get("id")) == prop.provider_property_id
-                ]
-                if service.api_mode == "sandbox":
-                    matched = rows[:1]
-                elif rows and not matched:
-                    raise UnsafeOperation(
-                        "Lookup response identity does not match the selected property; reconcile before retrying"
-                    )
-                data = matched[0] if matched else None
-            else:
-                result = response.get("result", response.get("results"))
-                if not isinstance(result, (dict, list)):
-                    raise UnsafeOperation(
-                        "BatchData contact response has no result; reconcile before retrying"
-                    )
-                data = (
-                    result.get("data", result) if isinstance(result, dict) else result
-                )
-                if not isinstance(data, list) or any(
-                    not isinstance(row, dict) for row in data
-                ):
-                    raise UnsafeOperation(
-                        "BatchData contact response has malformed result.data"
-                    )
-                if service.api_mode != "sandbox":
-                    expected = planned["request"]["requests"][0]["propertyAddress"]
-
-                    def matches(
-                        row, expected=expected, provider_id=prop.provider_property_id
-                    ):
-                        returned_property = row.get("property") or {}
-                        returned_id = returned_property.get(
-                            "id"
-                        ) or returned_property.get("_id")
-                        returned_address = (row.get("input") or {}).get(
-                            "propertyAddress"
-                        ) or {}
-                        return str(returned_id) == provider_id or all(
-                            str(returned_address.get(key, "")).strip().casefold()
-                            == str(value).strip().casefold()
-                            for key, value in expected.items()
-                        )
-
-                    if len(data) > 1 or any(not matches(row) for row in data):
-                        raise UnsafeOperation(
-                            "Contact response cannot be matched to the selected request; reconcile before retrying"
-                        )
-            has_data = (
-                bool(data)
-                if stage_key == "details"
-                else any(row.get("persons") for row in data)
+            service._save_property_file(
+                run.id,
+                planned["category"],
+                prop.provider_property_id,
+                "contacts_response",
+                response,
+                archive_run_id=planned["archive_session_id"],
             )
+            service.db.commit()
+
+            data = _contact_results(response)
+            if service.api_mode != "sandbox":
+                expected = planned["request"]["requests"][0]["propertyAddress"]
+
+                def matches_request(
+                    row,
+                    expected=expected,
+                    provider_id=prop.provider_property_id,
+                ):
+                    returned_property = row.get("property") or {}
+                    returned_id = returned_property.get("id") or returned_property.get(
+                        "_id"
+                    )
+                    returned_address = (row.get("input") or {}).get(
+                        "propertyAddress"
+                    ) or row.get("propertyAddress")
+                    persons = row.get("persons") or []
+                    if not returned_address and persons:
+                        returned_address = persons[0].get("propertyAddress")
+                    return str(returned_id) == provider_id or _same_address(
+                        returned_address, expected
+                    )
+
+                if len(data) > 1 or any(not matches_request(row) for row in data):
+                    raise UnsafeOperation(
+                        "Contact response cannot be matched to the selected request; reconcile before retrying"
+                    )
+            has_data = any(row.get("persons") for row in data)
             charge = (
                 Decimal(0) if service.api_mode == "sandbox" or not has_data else unit
             )
@@ -252,7 +264,7 @@ def selected_stage(service, product, payload):
             call.status = "Completed"
             current = dict(prop.operational_copy)
             stages = dict(current["_stages"])
-            stages[stage_key] = {
+            stages["contacts"] = {
                 "status": "completed" if has_data else "no_match",
                 "run_id": run.id,
                 "mode": service.api_mode,
@@ -261,19 +273,32 @@ def selected_stage(service, product, payload):
             }
             current["_stages"] = stages
             prop.operational_copy = current
-            if stage_key == "contacts":
-                prop.skiptrace_status = "matched" if has_data else "no_match"
+            prop.skiptrace_status = "matched" if has_data else "no_match"
             exported.append(
                 {
                     "source_property_id": prop.id,
                     "source_provider_id": prop.provider_property_id,
                     "mode": service.api_mode,
-                    "stage": stage_key,
+                    "stage": "contacts",
                     "data": _redact(data),
                 }
             )
+            service._save_property_file(
+                run.id,
+                planned["category"],
+                prop.provider_property_id,
+                "contacts",
+                {
+                    "source_property_id": prop.id,
+                    "source_provider_id": prop.provider_property_id,
+                    "mode": service.api_mode,
+                    "request_id": request_id,
+                    "status": "completed" if has_data else "no_match",
+                    "data": _redact(data),
+                },
+                archive_run_id=planned["archive_session_id"],
+            )
             service.db.commit()
-        service._save_file(run.id, stage_key, "selected_results", exported)
         run.status = "Completed"
         run.actual_cost = actual
         run.returned_records = returned
@@ -297,20 +322,21 @@ def selected_stage(service, product, payload):
         run.status = "Failed"
         run.error_message = str(error)[:2000]
         service.row.last_error = str(error)[:2000]
-        if call.id:
+        if call is not None and call.id:
             failed_call = service.db.get(ApiCall, call.id)
             if failed_call.status == "Running":
                 failed_call.status = "Failed"
                 failed_call.error_message = str(error)[:2000]
-        current = dict(prop.operational_copy or {})
-        stages = dict(current.get("_stages", {}))
-        if stages.get(stage_key, {}).get("status") == "requested":
-            stages[stage_key] = {
-                **stages[stage_key],
-                "status": "reconciliation_required",
-            }
-            current["_stages"] = stages
-            prop.operational_copy = current
+        if prop is not None:
+            current = dict(prop.operational_copy or {})
+            stages = dict(current.get("_stages", {}))
+            if stages.get("contacts", {}).get("status") == "requested":
+                stages["contacts"] = {
+                    **stages["contacts"],
+                    "status": "reconciliation_required",
+                }
+                current["_stages"] = stages
+                prop.operational_copy = current
         reservation = service.db.query(Reservation).filter_by(run_id=run.id).one()
         reservation.status = "reconciliation_required"
         service.db.commit()

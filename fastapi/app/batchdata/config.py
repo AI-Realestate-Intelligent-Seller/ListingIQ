@@ -50,14 +50,6 @@ PROVIDER_QUICK_LISTS = {
 # Concepts without an equivalent in the current BatchData quickList enum stay
 # visible in the UI but cannot be selected as Quick Lists.
 UNSUPPORTED = set(CATEGORIES) - set(PROVIDER_QUICK_LISTS)
-LISTING_CATEGORIES = {"active", "pending", "expired", "canceled", "withdrawn"}
-FORECLOSURE_CATEGORIES = {
-    "pre_foreclosure",
-    "foreclosure",
-    "active_auction",
-    "notice_of_default",
-    "lis_pendens",
-}
 
 
 def public_https(value: str) -> bool:
@@ -93,7 +85,6 @@ class Configuration(BaseModel):
     basicPropertyUnitCost: float = Field(0.01, ge=0, le=1000)
     quickListUnitCost: float = Field(0.01, ge=0, le=1000)
     listingUnitCost: float = Field(0.10, ge=0, le=1000)
-    preForeclosureUnitCost: float = Field(0.06, ge=0, le=1000)
     contactEnrichmentUnitCost: float = Field(0.07, ge=0, le=1000)
     allowOverage: Literal[False] = False
     rowsPerCategory: int = Field(20, ge=1, le=20)
@@ -103,10 +94,7 @@ class Configuration(BaseModel):
     )
     locations: list[str] = Field(default_factory=list, max_items=100)
     combination: Literal["AND", "OR"] = "OR"
-    quickListsEnabled: bool = True
-    basicPropertyEnabled: bool = True
-    listingEnabled: bool = False
-    preForeclosureEnabled: bool = False
+    propertySearchEnabled: bool = True
     contactEnrichmentEnabled: bool = True
     publicWebhookUrl: str = Field("", max_length=2000)
     monitorNewMatchUnitCost: float | None = Field(None, ge=0, le=1000)
@@ -126,9 +114,7 @@ class Configuration(BaseModel):
         unsupported = set(value) & UNSUPPORTED
         if unsupported:
             labels = ", ".join(CATEGORIES[key] for key in sorted(unsupported))
-            raise ValueError(
-                f"Unsupported BatchData Quick List categories: {labels}"
-            )
+            raise ValueError(f"Unsupported BatchData Quick List categories: {labels}")
         return value
 
     @validator("locations")
@@ -165,9 +151,7 @@ class ProductRequest(BaseModel):
         unsupported = set(clean) & UNSUPPORTED
         if unsupported:
             labels = ", ".join(CATEGORIES[key] for key in sorted(unsupported))
-            raise ValueError(
-                f"Unsupported BatchData Quick List categories: {labels}"
-            )
+            raise ValueError(f"Unsupported BatchData Quick List categories: {labels}")
         return clean
 
     @validator("locations")

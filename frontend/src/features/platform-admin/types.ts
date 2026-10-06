@@ -4,9 +4,10 @@ export type PlatformOverview = {
 };
 export type Organization = { id: string; name: string; owner_email: string | null; user_count: number;
   active_user_count: number; lead_count: number; is_active: boolean; created_at: string | null;
-  onboarding_status: "invited" | "onboarded" };
+  onboarding_status: "invited" | "onboarded"; invitation_role: CustomerScreenRole | null };
 export type BrokerageOnboardingResponse = { message: string; brokerage_id: string; expires_at: string };
-export type PlatformUser = { id: number; email: string; full_name: string | null; role: string;
+export type CustomerScreenRole = "agent" | "hob" | "broker";
+export type PlatformUser = { id: number; email: string; full_name: string | null; role: CustomerScreenRole;
   brokerage_id: string | null; brokerage_name: string | null; is_active: boolean; is_verified: boolean; created_at: string | null };
 export type FeatureFlag = { id: number; key: string; description: string | null; enabled: boolean;
   brokerage_id: string | null; updated_at: string | null };

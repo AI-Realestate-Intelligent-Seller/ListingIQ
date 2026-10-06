@@ -73,10 +73,7 @@ def test_batchdata_has_a_dedicated_backend_api_group():
         ("PUT", "/api/v1/integrations/batchdata/config"),
         ("POST", "/api/v1/integrations/batchdata/connection/test"),
         ("POST", "/api/v1/integrations/batchdata/monitoring/validate"),
-        ("POST", "/api/v1/integrations/batchdata/products/quick-lists/search"),
-        ("POST", "/api/v1/integrations/batchdata/products/basic-property/search"),
-        ("POST", "/api/v1/integrations/batchdata/products/listing-data/search"),
-        ("POST", "/api/v1/integrations/batchdata/products/pre-foreclosure/search"),
+        ("POST", "/api/v1/integrations/batchdata/products/property-search"),
         ("POST", "/api/v1/integrations/batchdata/products/contact-enrichment"),
         ("GET", "/api/v1/integrations/batchdata/runs"),
         ("GET", "/api/v1/integrations/batchdata/properties"),
@@ -86,6 +83,17 @@ def test_batchdata_has_a_dedicated_backend_api_group():
         ("GET", "/api/v1/integrations/batchdata/saved-files"),
         ("GET", "/api/v1/integrations/batchdata/audit"),
     } <= routes
+    assert not any(
+        path.endswith(
+            (
+                "/products/quick-lists/search",
+                "/products/basic-property/search",
+                "/products/listing-data/search",
+                "/products/pre-foreclosure/search",
+            )
+        )
+        for _, path in routes
+    )
     assert all(
         "{action}" not in path and "{resource}" not in path for _, path in routes
     )

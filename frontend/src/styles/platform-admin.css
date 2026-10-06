@@ -259,6 +259,60 @@
   font-weight: 700;
   cursor: pointer;
 }
+.platform-role-picker {
+  position: relative;
+  min-width: 112px;
+}
+.platform-role-trigger {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--blue-dark);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.platform-role-trigger:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+.platform-role-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 128px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  box-shadow: 0 10px 24px rgba(20, 37, 63, 0.16);
+}
+.platform-role-menu button {
+  width: 100%;
+  padding: 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  /* The menu is portaled to <body>, outside .platform-shell's token scope. */
+  color: #163f35;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+}
+.platform-role-menu button:hover,
+.platform-role-menu button[aria-selected="true"] {
+  background: #e4eeea;
+}
 .platform-search {
   margin-top: 24px;
   display: flex;
@@ -281,6 +335,9 @@
   grid-template-columns: 1.1fr 0.8fr 1.2fr auto;
   align-items: end;
   gap: 12px;
+}
+.brokerage-invite-form {
+  grid-template-columns: 1.15fr 0.85fr 1.1fr 0.65fr auto;
 }
 .flag-form p {
   margin: 5px 0 0;
@@ -1634,17 +1691,20 @@
 }
 .bd-property-panel {
   position: fixed;
-  inset: 0 0 0 auto;
+  inset: 50% auto auto 50%;
   margin: 0;
-  width: min(600px, 100vw);
-  max-width: 100vw;
-  height: 100dvh;
-  max-height: 100dvh;
+  width: min(1180px, calc(100vw - 48px));
+  max-width: none;
+  height: min(900px, calc(100dvh - 40px));
+  max-height: none;
   padding: 0;
-  border: 0;
+  border: 1px solid var(--line);
+  border-radius: 16px;
   background: #fff;
   color: #172033;
-  box-shadow: -8px 0 32px #17203326;
+  box-shadow: 0 28px 90px rgba(12, 20, 36, .28);
+  transform: translate(-50%, -50%);
+  overflow: hidden;
 }
 
 .bd-property-panel::backdrop {
@@ -1652,26 +1712,106 @@
 }
 
 .bd-property-panel-header {
-  position: sticky;
-  top: 0;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  padding: 20px 24px;
+  padding: 20px 28px 16px;
   background: #fff;
   border-bottom: 1px solid #e2e8f0;
   z-index: 1;
 }
 
-.bd-property-panel-header h3 { margin: 0; }
-.bd-property-panel-content { padding: 20px 24px; overflow-wrap: anywhere; }
+.bd-property-panel-header > div > span { color: var(--blue); font-size: 9px; font-weight: 800; letter-spacing: .12em; }
+.bd-property-panel-header h3 { margin: 7px 0 0; font-size: 19px; overflow-wrap: anywhere; }
+.bd-property-panel-header p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+.bd-property-panel-content { height: calc(100% - 88px); padding: 4px 28px 24px; overflow-y: auto; overflow-wrap: anywhere; }
+.bd-property-profile { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 32px; }
+.bd-property-profile > .leads-detail-full { grid-column: 1 / -1; }
+.bd-admin-contact-profile {
+  margin: 18px 0 4px;
+  padding: 18px;
+  border: 1px solid #c9ddd4;
+  border-radius: 14px;
+  background: linear-gradient(145deg, #f5faf7, #fff 45%);
+}
+.bd-admin-contact-heading,
+.bd-contact-person-title {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+.bd-admin-contact-heading > div > span,
+.bd-contact-person-title > div > span {
+  color: #176b4d;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .11em;
+}
+.bd-admin-contact-heading h4 { margin: 7px 0 3px; font-size: 18px; }
+.bd-admin-contact-heading p { margin: 0; color: var(--muted); font-size: 12px; }
+.bd-contact-stage {
+  padding: 6px 9px;
+  border-radius: 999px;
+  background: #e8f4ee;
+  color: #176b4d;
+  font-size: 10px;
+  font-weight: 750;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+.bd-contact-stage.not-requested,
+.bd-contact-stage.no-match { background: #edf0f3; color: #5b6675; }
+.bd-owner-facts { margin-top: 16px; }
+.bd-contact-person {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid #d9e7e0;
+}
+.bd-contact-person-title { align-items: center; margin-bottom: 10px; }
+.bd-contact-person-title h5 { margin: 4px 0 0; font-size: 15px; }
+.bd-contact-person-title > span { color: var(--muted); font-size: 11px; }
+.bd-contact-table { min-width: 760px; }
+.bd-contact-person .leads-data-table-wrap + .leads-data-table-wrap { margin-top: 10px; }
+.bd-contact-table a { color: #176b4d; font-weight: 700; text-decoration: none; }
+.bd-dnc-badge {
+  display: inline-flex;
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: #edf0f3;
+  color: #5b6675;
+  font-size: 10px;
+  font-weight: 800;
+}
+.bd-dnc-badge.blocked { background: #fde9e7; color: #a3342b; }
+.bd-dnc-badge.clear { background: #e4f4ec; color: #176b4d; }
+.bd-contact-table details summary,
+.bd-contact-raw > summary { color: #176b4d; font-size: 11px; font-weight: 750; cursor: pointer; }
+.bd-contact-raw { margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+.bd-no-contact-data { margin-top: 16px; padding: 14px; border-radius: 9px; background: var(--surface-2); color: var(--muted); font-size: 12px; }
+.bd-provider-evidence { margin-top: 18px; padding: 16px 0; border-top: 1px solid var(--line); }
+.bd-provider-evidence > summary { color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; cursor: pointer; }
 .bd-property-fields { margin: 0; }
 .bd-property-fields > div { padding: 12px 0; border-bottom: 1px solid #e2e8f0; }
 .bd-property-fields dt { font-weight: 600; text-transform: capitalize; margin-bottom: 6px; }
 .bd-property-fields dd { margin: 0; }
 .bd-property-fields details > summary { cursor: pointer; color: #526078; }
 .bd-property-fields .bd-property-fields { padding-left: 16px; }
+@media (max-width: 760px) {
+  .bd-property-panel {
+    width: calc(100vw - 20px);
+    height: calc(100dvh - 20px);
+    border-radius: 12px;
+  }
+  .bd-property-panel-header { padding: 16px 16px 14px; }
+  .bd-property-panel-content { height: calc(100% - 80px); padding: 4px 16px 18px; }
+  .bd-property-profile { display: block; }
+  .bd-admin-contact-profile { padding: 14px; }
+  .bd-admin-contact-heading,
+  .bd-contact-person-title { display: grid; }
+  .bd-contact-stage { width: fit-content; }
+}
 .integration-workspace-nav {
   display: flex;
   gap: 8px;

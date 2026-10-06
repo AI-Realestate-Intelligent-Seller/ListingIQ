@@ -1,6 +1,4 @@
-import csv
 import hashlib
-import io
 import json
 import os
 import uuid
@@ -8,15 +6,13 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import func, update
+from sqlalchemy import func, or_, update
 
 from ..logger import get_logger, log_event
 from ..propertyradar.models import IntegrationConfig, utcnow
 from .client import Client
 from .config import (
     CATEGORIES,
-    FORECLOSURE_CATEGORIES,
-    LISTING_CATEGORIES,
     PROVIDER_QUICK_LISTS,
     Configuration,
     ContactEnrichmentRequest,
@@ -31,7 +27,7 @@ from .models import (
     SavedFile,
     WebhookEvent,
 )
-from .storage import configured_storage, run_archive_key
+from .storage import configured_storage, property_archive_key
 
 logger = get_logger(__name__)
 
@@ -95,7 +91,22 @@ def initialize(db):
     # provider quick-list values. A stale selection must not prevent the
     # Integrations page from loading.
     defaults = json.loads(Configuration().json())
-    values = {**defaults, **(row.configuration_json or {})}
+    legacy = row.configuration_json or {}
+    removed = {
+        "preForeclosureUnitCost",
+        "quickListsEnabled",
+        "basicPropertyEnabled",
+        "listingEnabled",
+        "preForeclosureEnabled",
+    }
+    values = {
+        **defaults,
+        **{key: value for key, value in legacy.items() if key not in removed},
+    }
+    if "propertySearchEnabled" not in legacy:
+        values["propertySearchEnabled"] = bool(
+            legacy.get("quickListsEnabled", legacy.get("basicPropertyEnabled", True))
+        )
     values["selectedCategories"] = [
         key
         for key in values.get("selectedCategories", [])
@@ -221,9 +232,10 @@ class Service:
     def property_provider(self):
         return "batchdata_sandbox" if self.api_mode == "sandbox" else "batchdata"
 
-    def __init__(self, db, client=None):
+    def __init__(self, db, client=None, archive_user_id=None):
         self.db = db
         self.client = client or Client()
+        self.archive_user_id = archive_user_id
 
     @property
     def row(self):
@@ -314,8 +326,19 @@ class Service:
                 "allow_overage": False,
             },
             "metrics": {
-                "properties": self.db.query(Property).count(),
-                "runs": self.db.query(Run).count(),
+                "properties": self.db.query(Property)
+                .filter(Property.provider == self.property_provider)
+                .count(),
+                "runs": self.db.query(Run)
+                .filter(
+                    or_(
+                        Run.call_plan["mode"].as_string() == "sandbox",
+                        Run.call_plan["mode"].as_string().is_(None),
+                    )
+                    if self.api_mode == "sandbox"
+                    else Run.call_plan["mode"].as_string() == self.api_mode
+                )
+                .count(),
                 "webhooks": self.db.query(WebhookEvent).count(),
             },
             "monitoring_ready": monitoring_ready,
@@ -348,8 +371,7 @@ class Service:
 
     def call_plan(self):
         cfg = self.config
-        return self._product_plan(
-            "quick_lists",
+        return self._property_search_plan(
             ProductRequest(
                 selected_categories=cfg["selectedCategories"],
                 locations=cfg["locations"],
@@ -358,38 +380,30 @@ class Service:
             ),
         )
 
-    def _product_plan(self, product: str, payload: ProductRequest):
+    def _property_search_plan(self, payload: ProductRequest):
         log_event(
             logger,
             "batchdata.plan.started",
-            product=product,
+            product="property_search",
             mode=self.api_mode,
             category_count=len(payload.selected_categories),
             location_count=len(payload.locations),
             rows_per_category=payload.rows_per_category,
             combination=payload.combination,
         )
-        definitions = {
-            "quick_lists": ("quickListsEnabled", "quickListUnitCost", None),
-            "basic_property": ("basicPropertyEnabled", "basicPropertyUnitCost", None),
-            "listing_data": ("listingEnabled", "listingUnitCost", LISTING_CATEGORIES),
-            "pre_foreclosure": (
-                "preForeclosureEnabled",
-                "preForeclosureUnitCost",
-                FORECLOSURE_CATEGORIES,
-            ),
-        }
-        enabled_key, cost_key, allowed_categories = definitions[product]
-        if not self.config[enabled_key]:
-            raise UnsafeOperation(f"Enable {product.replace('_', ' ')} access first")
+        if not self.config["propertySearchEnabled"]:
+            raise UnsafeOperation("Enable property search access first")
         categories = payload.selected_categories
-        if allowed_categories is not None:
-            categories = [key for key in categories if key in allowed_categories]
         if not categories:
-            raise UnsafeOperation(
-                "No selected category supports this BatchData product"
+            raise UnsafeOperation("Select at least one BatchData Quick List")
+        unit_cost = sum(
+            Decimal(str(self.config[key]))
+            for key in (
+                "basicPropertyUnitCost",
+                "listingUnitCost",
+                "quickListUnitCost",
             )
-        unit_cost = Decimal(str(self.config[cost_key]))
+        )
         calls = []
         for category in categories:
             request = {
@@ -397,14 +411,18 @@ class Service:
                     "quickList": PROVIDER_QUICK_LISTS[category],
                     "query": ", ".join(payload.locations),
                 },
-                "options": {"take": payload.rows_per_category, "skip": 0},
+                "options": {
+                    "take": payload.rows_per_category,
+                    "skip": 0,
+                    "datasets": ["basic", "listing", "quicklist"],
+                },
             }
             estimated = unit_cost * payload.rows_per_category
             calls.append(
                 {
                     "category": category,
                     "endpoint": "/api/v1/property/search",
-                    "product": product,
+                    "product": "property_search",
                     "request": request,
                     "maximum_rows": payload.rows_per_category,
                     "estimated_cost": float(estimated),
@@ -427,7 +445,7 @@ class Service:
         log_event(
             logger,
             "batchdata.plan.created",
-            product=product,
+            product="property_search",
             mode=self.api_mode,
             planned_provider_calls=len(calls),
             maximum_returned_rows=maximum,
@@ -449,7 +467,7 @@ class Service:
         }
 
     def _run_product(self, product: str, payload: ProductRequest):
-        plan = self._product_plan(product, payload)
+        plan = self._property_search_plan(payload)
         if not payload.confirmed:
             log_event(
                 logger,
@@ -467,6 +485,7 @@ class Service:
             return self._preview_run(plan)
         if len(payload.reason.strip()) < 3:
             raise UnsafeOperation("Paid execution requires confirmation and a reason")
+        plan = {**plan, "archive_user_id": self.archive_user_id or "unknown"}
         run = Run(
             id=uuid.uuid4().hex,
             configuration_version=self.config["configurationVersion"],
@@ -488,23 +507,8 @@ class Service:
         )
         return self.execute(run.id)
 
-    def quick_lists(self, payload: ProductRequest):
-        return self._run_product("quick_lists", payload)
-
-    def basic_property(self, payload: ContactEnrichmentRequest):
-        from .stages import selected_stage
-
-        return selected_stage(self, "basic_property", payload)
-
-    def listing_data(self, payload: ContactEnrichmentRequest):
-        from .stages import selected_stage
-
-        return selected_stage(self, "listing_data", payload)
-
-    def pre_foreclosure(self, payload: ContactEnrichmentRequest):
-        from .stages import selected_stage
-
-        return selected_stage(self, "pre_foreclosure", payload)
+    def property_search(self, payload: ProductRequest):
+        return self._run_product("property_search", payload)
 
     def contact_enrichment(self, payload: ContactEnrichmentRequest):
         from .stages import selected_stage
@@ -623,13 +627,8 @@ class Service:
                     location=planned.get("location"),
                     maximum_rows=planned.get("maximum_rows"),
                 )
-                if product in {
-                    "quick_lists",
-                    "basic_property",
-                    "listing_data",
-                    "pre_foreclosure",
-                }:
-                    response, request_id = getattr(self.client, product)(
+                if product == "property_search":
+                    response, request_id = self.client.property_search(
                         planned["request"]
                     )
                 else:
@@ -665,16 +664,6 @@ class Service:
                     request_id=request_id,
                 )
                 self.db.add(call)
-                archive_product = "/".join(
-                    (
-                        "quick-lists",
-                        f"category={planned['category']}",
-                        f"location={planned.get('location', 'combined')}",
-                        f"call={call_index}",
-                    )
-                )
-                self._save_file(run.id, archive_product, "request", planned["request"])
-                self._save_file(run.id, archive_product, "response", response)
                 for item in rows:
                     provider_id = item.get("_id") or item.get("id")
                     if isinstance(provider_id, int) and not isinstance(
@@ -685,9 +674,20 @@ class Service:
                         raise UnsafeOperation(
                             "BatchData property result is missing _id or id"
                         )
-                    unique.setdefault(provider_id, {"row": item, "categories": []})[
-                        "categories"
-                    ].append(planned["category"])
+                    archived = unique.setdefault(
+                        provider_id,
+                        {"row": item, "categories": [], "sources": []},
+                    )
+                    archived["categories"].append(planned["category"])
+                    archived["sources"].append(
+                        {
+                            "category": planned["category"],
+                            "location": planned.get("location", "combined"),
+                            "call": call_index,
+                            "request_id": request_id,
+                            "request": planned["request"],
+                        }
+                    )
                 self.db.commit()
                 log_event(
                     logger,
@@ -717,6 +717,8 @@ class Service:
                     if required.issubset(set(value["categories"]))
                 }
             for provider_id, item in unique.items():
+                categories = list(dict.fromkeys(item["categories"]))
+                primary_category = categories[0]
                 prop = (
                     self.db.query(Property)
                     .filter_by(
@@ -745,9 +747,19 @@ class Service:
                             if address.get(key)
                         ),
                         immutable_provider_snapshot=_redact(row),
-                        operational_copy={**_redact(row), "_quick_lists_run": run.id}
-                        if product == "quick_lists"
-                        else _redact(row),
+                        operational_copy={
+                            **_redact(row),
+                            "_property_search_run": run.id,
+                            "_archive": {
+                                "user_id": run.call_plan.get(
+                                    "archive_user_id", "unknown"
+                                ),
+                                "session_id": run.id,
+                                "occurred_at": run.created_at.isoformat(),
+                                "primary_category": primary_category,
+                                "categories": categories,
+                            },
+                        },
                         skiptrace_status="waiting_for_skip_trace"
                         if self.config["contactEnrichmentEnabled"]
                         else "not_requested",
@@ -755,14 +767,21 @@ class Service:
                     self.db.add(prop)
                     self.db.flush()
                     new_properties.append(prop)
-                for category in dict.fromkeys(item["categories"]):
-                    if product == "quick_lists" and not (
-                        prop.operational_copy or {}
-                    ).get("_quick_lists_run"):
-                        prop.operational_copy = {
-                            **(prop.operational_copy or {}),
-                            "_quick_lists_run": run.id,
-                        }
+                else:
+                    prop.operational_copy = {
+                        **(prop.operational_copy or {}),
+                        "_property_search_run": run.id,
+                        "_archive": {
+                            "user_id": run.call_plan.get(
+                                "archive_user_id", "unknown"
+                            ),
+                            "session_id": run.id,
+                            "occurred_at": run.created_at.isoformat(),
+                            "primary_category": primary_category,
+                            "categories": categories,
+                        },
+                    }
+                for category in categories:
                     membership = (
                         self.db.query(Membership)
                         .filter_by(property_id=prop.id, category=category)
@@ -788,7 +807,7 @@ class Service:
             run.unique_properties = len(unique)
             run.duplicate_properties = duplicate_count
             export_rows = [item["row"] for item in unique.values()]
-            self.export_properties(run.id, export_rows)
+            self.export_properties(run.id, unique)
             self.row.last_successful_sync_at = utcnow()
             self.row.last_successful_connection_at = utcnow()
             self.row.connection_status = "sandbox_verified" if sandbox else "connected"
@@ -843,29 +862,100 @@ class Service:
             "message": "Local credentials are configured; live verification occurs only during an approved execution"
         }
 
-    def export_properties(self, run_id, rows):
-        self._save_file(run_id, "properties", "properties", rows)
-        table = [property_table_row(row) for row in rows]
-        self._save_file(run_id, "properties", "properties_normalized", table)
-        output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=list(property_table_row({})))
-        writer.writeheader()
-        for row in table:
-            writer.writerow(
-                {
-                    key: "'" + value
-                    if isinstance(value, str) and value.startswith(("=", "+", "-", "@"))
-                    else value
-                    for key, value in row.items()
-                }
+    def export_properties(self, run_id, properties):
+        run = self.db.get(Run, run_id)
+        for provider_id, item in properties.items():
+            categories = list(dict.fromkeys(item["categories"]))
+            category = categories[0]
+            sources = item.get("sources", [])
+            prop = (
+                self.db.query(Property)
+                .filter_by(
+                    provider=self.property_provider,
+                    provider_property_id=provider_id,
+                )
+                .one()
             )
-        self._save_file(
-            run_id, "properties", "properties_csv", output.getvalue(), extension="csv"
-        )
+            contact_stage = ((prop.operational_copy or {}).get("_stages") or {}).get(
+                "contacts", {}
+            )
+            self._save_property_file(
+                run_id, category, provider_id, "property", item["row"]
+            )
+            self._save_property_file(
+                run_id,
+                category,
+                provider_id,
+                "normalized",
+                property_table_row(item["row"]),
+            )
+            self._save_property_file(
+                run_id,
+                category,
+                provider_id,
+                "search_requests",
+                [source.get("request") for source in sources],
+            )
+            self._save_property_file(
+                run_id,
+                category,
+                provider_id,
+                "metadata",
+                {
+                    "provider": self.property_provider,
+                    "provider_property_id": provider_id,
+                    "mode": self.api_mode,
+                    "user_id": run.call_plan.get("archive_user_id", "unknown"),
+                    "session_id": run.id,
+                    "primary_category": category,
+                    "categories": categories,
+                    "contact_status": contact_stage.get("status"),
+                    "contact_run_id": contact_stage.get("run_id"),
+                    "sources": [
+                        {key: value for key, value in source.items() if key != "request"}
+                        for source in sources
+                    ],
+                },
+            )
+            if contact_stage.get("status") in {"completed", "no_match"}:
+                self._save_property_file(
+                    run_id,
+                    category,
+                    provider_id,
+                    "contacts",
+                    {
+                        "source_property_id": prop.id,
+                        "source_provider_id": provider_id,
+                        "mode": self.api_mode,
+                        "status": contact_stage.get("status"),
+                        "request_id": contact_stage.get("request_id"),
+                        "reused_from_run": contact_stage.get("run_id"),
+                        "data": contact_stage.get("data", []),
+                    },
+                )
 
-    def _save_file(self, run_id, product, name, value, extension="json"):
-        relative = run_archive_key(
-            self.api_mode, run_id, product, name, extension
+    def _save_property_file(
+        self,
+        run_id,
+        category,
+        provider_property_id,
+        name,
+        value,
+        extension="json",
+        archive_run_id=None,
+    ):
+        archive_run = self.db.get(Run, archive_run_id or run_id)
+        if not archive_run:
+            raise UnsafeOperation("Archive session run not found")
+        archive_plan = archive_run.call_plan or {}
+        relative = property_archive_key(
+            archive_plan.get("archive_user_id") or self.archive_user_id or "unknown",
+            archive_plan.get("archive_session_id") or archive_run.id,
+            category,
+            provider_property_id,
+            name,
+            extension,
+            occurred_at=archive_run.created_at,
         )
         content = (
             value

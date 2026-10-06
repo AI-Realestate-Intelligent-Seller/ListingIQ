@@ -4,7 +4,6 @@ import hmac
 import json
 import os
 import uuid
-from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -42,6 +41,7 @@ from ..batchdata.storage import (
     read_with_fallback,
     webhook_archive_key,
 )
+from ..integration_data import service as integration_data
 from ..logger import get_logger, log_event, set_request_context
 from ..models import PlatformAuditLog, User
 from .auth import get_db
@@ -128,8 +128,39 @@ def validate_monitoring(
     return run_action("validate-monitoring", payload, s, actor)
 
 
+def refresh_distribution_pool(s: Service, actor: User, run_id: str | None):
+    """Move newly saved or enriched records into the mode's distribution pool.
+
+    Runs after the paid run is committed, so a failure here never affects
+    provider spend; admins can still combine manually from Integration Data.
+    """
+    mode = "sandbox" if s.api_mode == "sandbox" else "live"
+    try:
+        result = integration_data.combine(s.db, mode)
+        audit(
+            s.db,
+            actor,
+            "integration_data.combined",
+            "inventory",
+            mode,
+            {**result, "trigger": "batchdata", "run_id": run_id},
+        )
+        s.db.commit()
+        log_event(logger, "batchdata.pool.refreshed", mode=mode, run_id=run_id, **result)
+    except Exception as error:  # noqa: BLE001 - never fail a committed paid run
+        s.db.rollback()
+        log_event(
+            logger,
+            "batchdata.pool.refresh_failed",
+            mode=mode,
+            run_id=run_id,
+            error=str(error)[:500],
+        )
+
+
 def product_call(action: str, operation, payload, s: Service, actor: User):
     set_request_context(user_id=str(actor.id))
+    s.archive_user_id = actor.id
     fields = {
         "action": action,
         "actor_id": actor.id,
@@ -160,7 +191,9 @@ def product_call(action: str, operation, payload, s: Service, actor: User):
                 actual_cost=result.get("actual_cost", 0),
                 returned_records=result.get("returned_records", 0),
                 unique_properties=result.get("unique_properties", 0),
-                provider_calls_executed=0 if is_preview else len(result.get("provider_calls", [])),
+                provider_calls_executed=0
+                if is_preview
+                else len(result.get("provider_calls", [])),
                 db_run_created=not is_preview,
                 archive_writes=0 if is_preview else None,
             )
@@ -173,7 +206,11 @@ def product_call(action: str, operation, payload, s: Service, actor: User):
                 payload.reason or None,
             )
             s.db.commit()
-            log_event(logger, "batchdata.audit.persisted", action=action, actor_id=actor.id)
+            log_event(
+                logger, "batchdata.audit.persisted", action=action, actor_id=actor.id
+            )
+            if result.get("status") == "Completed":
+                refresh_distribution_pool(s, actor, result.get("id"))
             return result
     except UnsafeOperation as error:
         log_event(
@@ -213,40 +250,13 @@ def product_call(action: str, operation, payload, s: Service, actor: User):
         raise HTTPException(503, str(error)) from None
 
 
-@router.post("/products/quick-lists/search", response_model=ProductRunResponse)
-def search_quick_lists(
+@router.post("/products/property-search", response_model=ProductRunResponse)
+def search_properties(
     payload: ProductRequest,
     s: Service = Depends(service),
     actor: User = Depends(require_platform_admin),
 ):
-    return product_call("quick_lists.search", s.quick_lists, payload, s, actor)
-
-
-@router.post("/products/basic-property/search", response_model=ProductRunResponse)
-def search_basic_property(
-    payload: ContactEnrichmentRequest,
-    s: Service = Depends(service),
-    actor: User = Depends(require_platform_admin),
-):
-    return product_call("basic_property.search", s.basic_property, payload, s, actor)
-
-
-@router.post("/products/listing-data/search", response_model=ProductRunResponse)
-def search_listing_data(
-    payload: ContactEnrichmentRequest,
-    s: Service = Depends(service),
-    actor: User = Depends(require_platform_admin),
-):
-    return product_call("listing_data.search", s.listing_data, payload, s, actor)
-
-
-@router.post("/products/pre-foreclosure/search", response_model=ProductRunResponse)
-def search_pre_foreclosure(
-    payload: ContactEnrichmentRequest,
-    s: Service = Depends(service),
-    actor: User = Depends(require_platform_admin),
-):
-    return product_call("pre_foreclosure.search", s.pre_foreclosure, payload, s, actor)
+    return product_call("property_search", s.property_search, payload, s, actor)
 
 
 @router.post("/products/contact-enrichment", response_model=ProductRunResponse)
@@ -275,10 +285,31 @@ def records(
         "audit": PlatformAuditLog,
     }[resource]
     query = s.db.query(model)
+    # Live and sandbox records must never be listed together.
+    run_mode = Run.call_plan["mode"].as_string()
+    in_mode = (
+        or_(run_mode == "sandbox", run_mode.is_(None))
+        if s.api_mode == "sandbox"
+        else run_mode == s.api_mode
+    )
+    if resource == "properties":
+        query = query.filter(Property.provider == s.property_provider)
+    elif resource == "memberships":
+        query = query.join(Property, Property.id == Membership.property_id).filter(
+            Property.provider == s.property_provider
+        )
+    elif resource == "runs":
+        query = query.filter(in_mode)
+    elif resource in {"api-calls", "saved-files"}:
+        query = query.join(Run, Run.id == model.run_id).filter(in_mode)
     if resource == "properties" and current_mode:
         query = query.filter(
-            Property.provider == s.property_provider,
-            Property.operational_copy["_quick_lists_run"].as_string().isnot(None),
+            or_(
+                Property.operational_copy["_property_search_run"]
+                .as_string()
+                .isnot(None),
+                Property.operational_copy["_quick_lists_run"].as_string().isnot(None),
+            ),
         )
     if resource == "audit":
         query = query.filter(PlatformAuditLog.action.like("batchdata.%"))
@@ -292,9 +323,6 @@ def records(
         if resource == "properties":
             item["table_data"] = property_table_row(row.immutable_provider_snapshot)
             item["stages"] = (row.operational_copy or {}).get("_stages", {})
-            details = item["stages"].get("details", {}).get("data")
-            if isinstance(details, dict):
-                item["detail_table_data"] = property_table_row(details)
             item["contact_rows"] = []
             for result in item["stages"].get("contacts", {}).get("data", []) or []:
                 for person in result.get("persons") or []:
@@ -309,7 +337,9 @@ def records(
                             ).strip(),
                             "phones": "; ".join(
                                 str(phone.get("number", ""))
-                                for phone in person.get("phones") or []
+                                for phone in person.get("phoneNumbers")
+                                or person.get("phones")
+                                or []
                             ),
                             "emails": "; ".join(
                                 str(email.get("email", ""))
@@ -317,8 +347,9 @@ def records(
                             ),
                         }
                     )
-            item["quick_lists_saved"] = bool(
-                (row.operational_copy or {}).get("_quick_lists_run")
+            item["property_search_saved"] = bool(
+                (row.operational_copy or {}).get("_property_search_run")
+                or (row.operational_copy or {}).get("_quick_lists_run")
             )
             item.pop("immutable_provider_snapshot", None)
             item.pop("operational_copy", None)
@@ -338,20 +369,21 @@ def run_records(
 @router.get("/properties/selectable-ids")
 def selectable_property_ids(
     s: Service = Depends(service),
-    stage: Literal["details", "contacts"] = "details",
 ):
     query = s.db.query(Property.id).filter(
         Property.provider == s.property_provider,
-        Property.operational_copy["_quick_lists_run"].as_string().isnot(None),
-        Property.operational_copy["_stages"][stage]["status"].as_string().is_(None),
+        or_(
+            Property.operational_copy["_property_search_run"].as_string().isnot(None),
+            Property.operational_copy["_quick_lists_run"].as_string().isnot(None),
+        ),
+        Property.operational_copy["_stages"]["contacts"]["status"]
+        .as_string()
+        .is_(None),
+        or_(
+            Property.skiptrace_status.is_(None),
+            Property.skiptrace_status.notin_(["matched", "no_match"]),
+        ),
     )
-    if stage == "contacts":
-        query = query.filter(
-            or_(
-                Property.skiptrace_status.is_(None),
-                Property.skiptrace_status.notin_(["matched", "no_match"]),
-            )
-        )
     rows = query.order_by(Property.id.desc()).all()
     return {"property_ids": [row.id for row in rows]}
 
@@ -438,18 +470,18 @@ def saved_file_content(file_id: int, s: Service = Depends(service)):
     if suffix == ".json":
         value = json.loads(content)
         try:
-            rows = value if isinstance(value, list) else _rows(value)
+            if row.kind in {"property", "normalized"} and isinstance(value, dict):
+                rows = [value]
+            elif row.kind in {"metadata", "search_requests", "contacts"}:
+                rows = []
+            else:
+                rows = value if isinstance(value, list) else _rows(value)
             for raw in rows:
                 if not isinstance(raw, dict):
                     continue
                 if raw.get("stage") == "contacts":
                     continue
-                if raw.get("stage") == "details" and isinstance(raw.get("data"), dict):
-                    summary = property_table_row(raw["data"])
-                    summary["property_id"] = raw.get("source_provider_id")
-                    properties.append(summary)
-                else:
-                    properties.append(property_table_row(raw))
+                properties.append(property_table_row(raw))
         except (UnsafeOperation, AttributeError):
             pass
     elif suffix == ".csv":

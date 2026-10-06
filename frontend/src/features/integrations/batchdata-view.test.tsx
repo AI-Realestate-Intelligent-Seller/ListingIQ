@@ -29,17 +29,13 @@ const config = {
   basicPropertyUnitCost: 0.01,
   quickListUnitCost: 0.01,
   listingUnitCost: 0.1,
-  preForeclosureUnitCost: 0.06,
   contactEnrichmentUnitCost: 0.07,
   allowOverage: false,
   rowsPerCategory: 20,
   selectedCategories: ["fsbo", "vacant"],
   locations: ["Chicago, IL"],
   combination: "OR",
-  quickListsEnabled: true,
-  basicPropertyEnabled: true,
-  listingEnabled: false,
-  preForeclosureEnabled: false,
+  propertySearchEnabled: true,
   contactEnrichmentEnabled: true,
   publicWebhookUrl: "",
   monitorNewMatchUnitCost: null,
@@ -103,22 +99,67 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("Internal Console BatchData", () => {
+  it("keeps completed Property Search results when switching products", async () => {
+    const prompt = vi.spyOn(window, "prompt").mockReturnValue("search test");
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    mock.mockImplementation(async (path, options) => {
+      if (path.endsWith("/products/property-search")) {
+        const confirmed = Boolean(
+          (options?.payload as { confirmed?: boolean })?.confirmed,
+        );
+        return {
+          id: confirmed ? "search-run" : "preview",
+          status: confirmed ? "Completed" : "Preview",
+          estimated_cost: 0.12,
+          returned_records: confirmed ? 1 : 0,
+          unique_properties: confirmed ? 1 : 0,
+          duplicate_properties: 0,
+          properties: confirmed
+            ? [{ property_id: "provider-1", address: "Saved address" }]
+            : [],
+          provider_calls: [],
+          call_plan: {
+            property_search_calls: 1,
+            maximum_returned_rows: 1,
+          },
+        };
+      }
+      if (path.startsWith("/integrations/batchdata/properties?"))
+        return { items: [], total: 0, offset: 0, limit: 25 };
+      return { ...summary, enabled: true };
+    });
+    render(<BatchDataView detail />);
+    await screen.findByText("Connection status");
+    fireEvent.click(screen.getByRole("button", { name: "Data" }));
+    fireEvent.click(screen.getByRole("button", { name: "Preview Endpoint" }));
+    await screen.findByText("Preview");
+    fireEvent.click(screen.getByRole("button", { name: "Run Endpoint" }));
+    await screen.findByText("Returned provider data");
+    fireEvent.click(screen.getByRole("button", { name: "Contact Enrichment" }));
+    await screen.findByText("No saved properties in this API mode. Run Property Search first.");
+    fireEvent.click(screen.getByRole("button", { name: "Property Search" }));
+    expect(screen.getByText("Returned provider data")).toBeTruthy();
+    expect(screen.getByText("Saved address")).toBeTruthy();
+    prompt.mockRestore();
+    confirm.mockRestore();
+  });
+
   it("selects contacts across all pages independently of saved details and clears them", async () => {
     mock.mockImplementation(async (path) => {
-      if (path.endsWith("/properties/selectable-ids?stage=contacts"))
+      if (path.endsWith("/properties/selectable-ids"))
         return { property_ids: [7, 8] };
       if (path.startsWith("/integrations/batchdata/properties?"))
         return {
           items: [
             {
               id: 7,
-              quick_lists_saved: true,
+              property_search_saved: true,
               table_data: { property_id: "P7" },
               stages: { details: { status: "completed" } },
             },
             {
               id: 9,
-              quick_lists_saved: true,
+              property_search_saved: true,
               table_data: { property_id: "P9" },
               stages: { contacts: { status: "completed" } },
             },
@@ -134,6 +175,7 @@ describe("Internal Console BatchData", () => {
     fireEvent.click(screen.getByRole("button", { name: "Data" }));
     fireEvent.click(screen.getByRole("button", { name: "Contact Enrichment" }));
     await screen.findByRole("checkbox", { name: "Select property P7" });
+    expect(screen.getByText(/1 saved property is already contact-enriched/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Select All" }));
     await screen.findByText(/2 selected/);
     expect(
@@ -157,44 +199,39 @@ describe("Internal Console BatchData", () => {
     );
   });
 
-  it("reviews saved Quick Lists records then explicitly retrieves selected details", async () => {
-    const prompt = vi
-      .spyOn(window, "prompt")
-      .mockReturnValue("selected details test");
+  it("previews and explicitly retrieves contacts for a saved search record", async () => {
+    const prompt = vi.spyOn(window, "prompt").mockReturnValue("contact test");
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     let completed = false;
-    const allIds = Array.from({ length: 121 }, (_, index) => index + 7);
     mock.mockImplementation(async (path, options) => {
-      if (path.endsWith("/properties/selectable-ids"))
-        return { property_ids: allIds };
       if (path.startsWith("/integrations/batchdata/properties?"))
         return {
           items: [
             {
               id: 7,
-              quick_lists_saved: true,
+              property_search_saved: true,
               table_data: {
                 property_id: "P7",
                 address: "Saved Chicago Address",
                 owner: "Saved Owner",
               },
-              stages: completed ? { details: { status: "completed" } } : {},
+              stages: completed ? { contacts: { status: "completed" } } : {},
             },
           ],
           total: 1,
           offset: 0,
           limit: 25,
         };
-      if (path.endsWith("/products/basic-property/search")) {
+      if (path.endsWith("/products/contact-enrichment")) {
         const payload = options?.payload as { confirmed?: boolean };
         completed = !!payload.confirmed;
         return {
-          id: completed ? "detail-run" : "preview",
+          id: completed ? "contact-run" : "preview",
           status: completed ? "Completed" : "Preview",
-          estimated_cost: 0.01,
+          estimated_cost: 0.07,
           unique_properties: 1,
           call_plan: {
-            preview_hash: "selected-preview",
+            preview_hash: "contact-preview",
             maximum_returned_rows: 1,
           },
           provider_calls: [],
@@ -205,76 +242,30 @@ describe("Internal Console BatchData", () => {
     render(<BatchDataView detail />);
     await screen.findByText("Connection status");
     fireEvent.click(screen.getByRole("button", { name: "Data" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "Basic Property Data" }),
-    );
-    expect(
-      await screen.findByRole("cell", { name: "Saved Chicago Address" }),
-    ).toBeTruthy();
-    expect(
-      mock.mock.calls.filter(([path]) => path.includes("/products/")),
-    ).toHaveLength(0);
-    fireEvent.click(screen.getByRole("button", { name: "Select All" }));
-    await screen.findByText(/121 selected/);
-    expect(
-      (
-        screen.getByRole("checkbox", {
-          name: "Select property P7",
-        }) as HTMLInputElement
-      ).checked,
-    ).toBe(true);
-    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
-    expect(
-      (
-        screen.getByRole("checkbox", {
-          name: "Select property P7",
-        }) as HTMLInputElement
-      ).checked,
-    ).toBe(false);
-    fireEvent.click(screen.getByRole("button", { name: "Select All" }));
-    await screen.findByText(/121 selected/);
-    await waitFor(() =>
-      expect(
-        (
-          screen.getByRole("button", {
-            name: "Get Details",
-          }) as HTMLButtonElement
-        ).disabled,
-      ).toBe(false),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Get Details" }));
+    fireEvent.click(screen.getByRole("button", { name: "Contact Enrichment" }));
+    const checkbox = await screen.findByRole("checkbox", {
+      name: "Select property P7",
+    });
+    fireEvent.click(checkbox);
+    fireEvent.click(screen.getByRole("button", { name: "Get Contacts" }));
     await screen.findByText(/Status: Preview/);
     expect(prompt).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Get Details" }));
+    fireEvent.click(screen.getByRole("button", { name: "Get Contacts" }));
     expect(
       await screen.findByText(
-        /Saved detail responses for 1 selected properties/,
+        /Saved contact responses for 1 selected properties/,
       ),
     ).toBeTruthy();
-    await waitFor(() =>
-      expect(
-        (
-          screen.getByRole("checkbox", {
-            name: "Select property P7",
-          }) as HTMLInputElement
-        ).disabled,
-      ).toBe(true),
-    );
     const calls = mock.mock.calls.filter(([path]) =>
-      path.endsWith("/products/basic-property/search"),
+      path.endsWith("/products/contact-enrichment"),
     );
     expect(calls).toHaveLength(2);
     expect(calls[1][1]?.payload).toEqual({
-      property_ids: allIds,
+      property_ids: [7],
       confirmed: true,
-      reason: "selected details test",
-      preview_hash: "selected-preview",
+      reason: "contact test",
+      preview_hash: "contact-preview",
     });
-    expect(
-      mock.mock.calls.some(([path]) =>
-        path.endsWith("/products/contact-enrichment"),
-      ),
-    ).toBe(false);
     prompt.mockRestore();
     confirm.mockRestore();
   });
@@ -341,7 +332,7 @@ describe("Internal Console BatchData", () => {
           provider_calls: confirmed
             ? [
                 {
-                  product: "quick_lists",
+                  product: "property_search",
                   request_id: "sandbox-request",
                   request: { searchCriteria: { query: "Chicago, IL" } },
                   response: {
@@ -383,7 +374,7 @@ describe("Internal Console BatchData", () => {
     expect(
       mock.mock.calls.some(
         ([path, options]) =>
-          path.endsWith("/products/quick-lists/search") &&
+          path.endsWith("/products/property-search") &&
           (options?.payload as { confirmed?: boolean; locations?: string[] })
             ?.confirmed &&
           JSON.stringify(
@@ -437,9 +428,7 @@ describe("Internal Console BatchData", () => {
           ].includes(button.textContent || ""),
         ),
     ).toHaveLength(5);
-    expect(
-      screen.queryByRole("button", { name: "Configuration" }),
-    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "Configuration" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Data" }));
     expect(screen.getByText("Paid manual action")).toBeTruthy();
     expect(
@@ -452,10 +441,125 @@ describe("Internal Console BatchData", () => {
     await waitFor(() =>
       expect(
         mock.mock.calls.some(([path]) =>
-          path.endsWith("/products/quick-lists/search"),
+          path.endsWith("/products/property-search"),
         ),
       ).toBe(true),
     );
   });
 
+  it("links saved properties to brokerage distribution", async () => {
+    render(<BatchDataView detail />);
+    await screen.findByText("Connection status");
+    fireEvent.click(screen.getByRole("button", { name: "Data" }));
+    fireEvent.click(screen.getByRole("button", { name: "Saved Properties" }));
+    const link = await screen.findByRole("link", {
+      name: "Distribute to Brokerages",
+    });
+    expect(link.getAttribute("href")).toBe(
+      "/operations/integrations/distribution?mode=live",
+    );
+  });
+
+  it("shows saved provider property data in the brokerage-style real estate brief", async () => {
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+      configurable: true,
+      value() { this.setAttribute("open", ""); },
+    });
+    Object.defineProperty(HTMLDialogElement.prototype, "close", {
+      configurable: true,
+      value() { this.removeAttribute("open"); },
+    });
+    mock.mockImplementation(async (path) => {
+      if (
+        path.endsWith("/integrations/batchdata/properties") ||
+        path.startsWith("/integrations/batchdata/properties?")
+      ) {
+        return {
+          items: [{
+            id: 7,
+            provider: "batchdata",
+            table_data: {
+              property_id: "P7",
+              address: "6331 S Throop St, Chicago, IL 60636",
+              owner: "Maita San Agustin-urdiales",
+              listing_status: "Pending",
+              listing_price: 449900,
+            },
+          }],
+          total: 1,
+          offset: 0,
+          limit: 25,
+        };
+      }
+      if (
+        [
+          "/memberships",
+          "/saved-files",
+          "/runs",
+          "/api-calls",
+          "/webhooks",
+          "/audit",
+        ].some((resource) => path.includes(resource))
+      )
+        return { items: [], total: 0, offset: 0, limit: 25 };
+      if (path.endsWith("/properties/7")) {
+        return {
+          data: {
+            address: { street: "6331 S Throop St", city: "Chicago", state: "IL", zip: "60636" },
+            owner: { fullName: "Maita San Agustin-urdiales" },
+            listing: {
+              price: 449900,
+              status: "Pending",
+              propertyType: "MULTI_FAMILY",
+              maxListPrice: 579000,
+              maxListPriceDate: "2025-05-02T00:00:00.000Z",
+            },
+            quickLists: { highEquity: true, absenteeOwner: false },
+          },
+          stages: {
+            details: { status: "completed" },
+            contacts: {
+              status: "completed",
+              mode: "live",
+              request_id: "contact-request-7",
+              data: [{
+                persons: [{
+                  fullName: "Maita San Agustin-urdiales",
+                  age: 46,
+                  phoneNumbers: [
+                    { number: "3125550101", dnc: false, type: "Mobile", carrier: "Example Wireless" },
+                    { number: "3125550102", dnc: true, type: "Landline" },
+                  ],
+                  emails: [{ email: "maita@example.com", status: "Valid" }],
+                }],
+              }],
+            },
+          },
+        };
+      }
+      return summary;
+    });
+
+    render(<BatchDataView detail />);
+    await screen.findByText("Connection status");
+    fireEvent.click(screen.getByRole("button", { name: "Data" }));
+    fireEvent.click(screen.getByRole("button", { name: "Saved Properties" }));
+    fireEvent.click(await screen.findByRole("button", { name: "View property" }));
+
+    expect(await screen.findByRole("dialog", { name: "Property details" })).toBeTruthy();
+    expect(screen.getAllByText("$449,900").length).toBeGreaterThan(0);
+    expect(screen.getByText("2025-05-02")).toBeTruthy();
+    expect(screen.getByText("High equity")).toBeTruthy();
+    expect(screen.queryByText(/Absentee owner/i)).toBeNull();
+    expect(screen.getByText(/Owner & contact intelligence/i)).toBeTruthy();
+    expect(screen.getByText("Contact enrichment: completed")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "3125550101" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "maita@example.com" })).toBeTruthy();
+    expect(screen.getAllByText("Example Wireless").length).toBeGreaterThan(0);
+    expect(screen.getByText("Complete provider contact profile")).toBeTruthy();
+    expect(screen.getByText("Complete owner profile")).toBeTruthy();
+    expect(screen.getAllByText("Yes").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("No").length).toBeGreaterThan(0);
+    expect(screen.getByText("Provider evidence & stage data")).toBeTruthy();
+  });
 });

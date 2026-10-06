@@ -58,6 +58,7 @@ def organization_rows(session: Session):
             'created_at': user.created_at,
             'is_active': False,
             'onboarding_status': 'onboarded',
+            'invitation_role': None,
         })
         item['user_count'] += 1
         item['active_user_count'] += int(bool(user.is_active))
@@ -67,8 +68,7 @@ def organization_rows(session: Session):
             item['name'] = user.brokerage_name or item['name']
     now = datetime.utcnow()
     pending_invitations = (session.query(Invitation)
-                           .filter(Invitation.role == 'hob',
-                                   Invitation.status == 'pending',
+                           .filter(Invitation.status == 'pending',
                                    Invitation.expires_at > now)
                            .order_by(Invitation.created_at.asc()).all())
     for invitation in pending_invitations:
@@ -81,6 +81,7 @@ def organization_rows(session: Session):
             'created_at': invitation.created_at,
             'is_active': False,
             'onboarding_status': 'invited',
+            'invitation_role': invitation.role,
         })
     return list(grouped.values())
 
@@ -115,7 +116,8 @@ def organizations(_: User = Depends(require_platform_admin), session: Session = 
 
 class BrokerageOnboardingCreate(BaseModel):
     brokerage_name: str = Field(min_length=2, max_length=255)
-    hob_email: EmailStr
+    invite_email: EmailStr
+    initial_role: str = Field(regex=r'^(agent|hob|broker)$')
 
     @validator('brokerage_name')
     def clean_brokerage_name(cls, value):
@@ -131,8 +133,8 @@ def create_organization(
     current: User = Depends(require_platform_admin),
     session: Session = Depends(get_db),
 ):
-    """Create a brokerage identity and send its HOB a one-time onboarding link."""
-    email = str(payload.hob_email).strip().lower()
+    """Create a brokerage identity and send its first user a one-time onboarding link."""
+    email = str(payload.invite_email).strip().lower()
     name = payload.brokerage_name.strip()
     now = datetime.utcnow()
     if session.query(User).filter(func.lower(User.email) == email).first():
@@ -146,7 +148,6 @@ def create_organization(
             .filter(func.lower(User.brokerage_name) == name.lower()).first()
             or session.query(Invitation)
             .filter(func.lower(Invitation.brokerage_name) == name.lower(),
-                    Invitation.role == 'hob',
                     Invitation.status == 'pending',
                     Invitation.expires_at > now).first()):
         raise HTTPException(status_code=409, detail='A brokerage with this name already exists.')
@@ -156,7 +157,7 @@ def create_organization(
     expires_at = now + timedelta(hours=team.INVITATION_TTL_HOURS)
     invitation = Invitation(
         email=email,
-        role='hob',
+        role=payload.initial_role,
         brokerage_id=brokerage_id,
         brokerage_name=name,
         invited_by=current.id,
@@ -172,7 +173,7 @@ def create_organization(
         team.send_invitation_email(
             recipient_email=email,
             brokerage_name=name,
-            role=team.ROLE_LABELS['hob'],
+            role=team.ROLE_LABELS[payload.initial_role],
             invitation_url=team.build_invitation_url(token),
             expires_at=expires_at.strftime('%B %d, %Y at %I:%M %p UTC'),
         )
@@ -180,21 +181,25 @@ def create_organization(
         session.rollback()
         raise HTTPException(
             status_code=502,
-            detail='We could not send the HOB onboarding email. Please try again.',
+            detail='We could not send the onboarding email. Please try again.',
         ) from None
     except Exception:
         session.rollback()
-        team.logger.exception('hob_onboarding_email_unexpected_failure')
+        team.logger.exception('brokerage_onboarding_email_unexpected_failure')
         raise HTTPException(
             status_code=502,
-            detail='We could not send the HOB onboarding email. Please try again.',
+            detail='We could not send the onboarding email. Please try again.',
         ) from None
 
     audit(session, current, 'organization.onboarding_invited', 'organization',
-          brokerage_id, {'brokerage_name': name, 'hob_email': email})
+          brokerage_id, {
+              'brokerage_name': name,
+              'invite_email': email,
+              'initial_role': payload.initial_role,
+          })
     session.commit()
     return {
-        'message': 'Brokerage created and HOB onboarding invitation sent.',
+        'message': 'Brokerage created and onboarding invitation sent.',
         'brokerage_id': brokerage_id,
         'expires_at': expires_at,
     }
@@ -203,6 +208,10 @@ def create_organization(
 class ActiveUpdate(BaseModel):
     is_active: bool
     reason: str = Field(min_length=3, max_length=300)
+
+
+class ScreenAccessUpdate(BaseModel):
+    role: str = Field(regex=r'^(agent|hob|broker)$')
 
 
 @router.patch('/organizations/{brokerage_id}')
@@ -248,6 +257,42 @@ def update_user(user_id: int, payload: ActiveUpdate,
           'user', user.id, {'reason': payload.reason, 'email': user.email})
     session.commit()
     return {'message': 'User activated.' if payload.is_active else 'User suspended.'}
+
+
+@router.patch('/users/{user_id}/screen-access')
+def update_user_screen_access(
+    user_id: int,
+    payload: ScreenAccessUpdate,
+    current: User = Depends(require_platform_admin),
+    session: Session = Depends(get_db),
+):
+    user = session.query(User).filter(User.id == user_id, User.role != 'platform_admin').first()
+    if not user:
+        raise HTTPException(status_code=404, detail='Customer user not found.')
+
+    previous_role = user.role
+    user.role = payload.role
+    user.is_head_or_owner = payload.role == 'hob'
+    if payload.role != 'agent':
+        user.assigned_broker_id = None
+
+    audit(
+        session,
+        current,
+        'user.screen_access_updated',
+        'user',
+        user.id,
+        {
+            'email': user.email,
+            'previous_role': previous_role,
+            'role': payload.role,
+        },
+    )
+    session.commit()
+    return {
+        'message': 'Screen access updated. The user must sign in again to open the new screen.',
+        'role': user.role,
+    }
 
 
 class FlagUpdate(BaseModel):

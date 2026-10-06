@@ -3,7 +3,7 @@ import pytest
 from app.batchdata.client import Client, ProviderError
 
 
-def test_product_methods_omit_unsupported_internal_data_types(monkeypatch):
+def test_property_search_uses_only_verified_endpoint(monkeypatch):
     client = Client()
     calls = []
 
@@ -16,20 +16,12 @@ def test_product_methods_omit_unsupported_internal_data_types(monkeypatch):
         "searchCriteria": {"query": "Chicago, IL"},
         "options": {"take": 20, "skip": 0},
     }
-    client.quick_lists({**payload, "dataTypes": ["untrusted"]})
+    client.property_search(payload)
     assert calls[-1] == (
         "POST",
         "/api/v1/property/search",
         payload,
     )
-    lookup = {
-        "requests": [
-            {"address": {"street": "123 Main St", "city": "Chicago", "state": "IL"}}
-        ]
-    }
-    for method in (client.basic_property, client.listing_data, client.pre_foreclosure):
-        method(lookup)
-        assert calls[-1] == ("POST", "/api/v1/property/lookup/all-attributes", lookup)
 
 
 def test_contact_enrichment_has_its_own_provider_method(monkeypatch):
@@ -44,7 +36,7 @@ def test_contact_enrichment_has_its_own_provider_method(monkeypatch):
     )
     payload = {"properties": [{"_id": "P1"}]}
     client.contact_enrichment(payload)
-    assert calls == [("POST", "/api/v3/property/skip-trace", payload)]
+    assert calls == [("POST", "/api/v1/property/skip-trace", payload)]
 
 
 def test_provider_validation_detail_is_preserved_without_dumping_body(monkeypatch):

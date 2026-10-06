@@ -1,9 +1,15 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
+import dynamic from "next/dynamic";
 
 import { fetchLead } from "../api/leads-api";
 import type { LeadDetail, LeadStage } from "../types/leads.types";
+
+const PropertySatelliteMap = dynamic(
+  () => import("./property-satellite-map").then((module) => module.PropertySatelliteMap),
+  { ssr: false, loading: () => <div className="leads-property-map-loading">Loading satellite map…</div> },
+);
 
 const STAGE_CLASS: Record<LeadStage, string> = {
   ready: "ready",
@@ -79,7 +85,8 @@ function attributeValue(value: unknown): ReactNode {
     );
   }
   if (value !== null && typeof value === "object") {
-    const fields = Object.entries(value as Record<string, unknown>);
+    const fields = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== false);
     if (fields.length === 0) return "—";
     return (
       <dl className="leads-detail-nested">
@@ -145,6 +152,242 @@ function formatMoment(value: string | null): string {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function arrayValue(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function formatDateOnly(value: unknown): string {
+  if (typeof value !== "string" || !value) return "—";
+  const isoDate = value.match(/^\d{4}-\d{2}-\d{2}/)?.[0];
+  if (isoDate) return isoDate;
+  const stamp = new Date(value);
+  return Number.isNaN(stamp.getTime()) ? "—" : stamp.toISOString().slice(0, 10);
+}
+
+function formatMoney(value: unknown): string {
+  const amount = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(amount)
+    ? new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(amount)
+    : "—";
+}
+
+function formatCount(value: unknown): string {
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) ? number.toLocaleString("en-US") : "—";
+}
+
+function formatPhone(value: unknown): string {
+  const raw = typeof value === "string" ? value : "";
+  const digits = raw.replace(/\D/g, "");
+  const local = digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
+  return local.length === 10
+    ? `(${local.slice(0, 3)}) ${local.slice(3, 6)}-${local.slice(6)}`
+    : scalarValue(value);
+}
+
+function propertyType(value: unknown): string {
+  return typeof value === "string" && value
+    ? attributeLabel(value.toLowerCase().replaceAll("_", " "))
+    : "Property";
+}
+
+function safeWebUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+const QUICK_LIST_LABELS: Record<string, string> = {
+  activeAuction: "Active auction",
+  activeListing: "Actively listed",
+  cashBuyer: "Cash buyer",
+  corporateOwned: "Corporate owned",
+  expiredListing: "Expired listing",
+  failedListing: "Failed listing",
+  fixAndFlip: "Fix & flip",
+  forSaleByOwner: "For sale by owner",
+  freeAndClear: "Free & clear",
+  highEquity: "High equity",
+  inherited: "Inherited property",
+  listedBelowMarketPrice: "Below market price",
+  noticeOfDefault: "Notice of default",
+  noticeOfLisPendens: "Lis pendens filed",
+  noticeOfSale: "Notice of sale",
+  onMarket: "On market",
+  outOfStateOwner: "Out-of-state owner",
+  ownerOccupied: "Owner occupied",
+  pendingListing: "Pending listing",
+  preforeclosure: "Pre-foreclosure",
+  recentlySold: "Recently sold",
+  taxDefault: "Tax default",
+  tiredLandlord: "Tired landlord",
+  trustOwned: "Trust owned",
+  vacant: "Vacant",
+  vacantLot: "Vacant lot",
+};
+
+function positiveQuickLists(value: unknown): { key: string; label: string }[] {
+  return Object.entries(objectValue(value))
+    .filter(([, enabled]) => enabled === true)
+    .map(([key]) => ({ key, label: QUICK_LIST_LABELS[key] ?? attributeLabel(key) }));
+}
+
+function hasRealEstateProfile(details: Record<string, unknown>): boolean {
+  const provider = objectValue(details.provider_property_details);
+  const record = Object.keys(provider).length > 0 ? provider : details;
+  return Object.keys(objectValue(record.listing)).length > 0
+    || positiveQuickLists(record.quickLists).length > 0;
+}
+
+function PropertyMapSection({ latitude, longitude }: { latitude: number; longitude: number }) {
+  return (
+    <DetailSection title="Property location" defaultOpen fullWidth>
+      <div className="leads-property-map">
+        <PropertySatelliteMap latitude={latitude} longitude={longitude} />
+      </div>
+      <p className="leads-map-coordinates">{latitude.toFixed(6)}, {longitude.toFixed(6)} · Imagery © Esri, Maxar, Earthstar Geographics, and the GIS User Community</p>
+    </DetailSection>
+  );
+}
+
+export function RealEstateProfile({ details, latitude, longitude, leadSignals }: {
+  details: Record<string, unknown>;
+  latitude: number | null;
+  longitude: number | null;
+  leadSignals: { key: string; label: string }[];
+}) {
+  const provider = objectValue(details.provider_property_details);
+  const record = Object.keys(provider).length > 0 ? provider : details;
+  const address = objectValue(record.address);
+  const listing = objectValue(record.listing);
+  const owner = objectValue(record.owner);
+  const mailingAddress = objectValue(owner.mailingAddress);
+  const ids = objectValue(record.ids);
+  const brokerage = objectValue(listing.brokerage);
+  const agents = arrayValue(listing.agents).map(objectValue);
+  const offices = arrayValue(listing.agentOffices).map(objectValue);
+  const taxes = arrayValue(listing.taxes).map(objectValue).filter((row) => row.year && row.amount != null);
+  const opportunities = [...leadSignals, ...positiveQuickLists(record.quickLists)]
+    .filter((signal, index, rows) => rows.findIndex((row) => row.label.toLowerCase() === signal.label.toLowerCase()) === index);
+  const listingUrl = safeWebUrl(listing.listingUrl);
+  const mapLatitude = latitude ?? (typeof address.latitude === "number" ? address.latitude : null);
+  const mapLongitude = longitude ?? (typeof address.longitude === "number" ? address.longitude : null);
+  const hasProfile = Object.keys(listing).length > 0 || opportunities.length > 0;
+  if (!hasProfile) {
+    return mapLatitude !== null && mapLongitude !== null
+      ? <PropertyMapSection latitude={mapLatitude} longitude={mapLongitude} />
+      : null;
+  }
+  const currentPrice = Number(listing.price);
+  const maximumPrice = Number(listing.maxListPrice);
+  const priceReduction = Number.isFinite(currentPrice) && Number.isFinite(maximumPrice) && maximumPrice > currentPrice
+    ? maximumPrice - currentPrice
+    : null;
+  const ownerMailing = [mailingAddress.street, mailingAddress.city, mailingAddress.state, mailingAddress.zip]
+    .filter(Boolean).join(", ");
+  const facts: [string, ReactNode][] = [
+    ["Property type", propertyType(listing.propertyType ?? details.property_type)],
+    ["Bedrooms", formatCount(listing.bedroomCount ?? details.beds)],
+    ["Bathrooms", formatCount(listing.bathroomCount ?? details.baths)],
+    ["Living area", listing.livingArea ? `${formatCount(listing.livingArea)} sq ft` : "—"],
+    ["Lot size", listing.lotSizeSquareFeet ? `${formatCount(listing.lotSizeSquareFeet)} sq ft` : "—"],
+    ["Year built", scalarValue(listing.yearBuilt)],
+    ["Construction", scalarValue(listing.exteriorConstruction)],
+    ["Heating", arrayValue(listing.heatingTypes).map(scalarValue).join(", ") || "—"],
+    ["Roof", arrayValue(listing.roofTypes).map(scalarValue).join(", ") || "—"],
+    ["Outdoor space", scalarValue(listing.patio)],
+    ["Parking spaces", scalarValue(listing.parkingSpaceCount)],
+    ["APN", scalarValue(ids.apn)],
+    ["Owner mailing", ownerMailing || "—"],
+  ];
+
+  return (
+    <>
+      <section className="leads-property-snapshot leads-detail-full" aria-label="Property snapshot">
+        <div>
+          <span className={`leads-listing-status ${String(listing.statusCategory ?? listing.status ?? "unknown").toLowerCase()}`}>
+            {scalarValue(listing.statusCategory ?? listing.status ?? "Status unavailable")}
+          </span>
+          <h4>{propertyType(listing.propertyType ?? details.property_type)}</h4>
+          <p>{[address.city, address.state, address.zip].filter(Boolean).join(", ") || "Location not on file"}</p>
+        </div>
+        <div className="leads-snapshot-price"><span>Current asking price</span><strong>{formatMoney(listing.price ?? details.listing_price)}</strong>{priceReduction ? <small>{formatMoney(priceReduction)} below the recorded high</small> : null}</div>
+        <div className="leads-snapshot-stat"><strong>{formatCount(listing.bedroomCount ?? details.beds)}</strong><span>Beds</span></div>
+        <div className="leads-snapshot-stat"><strong>{formatCount(listing.bathroomCount ?? details.baths)}</strong><span>Baths</span></div>
+        <div className="leads-snapshot-stat"><strong>{formatCount(listing.livingArea)}</strong><span>Sq ft</span></div>
+        <div className="leads-snapshot-stat"><strong>{formatCount(listing.daysOnMarket)}</strong><span>Days listed</span></div>
+      </section>
+
+      {opportunities.length > 0 ? (
+        <DetailSection title="Why this lead stands out" defaultOpen fullWidth>
+          <div className="leads-opportunity-signals">
+            {opportunities.map((signal) => <span key={signal.key}>{signal.label}</span>)}
+          </div>
+        </DetailSection>
+      ) : null}
+
+      <DetailSection title="Listing & price history" defaultOpen fullWidth>
+        <div className="leads-data-table-wrap">
+          <table className="leads-data-table"><thead><tr><th>Milestone</th><th>Date</th><th>Price</th><th>Details</th></tr></thead><tbody>
+            <tr><td>Current listing</td><td>{formatDateOnly(listing.originalListingDate)}</td><td>{formatMoney(listing.price)}</td><td>{scalarValue(listing.status)} · {formatCount(listing.daysOnMarket)} days</td></tr>
+            <tr><td>Highest list price</td><td>{formatDateOnly(listing.maxListPriceDate)}</td><td>{formatMoney(listing.maxListPrice)}</td><td>Recorded maximum</td></tr>
+            <tr><td>Lowest list price</td><td>{formatDateOnly(listing.minListPriceDate)}</td><td>{formatMoney(listing.minListPrice)}</td><td>Recorded minimum</td></tr>
+            <tr><td>Last sale</td><td>{formatDateOnly(listing.soldDate)}</td><td>{formatMoney(listing.soldPrice)}</td><td>{listing.salePriceIsEstimated ? "Estimated" : "Recorded sale"}</td></tr>
+          </tbody></table>
+        </div>
+      </DetailSection>
+
+      <DetailSection title="Home facts" defaultOpen fullWidth>
+        <dl className="leads-property-facts">
+          {facts.filter(([, value]) => value !== "—").map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
+        </dl>
+      </DetailSection>
+
+      {(agents.length > 0 || Object.keys(brokerage).length > 0 || offices.length > 0) ? (
+        <DetailSection title="Listing contacts" fullWidth>
+          <div className="leads-data-table-wrap"><table className="leads-data-table"><thead><tr><th>Name</th><th>Role</th><th>Phone / office</th></tr></thead><tbody>
+            {agents.map((agent, index) => <tr key={`agent-${index}`}><td>{scalarValue(agent.name)}</td><td>{arrayValue(agent.roles).map(scalarValue).join(", ") || "Agent"}</td><td>{formatPhone(agent.primaryPhoneNumber)}</td></tr>)}
+            {Object.keys(brokerage).length > 0 ? <tr><td>{scalarValue(brokerage.name)}</td><td>Brokerage</td><td>{formatPhone(brokerage.phoneNumber)}</td></tr> : null}
+            {offices.map((office, index) => <tr key={`office-${index}`}><td>{scalarValue(office.name)}</td><td>Office</td><td>{scalarValue(office.officeAddress)}</td></tr>)}
+          </tbody></table></div>
+        </DetailSection>
+      ) : null}
+
+      {taxes.length > 0 ? (
+        <DetailSection title="Property tax history" fullWidth>
+          <div className="leads-data-table-wrap"><table className="leads-data-table compact"><thead><tr><th>Year</th><th>Tax amount</th></tr></thead><tbody>
+            {taxes.map((tax, index) => <tr key={`${tax.year}-${index}`}><td>{scalarValue(tax.year)}</td><td>{formatMoney(tax.amount)}</td></tr>)}
+          </tbody></table></div>
+        </DetailSection>
+      ) : null}
+
+      {mapLatitude !== null && mapLongitude !== null
+        ? <PropertyMapSection latitude={mapLatitude} longitude={mapLongitude} />
+        : null}
+
+      {listingUrl ? (
+        <DetailSection title="Live listing" fullWidth>
+          <div className="leads-listing-preview">
+            <div><span>Listing source</span><strong>{new URL(listingUrl).hostname.replace(/^www\./, "")}</strong></div>
+            <a href={listingUrl} target="_blank" rel="noreferrer">Open live listing ↗</a>
+          </div>
+        </DetailSection>
+      ) : null}
+
+    </>
+  );
 }
 
 /** Fallback wording when the caller has no stage catalog of its own to pass. */
@@ -243,8 +486,9 @@ export function LeadDetailDrawer({
       >
         <header className="leads-drawer-header">
           <div>
-            <span className="sms-eyebrow">PROPERTY DETAILS</span>
-            <h3>{shown?.owner_name || shown?.phone || "Lead"}</h3>
+            <span className="sms-eyebrow">REAL ESTATE LEAD BRIEF</span>
+            <h3>{shown?.property_address || shown?.owner_name || shown?.phone || "Lead"}</h3>
+            {shown?.owner_name ? <p className="leads-drawer-owner">Owner: {shown.owner_name}</p> : null}
           </div>
           <button type="button" className="sms-icon-button" onClick={onClose} aria-label="Close details">
             ✕
@@ -285,7 +529,7 @@ export function LeadDetailDrawer({
                           {contact.dnc ? (
                             <span>{contact.phone} <strong>DNC</strong></span>
                           ) : (
-                            <a href={`tel:${contact.phone}`}>{contact.phone}</a>
+                            <a href={`tel:${contact.phone}`}>{formatPhone(contact.phone)}</a>
                           )}
                         </span>
                       )) : "Not on file"}
@@ -294,7 +538,9 @@ export function LeadDetailDrawer({
                 </dl>
               </DetailSection>
 
-              {Object.keys(shown.details).length > 0 ? (
+              <RealEstateProfile details={shown.details} latitude={shown.latitude} longitude={shown.longitude} leadSignals={shown.signals} />
+
+              {Object.keys(shown.details).length > 0 && !hasRealEstateProfile(shown.details) ? (
                 <DetailSection title="Property details" fullWidth>
                   <dl className="leads-facts">
                     {Object.entries(shown.details).map(([key, value]) => (
@@ -311,17 +557,19 @@ export function LeadDetailDrawer({
                 </DetailSection>
               ) : null}
 
-              <DetailSection title="Signals" defaultOpen>
-                {shown.signals.length === 0 ? (
-                  <p className="leads-drawer-note">No signals on this record.</p>
-                ) : (
-                  <div className="leads-signals">
-                    {shown.signals.map((signal) => (
-                      <span key={signal.key} className="leads-signal">{signal.label}</span>
-                    ))}
-                  </div>
-                )}
-              </DetailSection>
+              {!hasRealEstateProfile(shown.details) ? (
+                <DetailSection title="Signals" defaultOpen>
+                  {shown.signals.length === 0 ? (
+                    <p className="leads-drawer-note">No signals on this record.</p>
+                  ) : (
+                    <div className="leads-signals">
+                      {shown.signals.map((signal) => (
+                        <span key={signal.key} className="leads-signal">{signal.label}</span>
+                      ))}
+                    </div>
+                  )}
+                </DetailSection>
+              ) : null}
 
               {shown.outreach_reason ? (
                 <DetailSection title="Outreach reason">

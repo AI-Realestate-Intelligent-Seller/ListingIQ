@@ -3,6 +3,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -13,6 +14,7 @@ from app.batchdata.storage import (
     ArchiveCollisionError,
     LocalStorage,
     R2Storage,
+    property_archive_key,
     read_with_fallback,
     run_archive_key,
     webhook_archive_key,
@@ -20,7 +22,7 @@ from app.batchdata.storage import (
 
 
 class MissingObject(Exception):
-    response = {"Error": {"Code": "NoSuchKey"}}
+    response: ClassVar = {"Error": {"Code": "NoSuchKey"}}
 
 
 class FakeR2Client:
@@ -54,6 +56,16 @@ def test_run_keys_are_partitioned_by_mode_date_run_and_dataset():
         "mode=live/fetches/fetch-date=2026-10-01/run=run-1/"
         "dataset=vacant-dallas/response.json"
     )
+
+
+def test_property_keys_are_partitioned_by_date_user_time_session_and_identity():
+    when = datetime(2026, 10, 1, 12, 30, 45, tzinfo=timezone.utc)
+    assert property_archive_key(
+        42, "session-1", "pre foreclosure", "property/1", "property", occurred_at=when
+    ) == (
+        "fetch-date=2026-10-01/user=42/time=12-30-45/session=session-1/"
+        "properties/category=pre-foreclosure/property=property-1/property.json"
+    )
     assert webhook_archive_key(
         "live", "updated", "event-1", "delivery-1", "payload", when
     ) == (
@@ -82,6 +94,17 @@ def test_r2_round_trip_is_append_only(monkeypatch):
     assert ("private-archive", f"batchdata/{key}") in client.objects
     with pytest.raises(ArchiveCollisionError):
         storage.write(key, b"replacement")
+
+
+def test_r2_reads_legacy_prefix_and_duplicated_bucket_key(monkeypatch):
+    monkeypatch.setenv("CLOUDFLARE_R2_BUCKET", "private-archive")
+    monkeypatch.setenv("BATCHDATA_R2_PREFIX", "")
+    monkeypatch.setenv("BATCHDATA_R2_LEGACY_PREFIX", "batchdata")
+    client = FakeR2Client()
+    storage = R2Storage(client=client)
+    key = "mode=live/fetches/fetch-date=2026-10-01/run=one/response.json"
+    client.objects[("private-archive", f"private-archive/batchdata/{key}")] = b"old"
+    assert storage.read(key) == b"old"
 
 
 def test_r2_reads_fall_back_to_existing_local_archives(tmp_path, monkeypatch):

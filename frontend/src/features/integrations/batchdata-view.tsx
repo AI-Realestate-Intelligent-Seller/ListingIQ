@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Toast } from "@/components/toast/toast";
 import { readAuthSession } from "@/features/auth/lib/auth-storage";
 import { requestJson } from "@/lib/api/http-client";
+import { RealEstateProfile } from "@/features/leads/components/lead-detail-drawer";
 import {
   ProviderIcon,
   ProviderIntegrationCard,
@@ -17,11 +18,7 @@ import {
 import { IntegrationActionGuidance } from "./integration-cost";
 
 const root = "/integrations/batchdata";
-const products = [
-  "Quick Lists",
-  "Basic Property Data",
-  "Contact Enrichment",
-] as const;
+const products = ["Property Search", "Contact Enrichment"] as const;
 const batchDataNavigationSections = [
   "Connection",
   "Data",
@@ -71,17 +68,13 @@ type Config = {
   basicPropertyUnitCost: number;
   quickListUnitCost: number;
   listingUnitCost: number;
-  preForeclosureUnitCost: number;
   contactEnrichmentUnitCost: number;
   allowOverage: false;
   rowsPerCategory: number;
   selectedCategories: string[];
   locations: string[];
   combination: "AND" | "OR";
-  quickListsEnabled: boolean;
-  basicPropertyEnabled: boolean;
-  listingEnabled: boolean;
-  preForeclosureEnabled: boolean;
+  propertySearchEnabled: boolean;
   contactEnrichmentEnabled: boolean;
   publicWebhookUrl: string;
   monitorNewMatchUnitCost: number | null;
@@ -168,8 +161,9 @@ export function BatchDataView({ detail = false }: { detail?: boolean }) {
   const [data, setData] = useState<Summary | null>(null);
   const [draft, setDraft] = useState<Config | null>(null);
   const [tab, setTab] = useState<Tab>("Connection");
-  const [product, setProduct] = useState<Product>("Quick Lists");
-  const [run, setRun] = useState<Run | null>(null);
+  const [product, setProduct] = useState<Product>("Property Search");
+  const [runs, setRuns] = useState<Partial<Record<Product, Run>>>({});
+  const run = runs[product] || null;
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -201,7 +195,7 @@ export function BatchDataView({ detail = false }: { detail?: boolean }) {
   }
   function change<K extends keyof Config>(key: K, value: Config[K]) {
     setDraft((current) => (current ? { ...current, [key]: value } : current));
-    setRun(null);
+    setRuns((current) => ({ ...current, [product]: undefined }));
   }
   async function save() {
     if (!draft) return;
@@ -209,7 +203,7 @@ export function BatchDataView({ detail = false }: { detail?: boolean }) {
       const value = await api<Summary>("/config", "PUT", draft);
       setData(value);
       setDraft(value.config);
-      setRun(null);
+      setRuns((current) => ({ ...current, [product]: undefined }));
     });
   }
   async function action(
@@ -219,7 +213,8 @@ export function BatchDataView({ detail = false }: { detail?: boolean }) {
   ) {
     await work(name, async () => {
       const value = await api<Run>(endpoint, "POST", payload);
-      if (value?.status) setRun(value);
+      if (value?.call_plan)
+        setRuns((current) => ({ ...current, [product]: value }));
     });
   }
   function toggle() {
@@ -364,7 +359,6 @@ export function BatchDataView({ detail = false }: { detail?: boolean }) {
           const destination = batchDataSections[section][0].id;
           if ((products as readonly string[]).includes(destination)) {
             setProduct(destination as Product);
-            setRun(null);
             setTab("Product Data");
           } else {
             setTab(destination as Tab);
@@ -375,7 +369,6 @@ export function BatchDataView({ detail = false }: { detail?: boolean }) {
         onSubtabChange={(subtab) => {
           if ((products as readonly string[]).includes(subtab)) {
             setProduct(subtab as Product);
-            setRun(null);
             setTab("Product Data");
           } else {
             setTab(subtab as Tab);
@@ -399,7 +392,7 @@ export function BatchDataView({ detail = false }: { detail?: boolean }) {
         />
       )}
       {tab === "Product Data" &&
-        (product === "Quick Lists" ? (
+        (product === "Property Search" ? (
           <ProductData
             data={data}
             draft={draft}
@@ -409,10 +402,14 @@ export function BatchDataView({ detail = false }: { detail?: boolean }) {
             busy={busy}
             save={save}
             action={action}
-            clearRun={() => setRun(null)}
+            clearRun={() =>
+              setRuns((current) => ({
+                ...current,
+                "Property Search": undefined,
+              }))
+            }
             reviewSaved={() => {
-              setProduct("Basic Property Data");
-              setRun(null);
+              setTab("Properties");
             }}
           />
         ) : (
@@ -426,7 +423,12 @@ export function BatchDataView({ detail = false }: { detail?: boolean }) {
             busy={busy}
             save={save}
             action={action}
-            clearRun={() => setRun(null)}
+            clearRun={() =>
+              setRuns((current) => ({
+                ...current,
+                "Contact Enrichment": undefined,
+              }))
+            }
           />
         ))}
       {tab === "Properties" && (
@@ -444,6 +446,18 @@ export function BatchDataView({ detail = false }: { detail?: boolean }) {
               <span>Skip-trace overage</span>
               <strong>Never allowed</strong>
             </article>
+          </div>
+          <div className="pr-actions">
+            <Link
+              className="button"
+              href={`/operations/integrations/distribution?mode=${data.api_mode === "sandbox" ? "sandbox" : "live"}`}
+            >
+              Distribute to Brokerages
+            </Link>
+            <span>
+              Combine saved properties in Integration Data, then allocate them
+              to any brokerage.
+            </span>
           </div>
           <RecordTable resource="properties" refreshKey={refreshKey} />
           <h3>Category memberships</h3>
@@ -582,6 +596,7 @@ function Billing({
     ["monthlySkipTraceLimit", "Monthly skip-trace matches"],
     ["quickListUnitCost", "Quick List / result"],
     ["basicPropertyUnitCost", "Basic property / result"],
+    ["listingUnitCost", "Listing data / result"],
     ["contactEnrichmentUnitCost", "Contact enrichment / match"],
   ];
   return (
@@ -662,21 +677,17 @@ function ProductData({
   reviewSaved: () => void;
 }) {
   const definition = {
-    "Quick Lists": [
-      "quickListsEnabled",
+    "Property Search": [
+      "propertySearchEnabled",
       "/api/v1/property/search",
-      draft.quickListUnitCost,
-      "/products/quick-lists/search",
-    ],
-    "Basic Property Data": [
-      "basicPropertyEnabled",
-      "/api/v1/property/search",
-      draft.basicPropertyUnitCost,
-      "/products/basic-property/search",
+      draft.basicPropertyUnitCost +
+        draft.listingUnitCost +
+        draft.quickListUnitCost,
+      "/products/property-search",
     ],
     "Contact Enrichment": [
       "contactEnrichmentEnabled",
-      "/api/v3/property/skip-trace",
+      "/api/v1/property/skip-trace",
       draft.contactEnrichmentUnitCost,
       "/products/contact-enrichment",
     ],
@@ -689,6 +700,7 @@ function ProductData({
       locations: draft.locations,
       combination: draft.combination,
       selectedCategories: draft.selectedCategories,
+      datasets: ["basic", "listing", "quicklist"],
       internalEndpoint: `/api/v1/integrations/batchdata${definition[3]}`,
     }),
     [definition, draft],
@@ -930,19 +942,10 @@ function SelectedPropertyStage({
   const [selectingAll, setSelectingAll] = useState(false);
   const [offset, setOffset] = useState(0);
   const [error, setError] = useState("");
-  const contacts = product === "Contact Enrichment";
-  const stage = contacts ? "contacts" : "details";
-  const definitions = {
-    "Basic Property Data": [
-      "basicPropertyEnabled",
-      "/products/basic-property/search",
-    ],
-    "Contact Enrichment": [
-      "contactEnrichmentEnabled",
-      "/products/contact-enrichment",
-    ],
-    "Quick Lists": ["quickListsEnabled", "/products/quick-lists/search"],
-  }[product] as [keyof Config, string];
+  const definitions = [
+    "contactEnrichmentEnabled",
+    "/products/contact-enrichment",
+  ] as [keyof Config, string];
   useEffect(() => {
     let active = true;
     void api<Records>(`/properties?current_mode=true&offset=${offset}`)
@@ -957,25 +960,25 @@ function SelectedPropertyStage({
     };
   }, [offset, run?.id, run?.status]);
   const rows = (records?.items || []).map((row) => {
-    let status = (
-      row.stages as Record<string, { status?: string }> | undefined
-    )?.[stage]?.status;
+    let status = (row.stages as Record<string, { status?: string }> | undefined)
+      ?.contacts?.status;
     if (
-      contacts &&
       !status &&
       ["matched", "no_match"].includes(String(row.skiptrace_status))
     )
       status = "completed";
     return {
       ...(row.table_data as Record<string, unknown>),
-      ...((row.detail_table_data as Record<string, unknown>) || {}),
       property_id: (row.table_data as Record<string, unknown>).property_id,
       address: (row.table_data as Record<string, unknown>).address,
       record_id: row.id,
-      selectable: row.quick_lists_saved && !status,
+      selectable: row.property_search_saved && !status,
       stage_status: status,
     };
   });
+  const alreadyEnriched = rows.filter(
+    (row) => row.stage_status === "completed" || row.stage_status === "no_match",
+  ).length;
   const payload = (confirmed = false) => ({
     property_ids: selectedIds,
     confirmed,
@@ -988,9 +991,7 @@ function SelectedPropertyStage({
     clearRun();
     try {
       const result = await api<{ property_ids: number[] }>(
-        contacts
-          ? "/properties/selectable-ids?stage=contacts"
-          : "/properties/selectable-ids",
+        "/properties/selectable-ids",
       );
       setSelectedIds(result.property_ids);
     } catch (reason) {
@@ -1005,15 +1006,15 @@ function SelectedPropertyStage({
   };
   const execute = () => {
     const reason = window.prompt(
-      `Reason for retrieving ${contacts ? "contacts" : "property details"} for ${selectedIds.length} selected properties:`,
+      `Reason for retrieving contacts for ${selectedIds.length} selected properties:`,
     );
     if (
       reason &&
       window.confirm(
-        `Retrieve ${contacts ? "contacts" : "details"} for ${selectedIds.length} saved properties? Estimated maximum ${money(run?.estimated_cost || 0)}.${data.api_mode === "sandbox" ? " Your sandbox token returns mock data with $0 actual spend." : ""}`,
+        `Retrieve contacts for ${selectedIds.length} saved properties? Estimated maximum ${money(run?.estimated_cost || 0)}.${data.api_mode === "sandbox" ? " Your sandbox token returns mock data with $0 actual spend." : ""}`,
       )
     )
-      void action(contacts ? "Get Contacts" : "Get Details", definitions[1], {
+      void action("Get Contacts", definitions[1], {
         ...payload(true),
         reason,
       }).then(() => setSelectedIds([]));
@@ -1022,19 +1023,10 @@ function SelectedPropertyStage({
     <section className="platform-card">
       <h3>{product}</h3>
       <p>
-        Review saved Quick Lists properties below. Viewing this table makes no
-        provider request. Select only the properties you want to{" "}
-        {contacts
-          ? "enrich with owner contacts"
-          : "retrieve additional details for"}
-        .
+        Review saved Property Search records below. Viewing this table makes no
+        provider request. Select only the properties you want to enrich with
+        owner contacts.
       </p>
-      {!contacts && (
-        <p>
-          Listing information is included in the full property lookup and saved
-          with Basic Property Data.
-        </p>
-      )}
       <label className="pr-check">
         <input
           type="checkbox"
@@ -1053,32 +1045,37 @@ function SelectedPropertyStage({
         Save Configuration
       </button>
       {error && <p className="platform-error">{error}</p>}
-      {(product === "Basic Property Data" || contacts) && (
-        <div className="pr-actions">
-          <button
-            className="button secondary"
-            disabled={!!busy || selectingAll || !records?.total}
-            onClick={() => void selectAll()}
-          >
-            {selectingAll ? "Selecting…" : "Select All"}
-          </button>
-          <button
-            className="button secondary"
-            disabled={!!busy || selectingAll || !selectedIds.length}
-            onClick={() => {
-              setSelectedIds([]);
-              clearRun();
-            }}
-          >
-            Clear
-          </button>
-          <span>Select All selects available properties across all pages.</span>
-        </div>
+      <div className="pr-actions">
+        <button
+          className="button secondary"
+          disabled={!!busy || selectingAll || !records?.total}
+          onClick={() => void selectAll()}
+        >
+          {selectingAll ? "Selecting…" : "Select All"}
+        </button>
+        <button
+          className="button secondary"
+          disabled={!!busy || selectingAll || !selectedIds.length}
+          onClick={() => {
+            setSelectedIds([]);
+            clearRun();
+          }}
+        >
+          Clear
+        </button>
+        <span>Select All selects available properties across all pages.</span>
+      </div>
+      {!!alreadyEnriched && (
+        <p className="platform-notice">
+          {alreadyEnriched} saved {alreadyEnriched === 1 ? "property is" : "properties are"}{" "}
+          already contact-enriched and shown below with selection disabled. Their saved
+          contacts are reused, so BatchData is not charged again.
+        </p>
       )}
       {!records ? (
-        <p>Loading saved Quick Lists properties…</p>
+        <p>Loading saved Property Search records…</p>
       ) : !rows.length ? (
-        <p>No saved properties in this API mode. Run Quick Lists first.</p>
+        <p>No saved properties in this API mode. Run Property Search first.</p>
       ) : (
         <PropertyTable
           rows={rows}
@@ -1118,53 +1115,48 @@ function SelectedPropertyStage({
         {money(run?.estimated_cost || 0)} · Status:{" "}
         {run?.status || "Not previewed"}
       </p>
-      {contacts &&
-        !!records?.items.some(
-          (row) => (row.contact_rows as unknown[])?.length,
-        ) && (
-          <>
-            <h3>Saved contacts</h3>
-            <div className="platform-table-wrap bd-table">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Property ID</th>
-                    <th>Name</th>
-                    <th>Phones</th>
-                    <th>Emails</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {records.items.flatMap((row) =>
-                    ((row.contact_rows as Record<string, unknown>[]) || []).map(
-                      (contact, index) => (
-                        <tr key={`${row.id}-${index}`}>
-                          <td>{formatCell(contact.property_id)}</td>
-                          <td>{formatCell(contact.name)}</td>
-                          <td>{formatCell(contact.phones)}</td>
-                          <td>{formatCell(contact.emails)}</td>
-                        </tr>
-                      ),
+      {!!records?.items.some(
+        (row) => (row.contact_rows as unknown[])?.length,
+      ) && (
+        <>
+          <h3>Saved contacts</h3>
+          <div className="platform-table-wrap bd-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Property ID</th>
+                  <th>Name</th>
+                  <th>Phones</th>
+                  <th>Emails</th>
+                </tr>
+              </thead>
+              <tbody>
+                {records.items.flatMap((row) =>
+                  ((row.contact_rows as Record<string, unknown>[]) || []).map(
+                    (contact, index) => (
+                      <tr key={`${row.id}-${index}`}>
+                        <td>{formatCell(contact.property_id)}</td>
+                        <td>{formatCell(contact.name)}</td>
+                        <td>{formatCell(contact.phones)}</td>
+                        <td>{formatCell(contact.emails)}</td>
+                      </tr>
                     ),
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
+                  ),
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
       <div className="pr-actions">
         <button
           className="button secondary"
           disabled={!!busy || selectingAll || !selectedIds.length}
           onClick={() =>
-            void action(
-              contacts ? "Preview Contacts" : "Preview Details",
-              definitions[1],
-              payload(),
-            )
+            void action("Preview Contacts", definitions[1], payload())
           }
         >
-          {contacts ? "Preview Contacts" : "Preview Details"}
+          {"Preview Contacts"}
         </button>
         <button
           className="button"
@@ -1173,22 +1165,16 @@ function SelectedPropertyStage({
           }
           onClick={() => {
             if (run?.status === "Preview") execute();
-            else
-              void action(
-                contacts ? "Preview Contacts" : "Preview Details",
-                definitions[1],
-                payload(),
-              );
+            else void action("Preview Contacts", definitions[1], payload());
           }}
         >
-          {contacts ? "Get Contacts" : "Get Details"}
+          Get Contacts
         </button>
       </div>
       {!!selectedIds.length && run?.status !== "Preview" && (
         <p>
-          Get {contacts ? "Contacts" : "Details"} first previews the selection
-          and cost. Click again after reviewing the preview to confirm
-          retrieval.
+          Get Contacts first previews the selection and cost. Click again after
+          reviewing the preview to confirm retrieval.
         </p>
       )}
       {!data.enabled && (
@@ -1203,9 +1189,8 @@ function SelectedPropertyStage({
       {run?.status === "Completed" && (
         <>
           <p role="status">
-            Saved {contacts ? "contact" : "detail"} responses for{" "}
-            {run.unique_properties} selected properties. Use View property to
-            inspect saved stage data.
+            Saved contact responses for {run.unique_properties} selected
+            properties. Use View property to inspect saved stage data.
           </p>
           {run.provider_calls?.map((call, index) => (
             <details key={index} className="bd-json">
@@ -1614,6 +1599,32 @@ function PropertyDetailsPanel({
   close: () => void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const wrapper = detail !== null && typeof detail === "object" && !Array.isArray(detail)
+    ? detail as Record<string, unknown>
+    : {};
+  const saved = wrapper.data !== null && typeof wrapper.data === "object" && !Array.isArray(wrapper.data)
+    ? wrapper.data as Record<string, unknown>
+    : {};
+  const stages = wrapper.stages !== null && typeof wrapper.stages === "object" && !Array.isArray(wrapper.stages)
+    ? wrapper.stages as Record<string, unknown>
+    : {};
+  const address = saved.address !== null && typeof saved.address === "object" && !Array.isArray(saved.address)
+    ? saved.address as Record<string, unknown>
+    : {};
+  const owner = saved.owner !== null && typeof saved.owner === "object" && !Array.isArray(saved.owner)
+    ? saved.owner as Record<string, unknown>
+    : {};
+  const addressLabel = String(address.formatted || [address.street, address.city, address.state, address.zip].filter(Boolean).join(", ") || "Property details");
+  const ownerLabel = String(owner.fullName || owner.name || "Owner not on file");
+  const listing = saved.listing !== null && typeof saved.listing === "object" && !Array.isArray(saved.listing)
+    ? saved.listing as Record<string, unknown>
+    : {};
+  const quickLists = saved.quickLists !== null && typeof saved.quickLists === "object" && !Array.isArray(saved.quickLists)
+    ? saved.quickLists as Record<string, unknown>
+    : {};
+  const hasReadableProfile = Object.keys(listing).length > 0
+    || Object.values(quickLists).some((value) => value === true)
+    || (typeof address.latitude === "number" && typeof address.longitude === "number");
   useEffect(() => {
     const panel = dialog.current;
     panel?.showModal();
@@ -1635,17 +1646,183 @@ function PropertyDetailsPanel({
       }}
     >
       <div className="bd-property-panel-header">
-        <h3>Property details</h3>
-        <button className="button secondary" onClick={close}>
-          Close property
-        </button>
+        <div><span>PROVIDER PROPERTY BRIEF</span><h3>{addressLabel}</h3><p>Owner: {ownerLabel}</p></div>
+        <button type="button" className="sms-icon-button" aria-label="Close property" onClick={close}>✕</button>
       </div>
       <div className="bd-property-panel-content">
-        <PropertyFields value={detail} />
+        <div className="bd-property-profile">
+          {hasReadableProfile
+            ? <RealEstateProfile details={saved} latitude={null} longitude={null} leadSignals={[]} />
+            : <PropertyFields value={saved} />}
+          <AdminOwnerContactProfile saved={saved} stages={stages} />
+        </div>
+        {Object.keys(stages).length > 0 ? (
+          <details className="bd-provider-evidence">
+            <summary>Provider evidence &amp; stage data</summary>
+            <PropertyFields value={stages} />
+          </details>
+        ) : null}
       </div>
     </dialog>
   );
 }
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function arrayRecords(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.map(recordValue) : [];
+}
+
+function contactName(person: Record<string, unknown>): string {
+  const name = recordValue(person.name);
+  return String(
+    person.fullName ||
+    person.full ||
+    name.full ||
+    [person.first, person.middle, person.last].filter(Boolean).join(" ") ||
+    [name.first, name.middle, name.last].filter(Boolean).join(" ") ||
+    "Unnamed contact",
+  );
+}
+
+function contactFlag(
+  phone: Record<string, unknown>,
+  keys: string[],
+): string {
+  const key = keys.find((candidate) => Object.hasOwn(phone, candidate));
+  if (!key) return "Not provided";
+  const value = phone[key];
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (value === null || value === "") return "Not provided";
+  return String(value);
+}
+
+function AdminOwnerContactProfile({
+  saved,
+  stages,
+}: {
+  saved: Record<string, unknown>;
+  stages: Record<string, unknown>;
+}) {
+  const owner = recordValue(saved.owner);
+  const contactStage = recordValue(stages.contacts);
+  const stageRows = Array.isArray(contactStage.data)
+    ? arrayRecords(contactStage.data)
+    : Object.keys(recordValue(contactStage.data)).length
+      ? [recordValue(contactStage.data)]
+      : [];
+  const people = [
+    ...stageRows.flatMap((row) => arrayRecords(row.persons)),
+    ...arrayRecords(saved.persons),
+    ...arrayRecords(saved.contacts),
+    ...arrayRecords(owner.contacts),
+  ].filter((person, index, rows) => {
+    const fingerprint = JSON.stringify(person);
+    return rows.findIndex((row) => JSON.stringify(row) === fingerprint) === index;
+  });
+  const status = String(contactStage.status || "not requested");
+  const ownerNames = arrayRecords(owner.names);
+  const mailing = recordValue(owner.mailingAddress);
+  const mailingLabel = [mailing.street, mailing.city, mailing.state, mailing.zip]
+    .filter(Boolean)
+    .join(", ");
+
+  return (
+    <section className="bd-admin-contact-profile leads-detail-full" aria-label="Owner and contact intelligence">
+      <div className="bd-admin-contact-heading">
+        <div>
+          <span>OWNER &amp; CONTACT INTELLIGENCE</span>
+          <h4>{String(owner.fullName || owner.name || "Owner not on file")}</h4>
+          <p>{mailingLabel || "Mailing address not on file"}</p>
+        </div>
+        <span className={`bd-contact-stage ${status.replaceAll("_", "-")}`}>
+          Contact enrichment: {status.replaceAll("_", " ")}
+        </span>
+      </div>
+
+      <dl className="leads-property-facts bd-owner-facts">
+        <div><dt>Owner names</dt><dd>{ownerNames.map(contactName).join("; ") || String(owner.fullName || "—")}</dd></div>
+        <div><dt>Mailing address</dt><dd>{mailingLabel || "—"}</dd></div>
+        <div><dt>Provider request ID</dt><dd>{String(contactStage.request_id || "—")}</dd></div>
+        <div><dt>Provider mode</dt><dd>{String(contactStage.mode || "—")}</dd></div>
+      </dl>
+
+      {people.length ? people.map((person, personIndex) => {
+        const phones = [
+          ...(Array.isArray(person.phoneNumbers) ? person.phoneNumbers : []),
+          ...(Array.isArray(person.phones) ? person.phones : []),
+        ];
+        const emails = Array.isArray(person.emails) ? person.emails : [];
+        return (
+          <article className="bd-contact-person" key={`${contactName(person)}-${personIndex}`}>
+            <div className="bd-contact-person-title">
+              <div><span>CONTACT {personIndex + 1}</span><h5>{contactName(person)}</h5></div>
+              <span>{phones.length} phone{phones.length === 1 ? "" : "s"} · {emails.length} email{emails.length === 1 ? "" : "s"}</span>
+            </div>
+
+            <div className="leads-data-table-wrap">
+              <table className="leads-data-table bd-contact-table">
+                <thead><tr><th>Phone</th><th>DNC</th><th>Type</th><th>Carrier</th><th>Provider details</th></tr></thead>
+                <tbody>
+                  {phones.length ? phones.map((value, phoneIndex) => {
+                    const phone = typeof value === "string" ? { number: value } : recordValue(value);
+                    const number = String(phone.number || phone.phone || phone.value || "—");
+                    const dnc = contactFlag({ ...person, ...phone }, ["dnc", "isDnc", "isDNC", "doNotCall", "do_not_call"]);
+                    return <tr key={`${number}-${phoneIndex}`}>
+                      <td>{number === "—" ? number : <a href={`tel:${number}`}>{number}</a>}</td>
+                      <td><span className={`bd-dnc-badge ${dnc.toLowerCase() === "yes" ? "blocked" : dnc.toLowerCase() === "no" ? "clear" : "unknown"}`}>{dnc}</span></td>
+                      <td>{String(phone.type || phone.phoneType || "—")}</td>
+                      <td>{String(phone.carrier || phone.carrierName || "—")}</td>
+                      <td><details><summary>All fields</summary><PropertyFields value={phone} /></details></td>
+                    </tr>;
+                  }) : <tr><td colSpan={5}>No phone numbers returned by the provider.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="leads-data-table-wrap">
+              <table className="leads-data-table compact bd-contact-table">
+                <thead><tr><th>Email</th><th>Status / type</th><th>Provider details</th></tr></thead>
+                <tbody>
+                  {emails.length ? emails.map((value, emailIndex) => {
+                    const email = typeof value === "string" ? { email: value } : recordValue(value);
+                    const address = String(email.email || email.address || email.value || "—");
+                    return <tr key={`${address}-${emailIndex}`}>
+                      <td>{address === "—" ? address : <a href={`mailto:${address}`}>{address}</a>}</td>
+                      <td>{String(email.status || email.type || email.emailType || "—")}</td>
+                      <td><details><summary>All fields</summary><PropertyFields value={email} /></details></td>
+                    </tr>;
+                  }) : <tr><td colSpan={3}>No email addresses returned by the provider.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+
+            <details className="bd-contact-raw">
+              <summary>Complete provider contact profile</summary>
+              <PropertyFields value={person} />
+            </details>
+          </article>
+        );
+      }) : (
+        <div className="bd-no-contact-data">
+          No enriched owner contacts are saved for this property. Contact enrichment is {status.replaceAll("_", " ")}.
+        </div>
+      )}
+
+      {Object.keys(owner).length ? (
+        <details className="bd-contact-raw">
+          <summary>Complete owner profile</summary>
+          <PropertyFields value={owner} />
+        </details>
+      ) : null}
+    </section>
+  );
+}
+
 function PropertyFields({ value }: { value: unknown }) {
   if (value === null || typeof value !== "object")
     return <span>{formatCell(value)}</span>;

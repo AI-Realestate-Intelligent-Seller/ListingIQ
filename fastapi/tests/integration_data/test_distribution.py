@@ -95,7 +95,7 @@ def batch_property(db, source_id, street="123 Main Street", mode="live", phones=
             "owner": {"fullName": "Owner"},
         },
         operational_copy={
-            "_quick_lists_run": "discovery",
+            "_property_search_run": "discovery",
             "_stages": {
                 "contacts": {
                     "status": "completed",

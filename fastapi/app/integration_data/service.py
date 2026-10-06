@@ -271,7 +271,10 @@ def source_records(db, provider, mode):
             if sandbox != (mode == "sandbox"):
                 continue
             operational = row.operational_copy or {}
-            if not operational.get("_quick_lists_run"):
+            if not (
+                operational.get("_property_search_run")
+                or operational.get("_quick_lists_run")
+            ):
                 continue
             raw = dict(row.immutable_provider_snapshot)
             stages = operational.get("_stages", {})

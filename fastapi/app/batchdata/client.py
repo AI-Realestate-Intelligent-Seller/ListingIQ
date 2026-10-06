@@ -82,22 +82,8 @@ class Client:
             raise ProviderError("BatchData returned an unexpected response format")
         return value, request_id
 
-    def quick_lists(self, body: dict):
-        return self._property_product(body, "quick_lists")
-
-    def basic_property(self, body: dict):
-        return self.request("POST", "/api/v1/property/lookup/all-attributes", body)
-
-    def listing_data(self, body: dict):
-        return self.basic_property(body)
-
-    def pre_foreclosure(self, body: dict):
-        return self.basic_property(body)
+    def property_search(self, body: dict):
+        return self.request("POST", "/api/v1/property/search", body)
 
     def contact_enrichment(self, body: dict):
-        return self.request("POST", "/api/v3/property/skip-trace", body)
-
-    def _property_product(self, body: dict, product: str):
-        # Product names are internal permissions, not BatchData dataset selectors.
-        request = {key: value for key, value in body.items() if key != "dataTypes"}
-        return self.request("POST", "/api/v1/property/search", request)
+        return self.request("POST", "/api/v1/property/skip-trace", body)
