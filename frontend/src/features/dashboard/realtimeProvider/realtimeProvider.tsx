@@ -125,7 +125,10 @@ async function deactivatePushSubscription() {
   }
 }
 
-async function enablePushNotifications(userId: number, isCancelled: () => boolean) {
+export async function syncPushSubscription(
+  userId: number,
+  isCancelled: () => boolean,
+) {
   const registration = await navigator.serviceWorker.register("/sw.js");
   await navigator.serviceWorker.ready;
   let subscription = await registration.pushManager.getSubscription();
@@ -215,7 +218,7 @@ export function RealtimeProvider({
           }
           if (permission === "granted") {
             if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
-            if (await enablePushNotifications(userId, () => cancelled)) {
+            if (await syncPushSubscription(userId, () => cancelled)) {
               syncedPermission = permission;
             }
           } else {

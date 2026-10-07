@@ -1,11 +1,38 @@
 import json
+import logging
 import os
 
-from pywebpush import webpush, WebPushException
-from sqlalchemy.orm import Session
+from pywebpush import WebPushException, webpush
 
+from ..logger import get_logger, log_event
 from ..models import PushSubscription
-from .actions import notification_action, dashboard_url
+from .actions import dashboard_url, notification_action
+
+logger = get_logger(__name__)
+
+
+def _permanent_subscription_error(
+    exc: WebPushException,
+) -> tuple[bool, str, int | None]:
+    response = exc.response
+    status_code = (
+        getattr(response, "status_code", None) if response is not None else None
+    )
+    response_text = (
+        (getattr(response, "text", "") or "").lower() if response is not None else ""
+    )
+
+    if status_code == 404:
+        return True, "endpoint_not_found", status_code
+    if status_code == 410:
+        return True, "endpoint_gone", status_code
+    if (
+        status_code == 403
+        and "vapid" in response_text
+        and ("do not correspond" in response_text or "mismatch" in response_text)
+    ):
+        return True, "vapid_credentials_mismatch", status_code
+    return False, "delivery_failed", status_code
 
 
 def send_web_push(
@@ -19,24 +46,24 @@ def send_web_push(
     vapid_email = os.getenv("VAPID_EMAIL")
 
     if not vapid_private_key:
-        raise RuntimeError(
-            "VAPID_PRIVATE_KEY is not configured"
-        )
+        raise RuntimeError("VAPID_PRIVATE_KEY is not configured")
 
     if not vapid_email:
-        raise RuntimeError(
-            "VAPID_EMAIL is not configured"
-        )
+        raise RuntimeError("VAPID_EMAIL is not configured")
 
     payload = json.dumps(
-    {
-        "title": title,
-        "body": body,
-        "url": dashboard_url(notification_action(action_url=url, conversation_id=conversation_id)),
-        "action": notification_action(action_url=url, conversation_id=conversation_id),
-        "conversation_id": conversation_id,
-    }
-)
+        {
+            "title": title,
+            "body": body,
+            "url": dashboard_url(
+                notification_action(action_url=url, conversation_id=conversation_id)
+            ),
+            "action": notification_action(
+                action_url=url, conversation_id=conversation_id
+            ),
+            "conversation_id": conversation_id,
+        }
+    )
 
     print(
         "[WEB PUSH ATTEMPT]",
@@ -60,9 +87,7 @@ def send_web_push(
 
         print(
             "[WEB PUSH SUCCESS]",
-            response.status_code
-            if response is not None
-            else "no-response-object",
+            response.status_code if response is not None else "no-response-object",
         )
 
         return response
@@ -81,6 +106,8 @@ def send_web_push(
             )
 
         raise
+
+
 def send_push_to_user(
     db,
     user_id: int,
@@ -99,14 +126,11 @@ def send_push_to_user(
     )
 
     if not subscriptions:
-        raise RuntimeError(
-            f"No active push subscription found for user {user_id}"
-        )
+        raise RuntimeError(f"No active push subscription found for user {user_id}")
 
     sent_count = 0
 
     for subscription in subscriptions:
-
         subscription_info = {
             "endpoint": subscription.endpoint,
             "keys": {
@@ -117,43 +141,42 @@ def send_push_to_user(
 
         try:
             send_web_push(
-    subscription=subscription_info,
-    title=title,
-    body=body,
-    url=url or "/calendar",
-    conversation_id=conversation_id,
-)
+                subscription=subscription_info,
+                title=title,
+                body=body,
+                url=url or "/calendar",
+                conversation_id=conversation_id,
+            )
 
             sent_count += 1
 
         except WebPushException as exc:
-
-            if (
-                exc.response is not None
-                and exc.response.status_code == 410
-            ):
-                print(
-                    "[WEB PUSH] "
-                    f"Subscription expired. "
-                    f"Deactivating subscription id={subscription.id}"
-                )
-
+            permanent, reason, status_code = _permanent_subscription_error(exc)
+            if permanent:
                 subscription.is_active = False
-
+                log_event(
+                    logger,
+                    "push.subscription.disabled",
+                    level=logging.WARNING,
+                    subscription_id=subscription.id,
+                    user_id=user_id,
+                    reason=reason,
+                    status_code=status_code,
+                )
             else:
-                print(
-                    "[WEB PUSH ERROR] "
-                    f"Subscription id={subscription.id}: "
-                    f"{exc}"
+                log_event(
+                    logger,
+                    "push.subscription.delivery_failed",
+                    level=logging.ERROR,
+                    subscription_id=subscription.id,
+                    user_id=user_id,
+                    reason=reason,
+                    status_code=status_code,
+                    error=str(exc),
                 )
 
     db.commit()
 
-    print(
-        f"[WEB PUSH] "
-        f"Sent to user={user_id} | "
-        f"subscriptions={sent_count} | "
-
-    )
+    print(f"[WEB PUSH] Sent to user={user_id} | subscriptions={sent_count} | ")
 
     return sent_count
