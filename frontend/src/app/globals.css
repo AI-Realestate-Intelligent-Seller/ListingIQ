@@ -1,0 +1,65 @@
+@import "tailwindcss";
+
+:root { color-scheme: light; --background: #f4f6f8; --foreground: #162522; }
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--background); color: var(--foreground); font-family: Arial, Helvetica, sans-serif; }
+button, input { font: inherit; }
+button { cursor: pointer; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button:focus-visible, input:focus-visible, a:focus-visible { outline: 3px solid #64bc9c; outline-offset: 3px; }
+.workspace { max-width: 1050px; width: 100%; margin: 0 auto; padding: 36px 24px 60px; }
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 28px; border-bottom: 1px solid #dce3e0; }
+.brand { display: flex; align-items: center; gap: 12px; font-weight: 700; }
+.brand-mark { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 10px; background: #163e32; color: #b6f4da; }
+.badge { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: #566861; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: #95a49e; }
+.dot.online { background: #209768; }
+.intro { margin: 42px 0 28px; }
+.eyebrow { font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: #6d7d75; }
+h1 { font-size: clamp(28px, 4vw, 38px); font-weight: 650; letter-spacing: -.04em; margin: 8px 0 10px; }
+.muted { color: #687970; font-size: 14px; line-height: 1.7; }
+.columns { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(280px, 1fr); gap: 22px; align-items: start; }
+.card { background: white; border: 1px solid #dfe6e2; border-radius: 18px; padding: 26px; box-shadow: 0 4px 18px #163e3204; }
+.card h2 { margin: 0; font-size: 17px; font-weight: 600; }
+.card-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 24px; }
+label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 9px; }
+.phone-input { width: 100%; border: 1px solid #d5ded8; border-radius: 10px; padding: 15px; font-size: 20px; letter-spacing: .03em; background: #fff; }
+.help { margin: 8px 0 22px; font-size: 12px; color: #79877f; }
+.actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.button { border: 1px solid #d7e0da; border-radius: 9px; padding: 11px 16px; background: white; color: #254136; font-size: 13px; font-weight: 600; }
+.button.primary { flex: 1; background: #173f32; color: white; border-color: #173f32; }
+.button.primary:hover:enabled { background: #245940; }
+.button.danger { color: #a34139; background: #fff7f5; border-color: #efdad5; }
+.status { background: #f4f8f5; border-radius: 10px; padding: 14px; margin-top: 22px; font-size: 13px; display: flex; gap: 10px; align-items: center; }
+.error { color: #a34139; background: #fff5f2; padding: 12px; border-radius: 8px; font-size: 13px; margin-top: 12px; overflow-wrap: anywhere; }
+.connection { display: flex; align-items: center; justify-content: space-between; padding-bottom: 20px; margin-bottom: 20px; border-bottom: 1px solid #edf1ee; gap: 12px; }
+.connection strong { display: block; font-size: 13px; margin-bottom: 4px; }
+.route-list { display: grid; gap: 16px; }
+.route { font-size: 13px; }
+.route code { display: block; font-size: 12px; color: #355b48; margin-bottom: 4px; }
+.route p { color: #79877f; font-size: 12px; line-height: 1.6; margin: 0; }
+.docs { display: inline-block; margin-top: 22px; color: #306149; font-size: 13px; text-decoration: underline; }
+.footer { font-size: 12px; color: #819087; margin-top: 24px; }
+.response { margin-top: 22px; font-size: 12px; }
+.response summary { cursor: pointer; color: #526d5d; }
+.response pre { max-height: 240px; overflow: auto; background: #f6f8f6; padding: 12px; border-radius: 8px; margin-top: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 740px) { .columns { grid-template-columns: 1fr; } .workspace { padding: 24px 16px; } .card { padding: 22px; } .intro { margin-top: 28px; } }
+
+.dialer { width: 228px; max-width: 100%; margin: 0 auto 24px; }
+.dialpad { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.dial-key { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 56px; border: 1px solid #e1e9e4; border-radius: 12px; background: #f7faf8; color: #254136; }
+.dial-key > span { font-size: 22px; line-height: 1.1; }
+.dial-key small { margin-top: 3px; font-size: 8px; font-weight: 600; letter-spacing: .12em; color: #79877f; }
+.dial-key:hover:enabled, .dial-tool:hover:enabled { background: #eaf3ed; }
+.dial-key:active:enabled { transform: scale(.96); }
+.dialer-tools { display: flex; justify-content: space-between; align-items: center; gap: 14px; margin-top: 14px; padding: 0 9px; }
+.dial-tool { display: grid; place-items: center; width: 44px; height: 44px; border: 0; border-radius: 50%; background: transparent; color: #526d5d; font-size: 25px; }
+.call-button { display: grid; place-items: center; width: 58px; height: 58px; flex-shrink: 0; border: 0; border-radius: 50%; background: #209768; color: white; box-shadow: 0 4px 12px #20976825; }
+.call-button:hover:enabled { background: #18784f; }
+.microphone-help { margin-top: 16px; margin-bottom: 0; }
