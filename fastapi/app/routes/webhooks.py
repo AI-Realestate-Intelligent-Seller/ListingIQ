@@ -7,15 +7,21 @@ from datetime import datetime
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from ..logger import get_logger, log_event
+from ..core.email import EmailDeliveryError, send_reply_notification_email
 from ..leads import events as lead_events
+from ..logger import get_logger, log_event
 from ..models import Conversation, Lead, LeadEvent, Message, User
+from ..reminder.notification import notify_conversation_reply
 from ..sms import service
 from ..sms.followup_scheduler import cancel_followup_cadence
-from ..sms.webhook_security import InvalidSignatureError, verification_enabled, verify_webhook
+from ..sms.webhook_security import (
+    InvalidSignatureError,
+    verification_enabled,
+    verify_webhook,
+)
 from ..tenancy import brokerage_user_ids
 from .auth import get_db
-from ..reminder.notification import notify_conversation_reply
+
 router = APIRouter()
 logger = get_logger(__name__)
 
@@ -36,6 +42,15 @@ _FINAL_DELIVERY_STATUSES = {
     'sending_failed',
     'delivery_unconfirmed',
 }
+
+
+def _send_reply_email_safely(**kwargs) -> None:
+    try:
+        send_reply_notification_email(**kwargs)
+    except EmailDeliveryError as error:
+        log_event(logger, 'email.reply.failed', level=logging.ERROR, error=str(error))
+    except Exception as error:  # noqa: BLE001 - email must not fail an inbound webhook
+        logger.exception('email.reply.unexpected_failure', extra={'error': str(error)})
 
 
 def _extract_inbound(payload: dict) -> dict | None:
@@ -149,23 +164,23 @@ def _handle_delivery_callback(db: Session, event_type: str, payload_data: dict) 
     return {'ok': True}
 
 
-# Roles that can open an unassigned conversation in Follow-ups. An agent only
-# sees leads currently assigned to them, so a no-longer-assigned agent is skipped.
-_UNASSIGNED_VIEWER_ROLES = {'hob', 'broker'}
+# Roles that can work a lead. Agents remain eligible only while the lead is
+# assigned to them; brokers and HOBs can work any lead in their brokerage.
+_LEAD_WORKER_ROLES = {'agent', 'broker', 'hob'}
 
 
 def _reply_recipient_ids(db: Session, conversation: Conversation) -> list[int]:
     """Who hears about a customer reply.
 
-    Every currently assigned agent. With no assignee, the person who last
-    worked the lead (sent a message by hand or changed its status) and can
-    still open it; failing that, the conversation owner.
+    The eligible Agent, Broker, or HOB with the newest human activity wins,
+    regardless of assignment. Assignment is only a fallback when nobody has
+    worked the lead yet; after that, the conversation owner is the fallback.
     """
     lead_ids = [
         lead_id for (lead_id,) in
         db.query(Lead.id).filter(Lead.conversation_id == conversation.id).all()
     ]
-    assigned = [
+    assigned = {
         user_id for (user_id,) in (
             db.query(Lead.assigned_agent_id)
             .filter(Lead.id.in_(lead_ids), Lead.assigned_agent_id.isnot(None))
@@ -173,9 +188,7 @@ def _reply_recipient_ids(db: Session, conversation: Conversation) -> list[int]:
             .order_by(Lead.assigned_agent_id)
             .all()
         )
-    ]
-    if assigned:
-        return assigned
+    }
 
     # (when, user) for every human touch on this lead, newest first.
     touches = db.query(Message.created_at, Message.sender_user_id).filter(
@@ -194,18 +207,27 @@ def _reply_recipient_ids(db: Session, conversation: Conversation) -> list[int]:
     owner = db.query(User).filter(User.id == conversation.user_id).first()
     tenant_ids = set(brokerage_user_ids(db, owner)) if owner else {conversation.user_id}
     candidate_ids = list(dict.fromkeys(user_id for _, user_id in touches))
-    if candidate_ids:
-        eligible = {
-            user_id for (user_id,) in db.query(User.id).filter(
-                User.id.in_(candidate_ids),
-                User.id.in_(tenant_ids),
-                User.role.in_(_UNASSIGNED_VIEWER_ROLES),
-                User.is_active.is_(True),
-            ).all()
-        }
-        for user_id in candidate_ids:
-            if user_id in eligible:
-                return [user_id]
+    possible_ids = set(candidate_ids) | assigned
+    eligible_roles = {
+        user_id: role for user_id, role in db.query(User.id, User.role).filter(
+            User.id.in_(possible_ids),
+            User.id.in_(tenant_ids),
+            User.role.in_(_LEAD_WORKER_ROLES),
+            User.is_active.is_(True),
+        ).all()
+    } if possible_ids else {}
+
+    def can_open_lead(user_id: int) -> bool:
+        role = eligible_roles.get(user_id)
+        return role in {'broker', 'hob'} or (role == 'agent' and user_id in assigned)
+
+    for user_id in candidate_ids:
+        if can_open_lead(user_id):
+            return [user_id]
+
+    for user_id in sorted(assigned):
+        if can_open_lead(user_id):
+            return [user_id]
     return [conversation.user_id]
 
 
@@ -352,6 +374,12 @@ async def telnyx_webhook(
     db.commit()
     db.refresh(message)
 
+    is_first_reply = not db.query(Message.id).filter(
+        Message.conversation_id == conversation.id,
+        Message.direction == 'inbound',
+        Message.id != message.id,
+    ).first()
+
     log_event(
         logger,
         'sms.webhook.message_stored',
@@ -382,6 +410,21 @@ async def telnyx_webhook(
                 or conversation.contact
                 or 'Customer'
             ),
+        )
+
+    email_recipients = db.query(User).filter(
+        User.id.in_(recipient_user_ids),
+        User.is_active.is_(True),
+        User.is_verified.is_(True),
+    ).all()
+    for recipient in email_recipients:
+        background.add_task(
+            _send_reply_email_safely,
+            recipient_email=recipient.email,
+            sender_name=conversation.name or conversation.contact or 'Customer',
+            message_text=inbound['text'],
+            conversation_id=conversation.id,
+            is_first_reply=is_first_reply,
         )
 
     cancel_followup_cadence(

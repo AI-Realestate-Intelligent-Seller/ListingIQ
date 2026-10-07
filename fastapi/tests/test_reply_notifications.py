@@ -34,12 +34,22 @@ def _event(session, lead, user_id, minutes, category=lead_events.STAGE):
     session.commit()
 
 
-def test_assigned_agent_is_notified(session, make_user):
+def test_most_recent_hob_is_notified_even_when_an_agent_is_assigned(session, make_user):
     owner = make_user('owner@x.net', role='broker')
     agent = make_user('agent@x.net', role='agent')
     hob = make_user('hob@x.net', role='hob')
     conversation, _ = _thread(session, owner.id, assigned_agent_id=agent.id)
     _sent_by(session, conversation, hob.id, 5)
+
+    assert _reply_recipient_ids(session, conversation) == [hob.id]
+
+
+def test_most_recent_assigned_agent_is_notified_over_older_broker_work(session, make_user):
+    owner = make_user('owner@x.net', role='broker')
+    agent = make_user('agent@x.net', role='agent')
+    conversation, _ = _thread(session, owner.id, assigned_agent_id=agent.id)
+    _sent_by(session, conversation, owner.id, 5)
+    _sent_by(session, conversation, agent.id, 10)
 
     assert _reply_recipient_ids(session, conversation) == [agent.id]
 

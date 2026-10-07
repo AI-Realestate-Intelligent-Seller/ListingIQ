@@ -3,20 +3,33 @@
 
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ..core.email import EmailDeliveryError, send_new_brokerage_leads_email
 from ..integration_data import service
 from ..integration_data.models import CombinedProperty, DistributionRun
+from ..logger import get_logger
 from ..models import User
 from .auth import get_db
 from .platform_admin import audit, require_platform_admin
 
 router = APIRouter(dependencies=[Depends(require_platform_admin)])
+logger = get_logger(__name__)
 Mode = Literal["live", "sandbox"]
 LeadStatus = Literal["ready", "needs_review", "dnc"]
+
+
+def _send_new_leads_email_safely(**kwargs) -> None:
+    try:
+        send_new_brokerage_leads_email(**kwargs)
+    except EmailDeliveryError as error:
+        # Distribution is already committed; email delivery must not roll it back.
+        logger.error('brokerage_leads_email_failed', extra={'error': str(error)})
+    except Exception as error:  # noqa: BLE001 - email must not undo a distribution
+        logger.exception('brokerage_leads_email_unexpected_failure', extra={'error': str(error)})
 
 
 class CombineRequest(BaseModel):
@@ -176,11 +189,11 @@ def preview(payload: DistributionRequest, db: Session = Depends(get_db)):
         raise HTTPException(409, str(error)) from None
 
 
-@router.post("/distribution/execute")
 def execute(
     payload: DistributionRequest,
-    db: Session = Depends(get_db),
-    actor: User = Depends(require_platform_admin),
+    db: Session,
+    actor: User,
+    background: BackgroundTasks | None = None,
 ):
     try:
         result = service.distribute(db, payload, actor.id)
@@ -199,6 +212,27 @@ def execute(
                 },
             )
         db.commit()
+        if payload.mode == "live" and not result.get("replayed"):
+            for summary in result["summaries"]:
+                count = summary["allocated"]
+                if not count:
+                    continue
+                recipients = db.query(User).filter(
+                    User.brokerage_id == summary["brokerage_id"],
+                    User.role.in_(["hob", "broker"]),
+                    User.is_active.is_(True),
+                    User.is_verified.is_(True),
+                ).all()
+                for recipient in recipients:
+                    email_kwargs = {
+                        "recipient_email": recipient.email,
+                        "brokerage_name": summary["brokerage_name"],
+                        "lead_count": count,
+                    }
+                    if background is not None:
+                        background.add_task(_send_new_leads_email_safely, **email_kwargs)
+                    else:
+                        _send_new_leads_email_safely(**email_kwargs)
         return result
     except (service.DataError, IntegrityError) as error:
         db.rollback()
@@ -208,6 +242,16 @@ def execute(
             if isinstance(error, IntegrityError)
             else str(error),
         ) from None
+
+
+@router.post("/distribution/execute")
+def execute_route(
+    payload: DistributionRequest,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+    actor: User = Depends(require_platform_admin),
+):
+    return execute(payload, db, actor, background)
 
 
 @router.get("/distribution/history")

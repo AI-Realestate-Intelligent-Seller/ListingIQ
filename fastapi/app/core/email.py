@@ -46,6 +46,89 @@ def build_password_reset_url(token: str) -> str:
     return f"{get_frontend_url()}/reset-password?token={token}"
 
 
+def dashboard_url(path: str) -> str:
+    """Return an absolute frontend URL for links in notification emails."""
+    return f"{get_frontend_url()}/{path.lstrip('/')}"
+
+
+def _notification_email(title: str, message: str, action_label: str, action_url: str) -> tuple[str, str]:
+    safe_title = escape(title)
+    safe_message = escape(message)
+    safe_label = escape(action_label)
+    safe_url = escape(action_url, quote=True)
+    html_body = f"""
+<html><body style="font-family:Arial,Helvetica,sans-serif;color:#0c1424;background:#f4f6f8;padding:40px 16px;">
+  <div style="max-width:560px;margin:auto;background:#fff;border:1px solid #dfe3e8;border-radius:12px;padding:36px;">
+    <div style="font-size:20px;font-weight:700;color:#1f5c4d;">ListingIQ</div>
+    <h1 style="font-size:25px;margin:26px 0 12px;">{safe_title}</h1>
+    <p style="color:#4a5568;line-height:1.6;">{safe_message}</p>
+    <a href="{safe_url}" style="display:inline-block;margin:10px 0 22px;padding:13px 22px;background:#1f5c4d;color:#fff;text-decoration:none;border-radius:8px;font-weight:700;">{safe_label}</a>
+    <p style="font-size:13px;color:#657083;word-break:break-all;">If the button does not work, open:<br><a href="{safe_url}" style="color:#1f5c4d;">{safe_url}</a></p>
+  </div>
+</body></html>
+"""
+    text_body = f"{title}\n\n{message}\n\n{action_label}:\n{action_url}\n"
+    return html_body, text_body
+
+
+def send_reply_notification_email(
+    recipient_email: str,
+    sender_name: str,
+    message_text: str,
+    conversation_id: int,
+    is_first_reply: bool,
+) -> None:
+    subject = (
+        f"First reply from {sender_name}"
+        if is_first_reply
+        else f"New reply from {sender_name}"
+    )
+    preview = " ".join(message_text.split())[:240]
+    html_body, text_body = _notification_email(
+        subject,
+        f'{sender_name} replied: "{preview}"',
+        "Open reply",
+        dashboard_url(f"/dashboard?view=followups&conversation_id={conversation_id}"),
+    )
+    send_email(recipient_email, subject, html_body, text_body)
+
+
+def send_lead_assigned_email(
+    recipient_email: str,
+    broker_name: str,
+    lead_id: int,
+    lead_name: str | None,
+    property_address: str | None,
+    reassigned: bool = False,
+) -> None:
+    subject = "A lead was reassigned to you" if reassigned else "A new lead was assigned to you"
+    lead_label = lead_name or property_address or f"Lead #{lead_id}"
+    message = f"{broker_name} assigned {lead_label} to you."
+    html_body, text_body = _notification_email(
+        subject,
+        message,
+        "Open lead",
+        dashboard_url(f"/dashboard?view=leads&lead_id={lead_id}"),
+    )
+    send_email(recipient_email, subject, html_body, text_body)
+
+
+def send_new_brokerage_leads_email(
+    recipient_email: str,
+    brokerage_name: str,
+    lead_count: int,
+) -> None:
+    noun = "lead has" if lead_count == 1 else "leads have"
+    subject = f"{lead_count} new {'lead' if lead_count == 1 else 'leads'} for {brokerage_name}"
+    html_body, text_body = _notification_email(
+        subject,
+        f"{lead_count} new {noun} been added to your brokerage's Lead Pool.",
+        "Open Lead Pool",
+        dashboard_url("/dashboard?view=leads"),
+    )
+    send_email(recipient_email, subject, html_body, text_body)
+
+
 def send_password_reset_email(recipient_email: str, reset_url: str) -> None:
     safe_url = escape(reset_url, quote=True)
     html_body = f"""

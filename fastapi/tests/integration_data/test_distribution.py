@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -232,6 +232,49 @@ def test_live_distribution_is_atomic_tenant_scoped_and_idempotent(db):
     service.combine(db, "live")
     assert {row.brokerage_id for row in db.query(CombinedProperty)} == {"A", "B"}
     assert service.preview_distribution(db, request())["allocated"] == 0
+
+
+def test_execute_queues_live_lead_count_email_for_verified_brokerage_leaders(db, monkeypatch):
+    head = db.get(User, 2)
+    head.is_verified = True
+    broker = User(
+        email="broker-a@test.invalid",
+        hashed_password="unused",
+        role="broker",
+        brokerage_id="A",
+        brokerage_name="Brokerage A",
+        is_active=True,
+        is_verified=True,
+    )
+    db.add(broker)
+    batch_property(db, "EMAIL-1")
+    service.combine(db, "live")
+    db.commit()
+    payload = request()
+    payload.rules = payload.rules[:1]
+    payload.rules[0].quantity = 1
+    plan = service.preview_distribution(db, payload)
+    payload.confirmed = True
+    payload.reason = "approved email allocation"
+    payload.preview_hash = plan["preview_hash"]
+    sent = []
+    monkeypatch.setattr(
+        routes,
+        "send_new_brokerage_leads_email",
+        lambda **kwargs: sent.append(kwargs),
+    )
+    background = BackgroundTasks()
+
+    result = routes.execute(payload, db, db.get(User, 1), background)
+    for task in background.tasks:
+        task.func(*task.args, **task.kwargs)
+
+    assert result["leads_created"] == 1
+    assert {email["recipient_email"] for email in sent} == {
+        head.email,
+        broker.email,
+    }
+    assert all(email["lead_count"] == 1 for email in sent)
 
 
 def test_batch_contact_metadata_and_owner_phone_relationship_survive_distribution(db):

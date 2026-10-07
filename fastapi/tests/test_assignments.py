@@ -53,7 +53,12 @@ def test_broker_sees_replied_leads_and_only_linked_agents(make_user, session):
     assert other.email not in {row['email'] for row in result['agents']}
 
 
-def test_broker_can_assign_replied_lead_to_linked_agent(make_user, session):
+def test_broker_can_assign_replied_lead_to_linked_agent(make_user, session, monkeypatch):
+    emails = []
+    monkeypatch.setattr(
+        'app.routes.assignments.send_lead_assigned_email',
+        lambda **kwargs: emails.append(kwargs),
+    )
     broker = make_user('broker@linchpinglobal.net', role='broker')
     agent = make_user('agent@linchpinglobal.net', role='agent')
     agent.assigned_broker_id = broker.id
@@ -66,6 +71,14 @@ def test_broker_can_assign_replied_lead_to_linked_agent(make_user, session):
     assert result['assignee_id'] == agent.id
     session.refresh(lead)
     assert lead.assigned_agent_id == agent.id
+    assert emails == [{
+        'recipient_email': agent.email,
+        'broker_name': broker.full_name,
+        'lead_id': lead.id,
+        'lead_name': lead.owner_name,
+        'property_address': lead.property_address,
+        'reassigned': False,
+    }]
 
 
 def test_broker_overview_reports_campaign_and_assignment_metrics(make_user, session):

@@ -1,20 +1,39 @@
 """Broker assignment queue and agent workflow for replied leads."""
 
 import json
-from datetime import datetime
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from ..core.email import EmailDeliveryError, send_lead_assigned_email
 from ..leads import events as lead_events
 from ..leads.response_analytics import get_agent_response_analytics
 from ..leads.service import serialize
-from ..models import Campaign, Conversation, Lead, Message, User,Booking
+from ..models import Booking, Campaign, Conversation, Lead, Message, User
+from ..reminder.notification import notify_user
 from ..schemas import LeadAssignmentRequest, LeadAssignmentStageRequest
 from .auth import get_current_user, get_db
-from ..reminder.notification import notify_user
+
 router = APIRouter()
+
+
+def _email_assignment(agent: User, broker: User, lead: Lead, reassigned: bool = False) -> None:
+    if not agent.is_active or not agent.is_verified:
+        return
+    try:
+        send_lead_assigned_email(
+            recipient_email=agent.email,
+            broker_name=broker.full_name or broker.email,
+            lead_id=lead.id,
+            lead_name=lead.owner_name,
+            property_address=lead.property_address,
+            reassigned=reassigned,
+        )
+    except EmailDeliveryError as error:
+        print('[LEAD ASSIGNMENT EMAIL FAILED]', f'lead_id={lead.id}', repr(error))
+    except Exception as error:  # noqa: BLE001 - email must not undo an assignment
+        print('[LEAD ASSIGNMENT EMAIL UNEXPECTED FAILURE]', f'lead_id={lead.id}', repr(error))
 
 
 def _require_broker(user: User) -> None:
@@ -504,6 +523,8 @@ def round_robin_assignments(
                     repr(error),
                 )
 
+            _email_assignment(agent, current_user, lead)
+
     return {
         'assigned': len(unassigned),
 
@@ -651,6 +672,13 @@ def assign_lead(
                     "NOTIFICATION FAILED]",
                     error,
                 )
+
+            _email_assignment(
+                assigned_agent,
+                current_user,
+                lead,
+                reassigned=previous_agent_id is not None,
+            )
 
     return _serialize_assignment(session, lead)
 

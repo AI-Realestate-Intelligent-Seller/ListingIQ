@@ -79,7 +79,7 @@ def delivery_callback(event_type, provider_message_id, recipients):
     }}
 
 
-def invoke_telnyx_webhook(session, payload):
+def invoke_telnyx_webhook(session, payload, background=None):
     body = json.dumps(payload).encode()
     sent = False
 
@@ -96,7 +96,7 @@ def invoke_telnyx_webhook(session, payload):
         'path': '/api/v1/webhooks/telnyx',
         'headers': [(b'content-type', b'application/json')],
     }, receive)
-    return asyncio.run(telnyx_webhook(request, BackgroundTasks(), session))
+    return asyncio.run(telnyx_webhook(request, background or BackgroundTasks(), session))
 
 
 # --------------------------------------------------------------------------
@@ -372,6 +372,56 @@ def test_inbound_reply_lands_on_the_thread_and_wakes_bobbie(
     session.expire_all()
     assert session.query(Conversation).one().lead_status == 'interested'
     assert replies == [(conversation_id, 'I might sell at the right price.')]
+
+
+def test_first_and_later_replies_email_the_verified_last_worker(
+        session, monkeypatch):
+    emails = []
+    monkeypatch.setattr('app.routes.webhooks.service.process_ai_reply', lambda *_: None)
+    monkeypatch.setattr(
+        'app.routes.webhooks.send_reply_notification_email',
+        lambda **kwargs: emails.append(kwargs),
+    )
+    broker = User(
+        email=BROKER_EMAIL,
+        hashed_password='unused',
+        full_name='Ather Shamim',
+        brokerage_id='brokerage-1',
+        role='broker',
+        is_active=True,
+        is_verified=True,
+    )
+    session.add(broker)
+    session.flush()
+    conversation = Conversation(
+        user_id=broker.id,
+        contact=CONTACT,
+        name='Maya Chen',
+        property_address='123 Maple Ave, Austin, TX',
+        ai_enabled=True,
+        handled_by='bobbie',
+    )
+    session.add(conversation)
+    session.commit()
+
+    for message_id, text in [('reply-first', 'First answer'), ('reply-next', 'Another answer')]:
+        background = BackgroundTasks()
+        response = invoke_telnyx_webhook(session, {'data': {
+            'event_type': 'message.received',
+            'payload': {
+                'id': message_id,
+                'from': {'phone_number': CONTACT},
+                'to': [],
+                'text': text,
+            },
+        }}, background)
+        for task in background.tasks:
+            task.func(*task.args, **task.kwargs)
+        assert response['ok'] is True
+
+    assert [email['recipient_email'] for email in emails] == [broker.email, broker.email]
+    assert [email['is_first_reply'] for email in emails] == [True, False]
+    assert [email['conversation_id'] for email in emails] == [conversation.id, conversation.id]
 
 
 def test_inbound_from_an_unknown_number_is_ignored(client):
