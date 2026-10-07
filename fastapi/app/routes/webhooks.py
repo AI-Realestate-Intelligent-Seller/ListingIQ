@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from ..core.email import EmailDeliveryError, send_reply_notification_email
 from ..leads import events as lead_events
 from ..logger import get_logger, log_event
-from ..models import Conversation, Lead, LeadEvent, Message, User
+from ..models import Campaign, Conversation, Lead, LeadEvent, Message, User
 from ..reminder.notification import notify_conversation_reply
 from ..sms import service
 from ..sms.followup_scheduler import cancel_followup_cadence
@@ -44,13 +44,47 @@ _FINAL_DELIVERY_STATUSES = {
 }
 
 
-def _send_reply_email_safely(**kwargs) -> None:
+def _send_reply_email_safely(*, recipient_user_id: int, **kwargs) -> None:
+    conversation_id = kwargs.get('conversation_id')
+    is_first_reply = kwargs.get('is_first_reply')
+    log_event(
+        logger,
+        'email.reply.attempted',
+        recipient_user_id=recipient_user_id,
+        conversation_id=conversation_id,
+        is_first_reply=is_first_reply,
+    )
     try:
         send_reply_notification_email(**kwargs)
     except EmailDeliveryError as error:
-        log_event(logger, 'email.reply.failed', level=logging.ERROR, error=str(error))
+        log_event(
+            logger,
+            'email.reply.failed',
+            level=logging.ERROR,
+            recipient_user_id=recipient_user_id,
+            conversation_id=conversation_id,
+            failure_type='delivery',
+            error=str(error),
+        )
     except Exception as error:  # noqa: BLE001 - email must not fail an inbound webhook
-        logger.exception('email.reply.unexpected_failure', extra={'error': str(error)})
+        log_event(
+            logger,
+            'email.reply.failed',
+            level=logging.ERROR,
+            recipient_user_id=recipient_user_id,
+            conversation_id=conversation_id,
+            failure_type='unexpected',
+            error_type=type(error).__name__,
+            error=str(error),
+        )
+    else:
+        log_event(
+            logger,
+            'email.reply.sent',
+            recipient_user_id=recipient_user_id,
+            conversation_id=conversation_id,
+            is_first_reply=is_first_reply,
+        )
 
 
 def _extract_inbound(payload: dict) -> dict | None:
@@ -412,16 +446,71 @@ async def telnyx_webhook(
             ),
         )
 
-    email_recipients = db.query(User).filter(
-        User.id.in_(recipient_user_ids),
-        User.is_active.is_(True),
-        User.is_verified.is_(True),
-    ).all()
-    for recipient in email_recipients:
+    recipient_users = {
+        user.id: user for user in db.query(User).filter(
+            User.id.in_(recipient_user_ids),
+        ).all()
+    }
+    campaign = db.get(Campaign, conversation.campaign_id) if conversation.campaign_id else None
+    lead = (
+        db.query(Lead)
+        .filter(Lead.conversation_id == conversation.id)
+        .order_by(Lead.id.desc())
+        .first()
+    )
+    campaign_name = (
+        campaign.name.strip()
+        if campaign and campaign.name and campaign.name.strip()
+        else 'Direct outreach'
+    )
+    lead_name = (
+        conversation.name
+        or (lead.owner_name if lead else None)
+        or conversation.contact
+        or 'Customer'
+    )
+    property_address = (
+        conversation.property_address
+        or (lead.property_address if lead else None)
+        or 'the property'
+    )
+    for recipient_user_id in recipient_user_ids:
+        recipient = recipient_users.get(recipient_user_id)
+        skip_reason = None
+        if recipient is None:
+            skip_reason = 'user_not_found'
+        elif not recipient.is_active:
+            skip_reason = 'user_inactive'
+        elif not recipient.is_verified:
+            skip_reason = 'email_unverified'
+        elif not recipient.email or not recipient.email.strip():
+            skip_reason = 'email_missing'
+
+        if skip_reason:
+            log_event(
+                logger,
+                'email.reply.skipped',
+                recipient_user_id=recipient_user_id,
+                conversation_id=conversation.id,
+                reason=skip_reason,
+                is_first_reply=is_first_reply,
+            )
+            continue
+
+        log_event(
+            logger,
+            'email.reply.queued',
+            recipient_user_id=recipient.id,
+            conversation_id=conversation.id,
+            is_first_reply=is_first_reply,
+        )
         background.add_task(
             _send_reply_email_safely,
+            recipient_user_id=recipient.id,
             recipient_email=recipient.email,
-            sender_name=conversation.name or conversation.contact or 'Customer',
+            sender_name=lead_name,
+            campaign_name=campaign_name,
+            property_address=property_address,
             message_text=inbound['text'],
             conversation_id=conversation.id,
             is_first_reply=is_first_reply,

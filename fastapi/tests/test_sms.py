@@ -8,9 +8,10 @@ import pytest
 from fastapi import BackgroundTasks, Request
 
 from app import db
-from app.models import Conversation, Lead, Message, User
+from app.core.email import EmailDeliveryError, send_reply_notification_email
+from app.models import Campaign, Conversation, Lead, Message, User
 from app.routes.sms import _serialize
-from app.routes.webhooks import telnyx_webhook
+from app.routes.webhooks import _send_reply_email_safely, telnyx_webhook
 from app.sms import service
 from app.sms.bobbie import exact_offered_slot
 from app.sms.classifier import classify_lead_message, is_opt_out, merge_lead_status
@@ -375,7 +376,7 @@ def test_inbound_reply_lands_on_the_thread_and_wakes_bobbie(
 
 
 def test_first_and_later_replies_email_the_verified_last_worker(
-        session, monkeypatch):
+        session, monkeypatch, caplog):
     emails = []
     monkeypatch.setattr('app.routes.webhooks.service.process_ai_reply', lambda *_: None)
     monkeypatch.setattr(
@@ -393,35 +394,162 @@ def test_first_and_later_replies_email_the_verified_last_worker(
     )
     session.add(broker)
     session.flush()
+    campaign = Campaign(
+        user_id=broker.id,
+        name='October Sellers',
+        message_template='Hello',
+        status='sent',
+    )
+    session.add(campaign)
+    session.flush()
     conversation = Conversation(
         user_id=broker.id,
         contact=CONTACT,
         name='Maya Chen',
         property_address='123 Maple Ave, Austin, TX',
+        campaign_id=campaign.id,
         ai_enabled=True,
         handled_by='bobbie',
     )
     session.add(conversation)
     session.commit()
 
-    for message_id, text in [('reply-first', 'First answer'), ('reply-next', 'Another answer')]:
-        background = BackgroundTasks()
-        response = invoke_telnyx_webhook(session, {'data': {
-            'event_type': 'message.received',
-            'payload': {
-                'id': message_id,
-                'from': {'phone_number': CONTACT},
-                'to': [],
-                'text': text,
-            },
-        }}, background)
-        for task in background.tasks:
-            task.func(*task.args, **task.kwargs)
-        assert response['ok'] is True
+    with caplog.at_level(logging.INFO, logger='app.routes.webhooks'):
+        for message_id, text in [('reply-first', 'First answer'), ('reply-next', 'Another answer')]:
+            background = BackgroundTasks()
+            response = invoke_telnyx_webhook(session, {'data': {
+                'event_type': 'message.received',
+                'payload': {
+                    'id': message_id,
+                    'from': {'phone_number': CONTACT},
+                    'to': [],
+                    'text': text,
+                },
+            }}, background)
+            for task in background.tasks:
+                task.func(*task.args, **task.kwargs)
+            assert response['ok'] is True
 
     assert [email['recipient_email'] for email in emails] == [broker.email, broker.email]
     assert [email['is_first_reply'] for email in emails] == [True, False]
     assert [email['conversation_id'] for email in emails] == [conversation.id, conversation.id]
+    assert [email['campaign_name'] for email in emails] == ['October Sellers', 'October Sellers']
+    assert [email['sender_name'] for email in emails] == ['Maya Chen', 'Maya Chen']
+    assert [email['property_address'] for email in emails] == [
+        '123 Maple Ave, Austin, TX',
+        '123 Maple Ave, Austin, TX',
+    ]
+    logs = '\n'.join(record.getMessage() for record in caplog.records)
+    assert logs.count('event=email.reply.attempted') == 2
+    assert logs.count('event=email.reply.sent') == 2
+
+
+def test_reply_email_logs_when_resolved_user_email_is_unverified(
+        session, monkeypatch, caplog):
+    emails = []
+    monkeypatch.setattr(
+        'app.routes.webhooks.send_reply_notification_email',
+        lambda **kwargs: emails.append(kwargs),
+    )
+    hob = User(
+        email='unverified@linchpinglobal.net',
+        hashed_password='unused',
+        full_name='Unverified HOB',
+        brokerage_id='brokerage-1',
+        role='hob',
+        is_active=True,
+        is_verified=False,
+    )
+    session.add(hob)
+    session.flush()
+    conversation = Conversation(
+        user_id=hob.id,
+        contact=CONTACT,
+        name='Maya Chen',
+        ai_enabled=False,
+        handled_by='broker',
+    )
+    session.add(conversation)
+    session.commit()
+    background = BackgroundTasks()
+
+    with caplog.at_level(logging.INFO, logger='app.routes.webhooks'):
+        response = invoke_telnyx_webhook(session, {'data': {
+            'event_type': 'message.received',
+            'payload': {
+                'id': 'reply-unverified',
+                'from': {'phone_number': CONTACT},
+                'to': [],
+                'text': 'Hello',
+            },
+        }}, background)
+
+    assert response['recipient_user_ids'] == [hob.id]
+    assert emails == []
+    assert background.tasks == []
+    skip_log = next(
+        record.getMessage() for record in caplog.records
+        if 'event=email.reply.skipped' in record.getMessage()
+    )
+    assert f'recipient_user_id={hob.id}' in skip_log
+    assert 'reason="email_unverified"' in skip_log
+
+
+def test_reply_email_logs_failed_delivery_without_exposing_address(monkeypatch, caplog):
+    def fail_delivery(**_):
+        raise EmailDeliveryError('SMTP rejected the message')
+
+    monkeypatch.setattr('app.routes.webhooks.send_reply_notification_email', fail_delivery)
+    with caplog.at_level(logging.INFO, logger='app.routes.webhooks'):
+        _send_reply_email_safely(
+            recipient_user_id=42,
+            recipient_email='private@example.com',
+            sender_name='Customer',
+            message_text='Hello',
+            conversation_id=7,
+            is_first_reply=False,
+        )
+
+    logs = '\n'.join(record.getMessage() for record in caplog.records)
+    assert 'event=email.reply.attempted' in logs
+    assert 'event=email.reply.failed' in logs
+    assert 'failure_type="delivery"' in logs
+    assert 'event=email.reply.sent' not in logs
+    assert 'private@example.com' not in logs
+
+
+def test_reply_email_subject_and_body_include_campaign_lead_property_and_reply(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        'app.core.email.send_email',
+        lambda recipient_email, subject, html_body, text_body: sent.append({
+            'recipient_email': recipient_email,
+            'subject': subject,
+            'html_body': html_body,
+            'text_body': text_body,
+        }),
+    )
+
+    send_reply_notification_email(
+        recipient_email='agent@example.com',
+        sender_name='Michele',
+        campaign_name='October Sellers',
+        property_address='10 Main Street',
+        message_text='testing email',
+        conversation_id=7,
+        is_first_reply=False,
+    )
+
+    assert sent[0]['subject'] == 'New reply in October Sellers from Michele'
+    expected = (
+        'Michele from October Sellers replied about '
+        '10 Main Street: “testing email”'
+    )
+    assert expected in sent[0]['html_body']
+    assert expected in sent[0]['text_body']
+    assert 'Open reply' in sent[0]['html_body']
+    assert '/dashboard?view=followups&amp;conversation_id=7' in sent[0]['html_body']
+    assert '/dashboard?view=followups&conversation_id=7' in sent[0]['text_body']
 
 
 def test_inbound_from_an_unknown_number_is_ignored(client):

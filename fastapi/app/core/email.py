@@ -74,19 +74,21 @@ def _notification_email(title: str, message: str, action_label: str, action_url:
 def send_reply_notification_email(
     recipient_email: str,
     sender_name: str,
+    campaign_name: str,
+    property_address: str,
     message_text: str,
     conversation_id: int,
     is_first_reply: bool,
 ) -> None:
-    subject = (
-        f"First reply from {sender_name}"
-        if is_first_reply
-        else f"New reply from {sender_name}"
-    )
-    preview = " ".join(message_text.split())[:240]
+    event_label = "First reply" if is_first_reply else "New reply"
+    subject = f"{event_label} in {campaign_name} from {sender_name}"
+    reply_text = message_text.strip()
     html_body, text_body = _notification_email(
         subject,
-        f'{sender_name} replied: "{preview}"',
+        (
+            f"{sender_name} from {campaign_name} replied about "
+            f"{property_address}: “{reply_text}”"
+        ),
         "Open reply",
         dashboard_url(f"/dashboard?view=followups&conversation_id={conversation_id}"),
     )
