@@ -248,6 +248,7 @@ async def telnyx_webhook(
         logger,
         'sms.webhook.verified',
         verification_bypassed=not signature_required,
+        signature_required=signature_required,
     )
 
     if not signature_required:
@@ -288,6 +289,20 @@ async def telnyx_webhook(
             reason='not_an_inbound_text_message',
         )
         return {'ok': True}
+
+    log_event(
+        logger,
+        'sms.inbound.received',
+        event_type=event_type or 'legacy',
+        provider_message_id=inbound.get('telnyx_id'),
+        from_suffix=str(inbound['from_number'])[-4:],
+        to_suffix=(
+            str(inbound['to_number'])[-4:]
+            if inbound.get('to_number')
+            else None
+        ),
+        text_chars=len(inbound['text']),
+    )
 
     conversation = (
         db.query(Conversation)
@@ -343,6 +358,7 @@ async def telnyx_webhook(
         conversation_id=conversation.id,
         message_id=message.id,
         provider_message_id=inbound.get('telnyx_id'),
+        status=message.status,
         text_chars=len(inbound['text']),
     )
 
@@ -402,6 +418,15 @@ async def telnyx_webhook(
             'lead_status': conversation.lead_status,
             'changed': False,
         },
+    )
+
+    log_event(
+        logger,
+        'sms.inbound.processing_started',
+        message_id=message.id,
+        conversation_id=conversation.id,
+        ai_enabled=bool(conversation.ai_enabled),
+        handled_by=conversation.handled_by,
     )
 
     if (

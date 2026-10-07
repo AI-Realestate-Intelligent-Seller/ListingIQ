@@ -383,7 +383,8 @@ def test_inbound_from_an_unknown_number_is_ignored(client):
     assert db.SessionLocal().query(Conversation).count() == 0
 
 
-def test_message_received_keeps_the_existing_inbound_storage_flow(session, monkeypatch):
+def test_message_received_keeps_the_existing_inbound_storage_flow(
+        session, monkeypatch, caplog):
     monkeypatch.setattr('app.routes.webhooks.notify_conversation_reply', lambda **_: None)
     user = User(
         email=BROKER_EMAIL,
@@ -403,15 +404,16 @@ def test_message_received_keeps_the_existing_inbound_storage_flow(session, monke
     session.add(conversation)
     session.commit()
 
-    response = invoke_telnyx_webhook(session, {'data': {
-        'event_type': 'message.received',
-        'payload': {
-            'id': 'inbound-regression-1',
-            'from': {'phone_number': CONTACT},
-            'to': [{'phone_number': service.FIXED_FROM}],
-            'text': 'I might sell at the right price.',
-        },
-    }})
+    with caplog.at_level(logging.INFO, logger='app.routes.webhooks'):
+        response = invoke_telnyx_webhook(session, {'data': {
+            'event_type': 'message.received',
+            'payload': {
+                'id': 'inbound-regression-1',
+                'from': {'phone_number': CONTACT},
+                'to': [{'phone_number': service.FIXED_FROM}],
+                'text': 'I might sell at the right price.',
+            },
+        }})
 
     inbound = session.query(Message).one()
     assert response['conversation_id'] == conversation.id
@@ -422,6 +424,28 @@ def test_message_received_keeps_the_existing_inbound_storage_flow(session, monke
     assert inbound.status == 'received'
     assert inbound.event_type == 'message.received'
     assert inbound.telnyx_id == 'inbound-regression-1'
+
+    logs = '\n'.join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name == 'app.routes.webhooks'
+    )
+    assert 'event=sms.webhook.verified' in logs
+    assert 'verification_bypassed=true' in logs
+    assert 'signature_required=false' in logs
+    assert 'event=sms.inbound.received' in logs
+    assert 'event_type="message.received"' in logs
+    assert 'provider_message_id="inbound-regression-1"' in logs
+    assert f'from_suffix="{CONTACT[-4:]}"' in logs
+    assert f'to_suffix="{service.FIXED_FROM[-4:]}"' in logs
+    assert 'text_chars=32' in logs
+    assert 'event=sms.webhook.conversation_matched' in logs
+    assert 'event=sms.webhook.message_stored' in logs
+    assert 'status="received"' in logs
+    assert 'event=sms.inbound.processing_started' in logs
+    assert CONTACT not in logs
+    assert service.FIXED_FROM not in logs
+    assert 'I might sell at the right price.' not in logs
 
 
 def test_message_sent_updates_the_matching_outbound_recipient(session):
