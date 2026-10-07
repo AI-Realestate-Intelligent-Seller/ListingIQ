@@ -80,13 +80,13 @@ def send_reply_notification_email(
     conversation_id: int,
     is_first_reply: bool,
 ) -> None:
-    event_label = "First reply" if is_first_reply else "New reply"
-    subject = f"{event_label} in {campaign_name} from {sender_name}"
+    subject = f"{sender_name} replied for {property_address}"
+    activity = "sent the first reply" if is_first_reply else "replied"
     reply_text = message_text.strip()
     html_body, text_body = _notification_email(
         subject,
         (
-            f"{sender_name} from {campaign_name} replied about "
+            f"{sender_name} from {campaign_name} {activity} about "
             f"{property_address}: “{reply_text}”"
         ),
         "Open reply",
@@ -103,9 +103,11 @@ def send_lead_assigned_email(
     property_address: str | None,
     reassigned: bool = False,
 ) -> None:
-    subject = "A lead was reassigned to you" if reassigned else "A new lead was assigned to you"
-    lead_label = lead_name or property_address or f"Lead #{lead_id}"
-    message = f"{broker_name} assigned {lead_label} to you."
+    action = "reassigned" if reassigned else "assigned"
+    lead_label = lead_name or f"Lead #{lead_id}"
+    property_label = property_address or "the property"
+    subject = f"{lead_label} {action} to you for {property_label}"
+    message = f"{broker_name} {action} {lead_label} to you for {property_label}."
     html_body, text_body = _notification_email(
         subject,
         message,
@@ -121,7 +123,7 @@ def send_new_brokerage_leads_email(
     lead_count: int,
 ) -> None:
     noun = "lead has" if lead_count == 1 else "leads have"
-    subject = f"{lead_count} new {'lead' if lead_count == 1 else 'leads'} for {brokerage_name}"
+    subject = f"{lead_count} new {'lead' if lead_count == 1 else 'leads'} added to {brokerage_name}"
     html_body, text_body = _notification_email(
         subject,
         f"{lead_count} new {noun} been added to your brokerage's Lead Pool.",

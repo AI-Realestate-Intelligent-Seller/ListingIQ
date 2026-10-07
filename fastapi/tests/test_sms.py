@@ -8,7 +8,12 @@ import pytest
 from fastapi import BackgroundTasks, Request
 
 from app import db
-from app.core.email import EmailDeliveryError, send_reply_notification_email
+from app.core.email import (
+    EmailDeliveryError,
+    send_lead_assigned_email,
+    send_new_brokerage_leads_email,
+    send_reply_notification_email,
+)
 from app.models import Campaign, Conversation, Lead, Message, User
 from app.routes.sms import _serialize
 from app.routes.webhooks import _send_reply_email_safely, telnyx_webhook
@@ -540,7 +545,7 @@ def test_reply_email_subject_and_body_include_campaign_lead_property_and_reply(m
         is_first_reply=False,
     )
 
-    assert sent[0]['subject'] == 'New reply in October Sellers from Michele'
+    assert sent[0]['subject'] == 'Michele replied for 10 Main Street'
     expected = (
         'Michele from October Sellers replied about '
         '10 Main Street: “testing email”'
@@ -550,6 +555,36 @@ def test_reply_email_subject_and_body_include_campaign_lead_property_and_reply(m
     assert 'Open reply' in sent[0]['html_body']
     assert '/dashboard?view=followups&amp;conversation_id=7' in sent[0]['html_body']
     assert '/dashboard?view=followups&conversation_id=7' in sent[0]['text_body']
+
+
+def test_other_notification_subjects_include_the_action_and_context(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        'app.core.email.send_email',
+        lambda recipient_email, subject, html_body, text_body: sent.append({
+            'subject': subject,
+            'html_body': html_body,
+            'text_body': text_body,
+        }),
+    )
+
+    send_lead_assigned_email(
+        recipient_email='agent@example.com',
+        broker_name='Alex Broker',
+        lead_id=12,
+        lead_name='Michele',
+        property_address='10 Main Street',
+    )
+    send_new_brokerage_leads_email(
+        recipient_email='hob@example.com',
+        brokerage_name='Northstar Realty',
+        lead_count=3,
+    )
+
+    assert sent[0]['subject'] == 'Michele assigned to you for 10 Main Street'
+    assert 'Alex Broker assigned Michele to you for 10 Main Street.' in sent[0]['text_body']
+    assert sent[1]['subject'] == '3 new leads added to Northstar Realty'
+    assert "3 new leads have been added to your brokerage's Lead Pool." in sent[1]['text_body']
 
 
 def test_inbound_from_an_unknown_number_is_ignored(client):
