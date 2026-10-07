@@ -332,7 +332,7 @@ def test_facets_count_the_whole_pool(client, make_user, auth_header):
 # -- campaigns -------------------------------------------------------------
 
 
-def test_campaign_starts_bobbie_and_moves_the_lead_into_the_sms_tab(
+def test_campaign_starts_user_handled_and_moves_the_lead_into_the_sms_tab(
         client, make_user, auth_header, sent_sms, session):
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
@@ -352,7 +352,8 @@ def test_campaign_starts_bobbie_and_moves_the_lead_into_the_sms_tab(
 
     conversations = client.get('/api/v1/sms/conversations', headers=headers).json()
     assert [item['contact'] for item in conversations] == ['+13125550188']
-    assert conversations[0]['handled_by'] == 'bobbie'
+    assert conversations[0]['handled_by'] == 'broker'
+    assert conversations[0]['ai_enabled'] is False
 
     # The lead now lives under its campaign, not in the pool.
     refreshed = client.get(LEADS_URL, headers=headers).json()['leads']
@@ -622,7 +623,8 @@ def test_detail_carries_the_conversation_once_campaigned(
     client.post(f'{LEADS_URL}/campaign', headers=headers, json={'lead_ids': [lead_id]})
 
     body = client.get(f'{LEADS_URL}/{lead_id}', headers=headers).json()
-    assert body['conversation']['handled_by'] == 'bobbie'
+    assert body['conversation']['handled_by'] == 'broker'
+    assert body['conversation']['ai_enabled'] is False
     assert body['conversation']['message_count'] == 1
     # The opener is the campaign template rendered for this lead, so it carries
     # the owner's own name and address rather than a fixed string.

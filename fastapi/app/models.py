@@ -200,7 +200,7 @@ class Campaign(Base):
     A campaign is drafted before it is sent. `create campaign` on a selection
     in the Lead Pool creates a draft holding those leads, and the broker names
     it and writes the opening message in the Campaigns tab. Sending renders the
-    template once per lead and hands each one to Bobbie.
+    template once per lead and opens each conversation in user-handled mode.
 
     The template is the broker's own copy, with `{{token}}` placeholders that
     app.leads.template fills from the lead — the address and the reason differ

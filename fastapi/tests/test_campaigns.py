@@ -9,7 +9,7 @@ from datetime import datetime
 from app.leads import campaign as campaign_service
 from app.leads import template as message_template
 from app.leads.address import canonical
-from app.models import Campaign, Conversation, Lead, Message
+from app.models import Campaign, Conversation, Lead, Message, User
 from app.sms import service
 
 BROKER_EMAIL = 'ather.shamim@linchpinglobal.net'
@@ -321,6 +321,62 @@ def test_discarding_a_draft_returns_its_leads_to_the_pool(
 # -- sending ---------------------------------------------------------------
 
 
+def test_campaign_outreach_starts_in_user_handled_mode(session, monkeypatch):
+    user = User(
+        email=BROKER_EMAIL,
+        hashed_password='unused-in-this-test',
+        role='broker',
+        brokerage_id='brokerage-1',
+        is_active=True,
+    )
+    session.add(user)
+    session.flush()
+    campaign = Campaign(
+        user_id=user.id,
+        name='Owner outreach',
+        message_template='Hi {{first_name}} about {{property}}',
+        status='draft',
+    )
+    lead = Lead(
+        user_id=user.id,
+        owner_name='Maya Chen',
+        phone='+13125848528',
+        property_address='123 Maple Ave, Austin, TX',
+        signals='high_equity',
+        campaign_id=None,
+    )
+    session.add_all([campaign, lead])
+    session.commit()
+
+    def store_message(db, conversation, text, event_type):
+        message = Message(
+            conversation_id=conversation.id,
+            direction='outbound',
+            to_number=conversation.contact,
+            text=text,
+            status='queued',
+            event_type=event_type,
+            telnyx_id='sim-campaign-1',
+        )
+        db.add(message)
+        db.commit()
+        db.refresh(message)
+        return message
+
+    monkeypatch.setattr(campaign_service.sms_service, 'send_and_store_message', store_message)
+    monkeypatch.setattr(campaign_service, 'schedule_initial_followup', lambda *_: None)
+
+    started, failed = campaign_service._send_to_lead(
+        session, user, campaign, lead, 'Hi Maya about 123 Maple Ave',
+    )
+
+    assert failed is None
+    assert started['conversation_id']
+    conversation = session.query(Conversation).one()
+    assert conversation.handled_by == 'broker'
+    assert conversation.ai_enabled is False
+
+
 def test_sending_texts_every_recipient_the_message_they_were_shown(
         client, make_user, auth_header, sent_sms, session):
     make_user(BROKER_EMAIL, role='broker')
@@ -338,9 +394,10 @@ def test_sending_texts_every_recipient_the_message_they_were_shown(
     assert {item['lead_id']: item['text'] for item in result['started']} == previewed
     assert len(sent_sms) == 3
 
-    # Bobbie drives the replies; the broker can still take a thread over.
+    # Campaign threads start user-handled; Bobbie can be handed the thread later.
     conversations = client.get('/api/v1/sms/conversations', headers=headers).json()
-    assert all(item['handled_by'] == 'bobbie' for item in conversations)
+    assert all(item['handled_by'] == 'broker' for item in conversations)
+    assert all(item['ai_enabled'] is False for item in conversations)
     assert session.query(Conversation).filter(
         Conversation.campaign_id == campaign_id).count() == 3
 

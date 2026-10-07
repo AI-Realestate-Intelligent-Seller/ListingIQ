@@ -1,10 +1,10 @@
-"""Campaigns — turning selected leads into Bobbie conversations.
+"""Campaigns — turning selected leads into user-handled conversations.
 
 A campaign is a named batch with one message template. The broker selects leads
 in the pool, which creates a *draft* holding them, names it and writes the
 opening message in the Campaigns tab, then sends. Sending renders the template
-once per lead, opens a conversation and hands it to Bobbie, who answers the
-replies until the broker takes the thread over from the SMS tab.
+once per lead, and opens a conversation for the user to handle. Bobbie can be
+explicitly handed the thread later from Follow-ups.
 
 Anything that cannot be sent is reported back per lead rather than failing the
 whole batch — a broker selecting forty rows should not lose thirty-nine of them
@@ -653,11 +653,11 @@ def _send_to_lead(session: Session, user: User, campaign: Campaign, lead: Lead,
         earlier.append(previous_address)
         context['other_properties'] = earlier
     conversation.lead_context = json.dumps(context)
-    # Bobbie drives the replies from here; the broker can take any thread over
-    # from the SMS tab, which is what handled_by tracks.
-    conversation.ai_enabled = True
+    # Campaign outreach starts user-handled. Bobbie remains available through
+    # the existing explicit hand-back control in Follow-ups.
+    conversation.ai_enabled = False
     conversation.recipient_ai_enabled = False
-    conversation.handled_by = 'bobbie'
+    conversation.handled_by = 'broker'
     conversation.lead_status = 'processing'
     conversation.queue_status = 'idle'
     conversation.processed_at = None
