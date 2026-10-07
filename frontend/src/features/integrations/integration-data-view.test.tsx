@@ -69,6 +69,80 @@ afterEach(() => {
 });
 
 describe("Integration data preparation and distribution", () => {
+  it("shows a combined-property issue and opens its saved detail", async () => {
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+      configurable: true,
+      value() {
+        this.setAttribute("open", "");
+      },
+    });
+    Object.defineProperty(HTMLDialogElement.prototype, "close", {
+      configurable: true,
+      value() {
+        this.removeAttribute("open");
+      },
+    });
+    mock.mockImplementation(async (path) => {
+      if (path.includes("/summary")) return summary;
+      if (path.startsWith("/platform-admin/integrations/data/combined?")) {
+        return {
+          items: [
+            {
+              id: 180,
+              address: "1923 N Damen Ave Apt 3, Chicago, IL, 60647",
+              owner: "Bryan West; Rachel Zigler",
+              categories: ["expired"],
+              lead_status: "dnc",
+              distribution_issue: "All 2 phone numbers are marked DNC",
+            },
+          ],
+          total: 1,
+        };
+      }
+      if (path.endsWith("/combined/180")) {
+        return {
+          data: {
+            _id: "provider-180",
+            address: {
+              street: "1923 N Damen Ave Apt 3",
+              city: "Chicago",
+              state: "IL",
+              zip: "60647",
+            },
+            owner: { fullName: "Bryan West; Rachel Zigler" },
+          },
+          saved: { id: 180, lead_status: "dnc" },
+          stages: {},
+        };
+      }
+      if (path.includes("/sources/")) return { items: [], total: 0 };
+      return { items: [], total: 0 };
+    });
+
+    render(<IntegrationDataView distribution initialMode="live" />);
+
+    expect(
+      await screen.findByRole("cell", {
+        name: "All 2 phone numbers are marked DNC",
+      }),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "View property" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Property details",
+    });
+    expect(
+      within(dialog).getByRole("heading", {
+        name: "1923 N Damen Ave Apt 3, Chicago, IL, 60647",
+      }),
+    ).toBeTruthy();
+    expect(
+      within(dialog).getAllByText(/Bryan West; Rachel Zigler/).length,
+    ).toBeGreaterThan(0);
+    expect(
+      mock.mock.calls.some(([path]) => path.endsWith("/combined/180")),
+    ).toBe(true);
+  });
+
   it("shows saved provider tables and combines only on an explicit click", async () => {
     let combined = false;
     mock.mockImplementation(async (path) => {

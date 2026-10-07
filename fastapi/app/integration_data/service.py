@@ -693,13 +693,48 @@ def distribute(db, payload, actor_id):
 
 
 def combined_value(row):
+    phones = row.data_json.get("phones", [])
+    if row.lead_status == "dnc":
+        count = len(phones)
+        issue = (
+            f"All {count} phone {'number is' if count == 1 else 'numbers are'} marked DNC"
+            if count
+            else "Contact is marked DNC"
+        )
+    elif not row.data_json.get("address_valid"):
+        issue = "Property address is incomplete"
+    elif row.lead_status == "needs_review" and not phones:
+        issue = "No phone numbers are available"
+    elif row.lead_status == "needs_review":
+        issue = "Property needs review"
+    else:
+        issue = "No issue"
     return {
         "id": row.id,
         "mode": row.mode,
         **row.data_json,
         "categories": row.categories_json,
         "lead_status": row.lead_status,
+        "distribution_issue": issue,
         "sources": row.sources_json,
         "brokerage_id": row.brokerage_id,
         "lead_id": row.lead_id,
     }
+
+
+def combined_detail_value(row):
+    """Shape saved combined data for the existing provider detail drawer."""
+    combined = combined_value(row)
+    normalized = row.data_json or {}
+    provider_details = object_value(normalized.get("provider_property_details"))
+    saved = {**(provider_details or normalized)}
+    for key in ("contacts", "contact_match_metadata"):
+        if normalized.get(key):
+            saved[key] = normalized[key]
+    contacts = normalized.get("contacts") or []
+    stages = (
+        {"contacts": {"status": "completed", "data": [{"persons": contacts}]}}
+        if contacts
+        else {}
+    )
+    return {**combined, "data": saved, "saved": combined, "stages": stages}

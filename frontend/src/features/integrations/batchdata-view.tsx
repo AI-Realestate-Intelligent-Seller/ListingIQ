@@ -1528,6 +1528,9 @@ export function PropertyTable({
     ["listing_status", "Listing status"],
     ["listing_price", "Listing price"],
   ];
+  if (rows.some((row) => typeof row.distribution_issue === "string")) {
+    columns.push(["distribution_issue", "Issue"]);
+  }
   return (
     <>
       <div className="platform-table-wrap bd-table">

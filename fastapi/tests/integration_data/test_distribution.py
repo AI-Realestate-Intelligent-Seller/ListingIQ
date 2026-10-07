@@ -170,6 +170,28 @@ def test_combine_deduplicates_providers_unions_categories_and_preserves_sources(
     assert db.query(CombinedProperty).count() == 2
 
 
+def test_combined_row_explains_dnc_and_detail_uses_drawer_envelope(db):
+    batch_property(
+        db,
+        "BD-DNC",
+        phones=[
+            {"number": "3125550100", "dnc": True},
+            {"number": "3125550101", "dnc": True},
+        ],
+    )
+    service.combine(db, "live")
+    row = db.query(CombinedProperty).one()
+
+    combined = service.combined_value(row)
+    assert combined["distribution_issue"] == "All 2 phone numbers are marked DNC"
+
+    detail = routes.combined_property(row.id, db)
+    assert detail["data"]["_id"] == "BD-DNC"
+    assert detail["saved"]["id"] == row.id
+    assert detail["stages"]["contacts"]["status"] == "completed"
+    assert len(detail["stages"]["contacts"]["data"][0]["persons"]) == 1
+
+
 def test_units_and_incomplete_addresses_do_not_collapse(db):
     batch_property(db, "U1", "123 Main St Apt 1")
     batch_property(db, "U2", "123 Main Street Apt 2")

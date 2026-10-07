@@ -165,7 +165,7 @@ def combined_property(property_id: int, db: Session = Depends(get_db)):
     row = db.get(CombinedProperty, property_id)
     if row is None:
         raise HTTPException(404, "Property not found")
-    return service.combined_value(row)
+    return service.combined_detail_value(row)
 
 
 @router.post("/distribution/preview")
