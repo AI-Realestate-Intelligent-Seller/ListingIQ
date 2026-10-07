@@ -117,6 +117,70 @@ def send_lead_assigned_email(
     send_email(recipient_email, subject, html_body, text_body)
 
 
+def send_booking_created_email(
+    recipient_email: str,
+    attendee_name: str,
+    meeting_title: str,
+    starts_at: str,
+    booking_id: int,
+    location_address: str | None = None,
+    location_url: str | None = None,
+) -> None:
+    subject = f"Meeting created: {meeting_title}"
+    if location_address:
+        destination = f" Location: {location_address}."
+        if location_url:
+            destination += f" Directions: {location_url}"
+        action_label = "Open map"
+        action_url = location_url
+    else:
+        destination = ""
+        action_label = "View meeting"
+        action_url = None
+    html_body, text_body = _notification_email(
+        subject,
+        f"Your meeting with {attendee_name} is scheduled for {starts_at}.{destination}",
+        action_label,
+        action_url or dashboard_url(f"/dashboard?view=calendar&booking_id={booking_id}"),
+    )
+    send_email(recipient_email, subject, html_body, text_body)
+
+
+def send_booking_reminder_email(
+    recipient_email: str,
+    attendee_name: str,
+    meeting_title: str,
+    starts_at: str,
+    booking_id: int,
+    minutes_until_start: int | None,
+    location_address: str | None = None,
+    location_url: str | None = None,
+) -> None:
+    timing = (
+        f"in {minutes_until_start} minutes"
+        if minutes_until_start is not None
+        else "soon"
+    )
+    subject = f"Meeting {timing}: {meeting_title}"
+    if location_address:
+        destination = f" Location: {location_address}."
+        if location_url:
+            destination += f" Directions: {location_url}"
+        action_label = "Open map"
+        action_url = location_url
+    else:
+        destination = ""
+        action_label = "Open meeting"
+        action_url = None
+    html_body, text_body = _notification_email(
+        subject,
+        f"Get prepared—your meeting with {attendee_name} starts at {starts_at}.{destination}",
+        action_label,
+        action_url or dashboard_url(f"/dashboard?view=calendar&booking_id={booking_id}"),
+    )
+    send_email(recipient_email, subject, html_body, text_body)
+
+
 def send_new_brokerage_leads_email(
     recipient_email: str,
     brokerage_name: str,

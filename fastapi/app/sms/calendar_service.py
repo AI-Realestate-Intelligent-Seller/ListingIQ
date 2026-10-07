@@ -6,20 +6,24 @@ needed. Availability and overlap checks are scoped to one broker, which the
 single-file simulator could not do.
 """
 
-from datetime import datetime, time as clock_time, timedelta, timezone
-from uuid import uuid4
+from datetime import datetime, timedelta, timezone
+from datetime import time as clock_time
 from urllib.parse import quote_plus
+from uuid import uuid4
 
 from sqlalchemy.exc import IntegrityError
-from ..routes.websocket import broadcast_calendar_event_sync,broadcast_notification_event_sync
+
+from ..routes.websocket import broadcast_calendar_event_sync
+
 try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover
     ZoneInfo = None
-from ..reminder.notification import notify_user
 from ..core.config import settings
-from ..logger import get_logger
-from ..models import Booking,BookingReminder,User
+from ..core.email import EmailDeliveryError, send_booking_created_email
+from ..logger import get_logger, log_event
+from ..models import Booking, BookingReminder, User
+from ..reminder.notification import notify_user
 
 logger = get_logger(__name__)
 
@@ -29,6 +33,49 @@ WORKDAY_END = clock_time(18, 0)
 
 class SlotTakenError(RuntimeError):
     """The requested slot overlaps an existing booking for this broker."""
+
+
+def _email_booking_created_safely(*, recipient_user_id: int, **kwargs) -> None:
+    try:
+        send_booking_created_email(**kwargs)
+    except EmailDeliveryError as error:
+        log_event(
+            logger,
+            'email.booking_created.failed',
+            recipient_user_id=recipient_user_id,
+            booking_id=kwargs.get('booking_id'),
+            failure_type='delivery',
+            error=str(error),
+        )
+    except Exception as error:  # noqa: BLE001 - email must not undo a booking
+        log_event(
+            logger,
+            'email.booking_created.failed',
+            recipient_user_id=recipient_user_id,
+            booking_id=kwargs.get('booking_id'),
+            failure_type='unexpected',
+            error_type=type(error).__name__,
+            error=str(error),
+        )
+    else:
+        log_event(
+            logger,
+            'email.booking_created.sent',
+            recipient_user_id=recipient_user_id,
+            booking_id=kwargs.get('booking_id'),
+        )
+
+
+def _calendar_email_skip_reason(user: User | None) -> str | None:
+    if user is None:
+        return 'user_not_found'
+    if not user.is_active:
+        return 'user_inactive'
+    if not user.is_verified:
+        return 'email_unverified'
+    if not user.email or not user.email.strip():
+        return 'email_missing'
+    return None
 
 
 def _zone():
@@ -257,6 +304,26 @@ def create_booking(
     action_url=f"/dashboard?view=calendar&booking_id={booking.id}",
     send_push=True,
 )
+    email_skip_reason = _calendar_email_skip_reason(recipient)
+    if email_skip_reason:
+        log_event(
+            logger,
+            'email.booking_created.skipped',
+            recipient_user_id=user_id,
+            booking_id=booking.id,
+            reason=email_skip_reason,
+        )
+    else:
+        _email_booking_created_safely(
+            recipient_user_id=recipient.id,
+            recipient_email=recipient.email,
+            attendee_name=name or phone,
+            meeting_title=booking.title,
+            starts_at=start_local.strftime('%b %d, %Y at %I:%M %p %Z'),
+            booking_id=booking.id,
+            location_address=booking.location_address,
+            location_url=(map_url(booking.location_address) if booking.location_address else None),
+        )
     broadcast_calendar_event_sync(
         user_id=user_id,
         event_type="booking_created",
@@ -336,9 +403,6 @@ def list_bookings(session, user_id: int) -> list:
 def booking_by_token(session, token: str) -> dict | None:
     booking = session.query(Booking).filter(Booking.join_token == token).first()
     return serialize(booking) if booking else None
-
-
-
 
 
 

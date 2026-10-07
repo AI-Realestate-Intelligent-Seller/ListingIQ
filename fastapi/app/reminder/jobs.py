@@ -1,18 +1,65 @@
 
 from datetime import datetime, timezone
+from urllib.parse import quote_plus
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import select
 
+from app.core.email import EmailDeliveryError, send_booking_reminder_email
 from app.db import SessionLocal
-from app.models import Booking
-from app.models import BookingReminder
-from app.models import Notification,User
-from .push import send_push_to_user
+from app.logger import get_logger, log_event
+from app.models import Booking, BookingReminder, Notification, User
+
 from .actions import action_for_notification, dashboard_url
 from .notification import broadcast_notification_event_sync
+from .push import send_push_to_user
 
 BATCH_SIZE = 500
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+logger = get_logger(__name__)
+
+
+def _email_booking_reminder_safely(*, recipient_user_id: int, **kwargs) -> None:
+    try:
+        send_booking_reminder_email(**kwargs)
+    except EmailDeliveryError as error:
+        log_event(
+            logger,
+            'email.booking_reminder.failed',
+            recipient_user_id=recipient_user_id,
+            booking_id=kwargs.get('booking_id'),
+            failure_type='delivery',
+            error=str(error),
+        )
+    except Exception as error:  # noqa: BLE001 - email must not stop reminder delivery
+        log_event(
+            logger,
+            'email.booking_reminder.failed',
+            recipient_user_id=recipient_user_id,
+            booking_id=kwargs.get('booking_id'),
+            failure_type='unexpected',
+            error_type=type(error).__name__,
+            error=str(error),
+        )
+    else:
+        log_event(
+            logger,
+            'email.booking_reminder.sent',
+            recipient_user_id=recipient_user_id,
+            booking_id=kwargs.get('booking_id'),
+        )
+
+
+def _calendar_email_skip_reason(user: User | None) -> str | None:
+    if user is None:
+        return 'user_not_found'
+    if not user.is_active:
+        return 'user_inactive'
+    if not user.is_verified:
+        return 'email_unverified'
+    if not user.email or not user.email.strip():
+        return 'email_missing'
+    return None
 
 
 def utc_to_user_timezone(
@@ -218,6 +265,38 @@ def process_single_reminder(
         except Exception as error:
             print(f"[REMINDER BROADCAST FAILED] id={reminder.id} | error={error}")
 
+        email_skip_reason = _calendar_email_skip_reason(user)
+        if email_skip_reason:
+            log_event(
+                logger,
+                'email.booking_reminder.skipped',
+                recipient_user_id=reminder.user_id,
+                booking_id=booking.id,
+                reminder_id=reminder.id,
+                reason=email_skip_reason,
+            )
+        else:
+            minutes_until_start = {
+                "30_minutes": 30,
+                "10_minutes": 10,
+            }.get(reminder.reminder_type)
+            _email_booking_reminder_safely(
+                recipient_user_id=user.id,
+                recipient_email=user.email,
+                attendee_name=booking.name or booking.phone,
+                meeting_title=booking.title or "Property consultation",
+                starts_at=local_start.strftime('%b %d, %Y at %I:%M %p %Z'),
+                booking_id=booking.id,
+                minutes_until_start=minutes_until_start,
+                location_address=booking.location_address,
+                location_url=(
+                    "https://www.google.com/maps/search/?api=1&query="
+                    f"{quote_plus(booking.location_address)}"
+                    if booking.location_address
+                    else None
+                ),
+            )
+
     try:
 
         sent_count = send_push_to_user(
@@ -260,4 +339,3 @@ def process_single_reminder(
         f"[REMINDER SENT] "
         f"id={reminder.id}"
     )
-

@@ -10,6 +10,8 @@ from fastapi import BackgroundTasks, Request
 from app import db
 from app.core.email import (
     EmailDeliveryError,
+    send_booking_created_email,
+    send_booking_reminder_email,
     send_lead_assigned_email,
     send_new_brokerage_leads_email,
     send_reply_notification_email,
@@ -585,6 +587,44 @@ def test_other_notification_subjects_include_the_action_and_context(monkeypatch)
     assert 'Alex Broker assigned Michele to you for 10 Main Street.' in sent[0]['text_body']
     assert sent[1]['subject'] == '3 new leads added to Northstar Realty'
     assert "3 new leads have been added to your brokerage's Lead Pool." in sent[1]['text_body']
+
+
+def test_calendar_email_subjects_include_timing_and_meeting_context(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        'app.core.email.send_email',
+        lambda recipient_email, subject, html_body, text_body: sent.append({
+            'subject': subject,
+            'html_body': html_body,
+            'text_body': text_body,
+        }),
+    )
+
+    send_booking_created_email(
+        recipient_email='broker@example.com',
+        attendee_name='Marcus Webb',
+        meeting_title='Property consultation',
+        starts_at='Oct 07, 2026 at 03:00 PM PKT',
+        booking_id=17,
+    )
+    send_booking_reminder_email(
+        recipient_email='broker@example.com',
+        attendee_name='Marcus Webb',
+        meeting_title='Property consultation',
+        starts_at='Oct 07, 2026 at 03:00 PM PKT',
+        booking_id=17,
+        minutes_until_start=10,
+        location_address='10 Main Street, Chicago, IL',
+        location_url='https://www.google.com/maps/search/?api=1&query=10+Main+Street%2C+Chicago%2C+IL',
+    )
+
+    assert sent[0]['subject'] == 'Meeting created: Property consultation'
+    assert 'Your meeting with Marcus Webb is scheduled for Oct 07, 2026' in sent[0]['text_body']
+    assert '/dashboard?view=calendar&booking_id=17' in sent[0]['text_body']
+    assert sent[1]['subject'] == 'Meeting in 10 minutes: Property consultation'
+    assert 'Get prepared—your meeting with Marcus Webb starts at Oct 07, 2026' in sent[1]['text_body']
+    assert 'https://www.google.com/maps/search/?api=1&query=10+Main+Street' in sent[1]['text_body']
+    assert 'Open map' in sent[1]['text_body']
 
 
 def test_inbound_from_an_unknown_number_is_ignored(client):
