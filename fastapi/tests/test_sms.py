@@ -1,10 +1,16 @@
 """Tests for the SMS workspace: ported Bobbie guards and the broker-scoped API."""
 
+import asyncio
+import json
+import logging
+
 import pytest
+from fastapi import BackgroundTasks, Request
 
 from app import db
-from app.models import Conversation, Lead, Message
+from app.models import Conversation, Lead, Message, User
 from app.routes.sms import _serialize
+from app.routes.webhooks import telnyx_webhook
 from app.sms import service
 from app.sms.bobbie import exact_offered_slot
 from app.sms.classifier import classify_lead_message, is_opt_out, merge_lead_status
@@ -43,6 +49,54 @@ def new_conversation_payload(**overrides):
         'ai_enabled': True,
         **overrides,
     }
+
+
+def store_outbound_message(session, *, telnyx_id='telnyx-outbound-1',
+                           to_number=CONTACT, status='queued'):
+    message = Message(
+        direction='outbound',
+        from_number=service.FIXED_FROM,
+        to_number=to_number,
+        text='Existing outbound message',
+        status=status,
+        event_type='message.sent',
+        telnyx_id=telnyx_id,
+    )
+    session.add(message)
+    session.commit()
+    session.rollback()
+    return telnyx_id
+
+
+def delivery_callback(event_type, provider_message_id, recipients):
+    return {'data': {
+        'event_type': event_type,
+        'payload': {
+            'id': provider_message_id,
+            'text': 'Existing outbound message',
+            'to': recipients,
+        },
+    }}
+
+
+def invoke_telnyx_webhook(session, payload):
+    body = json.dumps(payload).encode()
+    sent = False
+
+    async def receive():
+        nonlocal sent
+        if sent:
+            return {'type': 'http.disconnect'}
+        sent = True
+        return {'type': 'http.request', 'body': body, 'more_body': False}
+
+    request = Request({
+        'type': 'http',
+        'method': 'POST',
+        'path': '/api/v1/webhooks/telnyx',
+        'headers': [(b'content-type', b'application/json')],
+    }, receive)
+    return asyncio.run(telnyx_webhook(request, BackgroundTasks(), session))
 
 
 # --------------------------------------------------------------------------
@@ -327,6 +381,231 @@ def test_inbound_from_an_unknown_number_is_ignored(client):
     }})
     assert response.status_code == 404
     assert db.SessionLocal().query(Conversation).count() == 0
+
+
+def test_message_received_keeps_the_existing_inbound_storage_flow(session, monkeypatch):
+    monkeypatch.setattr('app.routes.webhooks.notify_conversation_reply', lambda **_: None)
+    user = User(
+        email=BROKER_EMAIL,
+        hashed_password='unused-in-this-test',
+        role='broker',
+        brokerage_id='brokerage-1',
+        is_active=True,
+    )
+    session.add(user)
+    session.commit()
+    conversation = Conversation(
+        contact=CONTACT,
+        user_id=user.id,
+        ai_enabled=False,
+        handled_by='broker',
+    )
+    session.add(conversation)
+    session.commit()
+
+    response = invoke_telnyx_webhook(session, {'data': {
+        'event_type': 'message.received',
+        'payload': {
+            'id': 'inbound-regression-1',
+            'from': {'phone_number': CONTACT},
+            'to': [{'phone_number': service.FIXED_FROM}],
+            'text': 'I might sell at the right price.',
+        },
+    }})
+
+    inbound = session.query(Message).one()
+    assert response['conversation_id'] == conversation.id
+    assert inbound.direction == 'inbound'
+    assert inbound.from_number == CONTACT
+    assert inbound.to_number == service.FIXED_FROM
+    assert inbound.text == 'I might sell at the right price.'
+    assert inbound.status == 'received'
+    assert inbound.event_type == 'message.received'
+    assert inbound.telnyx_id == 'inbound-regression-1'
+
+
+def test_message_sent_updates_the_matching_outbound_recipient(session):
+    telnyx_id = store_outbound_message(session)
+
+    response = invoke_telnyx_webhook(session, delivery_callback(
+        'message.sent', telnyx_id, [
+            {'phone_number': '+15550000000', 'status': 'delivery_failed'},
+            {'phone_number': CONTACT, 'status': 'sent'},
+        ],
+    ))
+
+    assert response == {'ok': True}
+    assert session.query(Message).one().status == 'sent'
+
+
+def test_message_delivered_updates_delivery_status(session):
+    telnyx_id = store_outbound_message(session, status='sent')
+
+    response = invoke_telnyx_webhook(session, delivery_callback(
+        'message.delivered', telnyx_id,
+        [{'phone_number': CONTACT, 'status': 'delivered'}],
+    ))
+
+    assert response == {'ok': True}
+    assert session.query(Message).one().status == 'delivered'
+
+
+def test_message_finalized_updates_final_delivery_status(session):
+    telnyx_id = store_outbound_message(session, status='sent')
+
+    response = invoke_telnyx_webhook(session, delivery_callback(
+        'message.finalized', telnyx_id,
+        [{'phone_number': CONTACT, 'status': 'delivered'}],
+    ))
+
+    assert response == {'ok': True}
+    assert session.query(Message).one().status == 'delivered'
+
+
+@pytest.mark.parametrize(
+    'final_status',
+    [
+        'failed',
+        'gw_timeout',
+        'dlr_timeout',
+        'delivery_failed',
+        'sending_failed',
+        'delivery_unconfirmed',
+    ],
+)
+def test_message_finalized_updates_documented_failure_status(session, final_status):
+    telnyx_id = store_outbound_message(session, status='sent')
+
+    response = invoke_telnyx_webhook(session, delivery_callback(
+        'message.finalized', telnyx_id,
+        [{'phone_number': CONTACT, 'status': final_status}],
+    ))
+
+    assert response == {'ok': True}
+    assert session.query(Message).one().status == final_status
+
+
+def test_outbound_callback_does_not_create_an_inbound_message(session):
+    telnyx_id = store_outbound_message(session)
+
+    response = invoke_telnyx_webhook(session, delivery_callback(
+        'message.finalized', telnyx_id,
+        [{'phone_number': CONTACT, 'status': 'delivered'}],
+    ))
+
+    assert response == {'ok': True}
+    assert session.query(Message).count() == 1
+    assert session.query(Message).one().direction == 'outbound'
+
+
+def test_unknown_delivery_message_id_is_acknowledged_and_warned(
+        session, caplog):
+    with caplog.at_level(logging.WARNING, logger='app.routes.webhooks'):
+        response = invoke_telnyx_webhook(session, delivery_callback(
+            'message.finalized', 'missing-provider-id',
+            [{'phone_number': CONTACT, 'status': 'delivered'}],
+        ))
+
+    assert response == {'ok': True}
+    assert session.query(Message).count() == 0
+    assert any(
+        'event=sms.delivery.message_not_found' in record.getMessage()
+        and 'provider_message_id="missing-provider-id"' in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_duplicate_delivery_callback_is_idempotent(session):
+    telnyx_id = store_outbound_message(session, status='sent')
+    callback = delivery_callback(
+        'message.finalized', telnyx_id,
+        [{'phone_number': CONTACT, 'status': 'delivered'}],
+    )
+
+    first = invoke_telnyx_webhook(session, callback)
+    second = invoke_telnyx_webhook(session, callback)
+
+    assert first == second == {'ok': True}
+    assert session.query(Message).one().status == 'delivered'
+    assert session.query(Message).count() == 1
+
+
+@pytest.mark.parametrize(
+    ('terminal_status', 'older_status'),
+    [
+        (terminal_status, older_status)
+        for terminal_status in (
+            'delivered',
+            'failed',
+            'gw_timeout',
+            'dlr_timeout',
+            'delivery_unconfirmed',
+        )
+        for older_status in ('sent', 'queued')
+    ],
+)
+def test_terminal_delivery_status_does_not_regress(
+        session, terminal_status, older_status):
+    telnyx_id = store_outbound_message(session, status=terminal_status)
+
+    response = invoke_telnyx_webhook(session, delivery_callback(
+        'message.sent', telnyx_id,
+        [{'phone_number': CONTACT, 'status': older_status}],
+    ))
+
+    assert response == {'ok': True}
+    assert session.query(Message).one().status == terminal_status
+
+
+def test_explicit_unrelated_event_with_text_never_enters_inbound_flow(session):
+    response = invoke_telnyx_webhook(session, {'data': {
+        'event_type': 'message.dlr.received',
+        'payload': {
+            'id': 'unrelated-1',
+            'from': {'phone_number': '+12245798015'},
+            'to': [{'phone_number': CONTACT}],
+            'text': 'Original outbound text',
+        },
+    }})
+
+    assert response == {'ok': True}
+    assert session.query(Message).count() == 0
+
+
+def test_legacy_inbound_payload_without_event_type_still_works(
+        session, monkeypatch):
+    monkeypatch.setattr('app.routes.webhooks.service.process_ai_reply', lambda *_: None)
+    monkeypatch.setattr('app.routes.webhooks.notify_conversation_reply', lambda **_: None)
+    user = User(
+        email=BROKER_EMAIL,
+        hashed_password='unused-in-this-test',
+        role='broker',
+        brokerage_id='brokerage-1',
+        is_active=True,
+    )
+    session.add(user)
+    session.commit()
+    conversation = Conversation(
+        contact=CONTACT,
+        user_id=user.id,
+        ai_enabled=False,
+        handled_by='broker',
+    )
+    session.add(conversation)
+    session.commit()
+    conversation_id = conversation.id
+
+    response = invoke_telnyx_webhook(session, {'data': {'payload': {
+        'id': 'legacy-inbound-1',
+        'from': {'phone_number': CONTACT},
+        'to': [{'phone_number': service.FIXED_FROM}],
+        'text': 'Legacy simulator reply',
+    }}})
+
+    assert response['conversation_id'] == conversation_id
+    inbound = session.query(Message).filter(Message.direction == 'inbound').one()
+    assert inbound.text == 'Legacy simulator reply'
+    assert inbound.telnyx_id == 'legacy-inbound-1'
 
 
 def test_opt_out_reply_stops_autopilot(client, make_user, auth_header, session, sent_sms):

@@ -20,11 +20,31 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 
+_DELIVERY_EVENTS = {'message.sent', 'message.delivered', 'message.finalized'}
+_DELIVERY_STATUS_ORDER = {
+    'queued': 0,
+    'sending': 1,
+    'sent': 2,
+}
+_FINAL_DELIVERY_STATUSES = {
+    'delivered',
+    'failed',
+    'gw_timeout',
+    'dlr_timeout',
+    # Retained for payloads supported by the existing application UI.
+    'delivery_failed',
+    'sending_failed',
+    'delivery_unconfirmed',
+}
+
+
 def _extract_inbound(payload: dict) -> dict | None:
     data = payload.get('data') or {}
     event_type = data.get('event_type') or data.get('type')
     payload_data = data.get('payload') or data
-    if event_type != 'message.received' and not payload_data.get('text'):
+    # Missing event_type is retained for legacy/simulator payloads. Any explicit
+    # Telnyx event other than message.received must never enter the inbound flow.
+    if event_type and event_type != 'message.received':
         return None
 
     sender = payload_data.get('from')
@@ -45,6 +65,88 @@ def _extract_inbound(payload: dict) -> dict | None:
         'text': payload_data.get('text'),
         'telnyx_id': payload_data.get('id'),
     }
+
+
+def _recipient_delivery_status(payload_data: dict, message: Message) -> str | None:
+    recipients = payload_data.get('to') or []
+    if not isinstance(recipients, list):
+        return None
+
+    if message.to_number:
+        for recipient in recipients:
+            if (
+                isinstance(recipient, dict)
+                and recipient.get('phone_number') == message.to_number
+            ):
+                return recipient.get('status')
+        return None
+
+    if recipients and isinstance(recipients[0], dict):
+        return recipients[0].get('status')
+    return None
+
+
+def _should_update_delivery_status(current: str | None, incoming: str) -> bool:
+    if current == incoming or current in _FINAL_DELIVERY_STATUSES:
+        return False
+    if incoming in _FINAL_DELIVERY_STATUSES:
+        return True
+
+    current_order = _DELIVERY_STATUS_ORDER.get(current or '', -1)
+    incoming_order = _DELIVERY_STATUS_ORDER.get(incoming)
+    return incoming_order is not None and incoming_order > current_order
+
+
+def _handle_delivery_callback(db: Session, event_type: str, payload_data: dict) -> dict:
+    provider_message_id = payload_data.get('id')
+    message = None
+    if provider_message_id:
+        message = db.query(Message).filter(
+            Message.telnyx_id == provider_message_id,
+            Message.direction == 'outbound',
+        ).first()
+
+    if not message:
+        log_event(
+            logger,
+            'sms.delivery.message_not_found',
+            level=logging.WARNING,
+            event_type=event_type,
+            provider_message_id=provider_message_id,
+        )
+        return {'ok': True}
+
+    status = _recipient_delivery_status(payload_data, message)
+    if not status:
+        log_event(
+            logger,
+            'sms.delivery.status_missing',
+            level=logging.WARNING,
+            event_type=event_type,
+            message_id=message.id,
+            provider_message_id=provider_message_id,
+        )
+        return {'ok': True}
+
+    previous_status = message.status
+    updated = _should_update_delivery_status(previous_status, status)
+    if updated:
+        message.status = status
+        db.add(message)
+        db.commit()
+
+    log_event(
+        logger,
+        'sms.delivery.updated',
+        event_type=event_type,
+        message_id=message.id,
+        provider_message_id=provider_message_id,
+        previous_status=previous_status,
+        status=message.status,
+        callback_status=status,
+        updated=updated,
+    )
+    return {'ok': True}
 
 
 # Roles that can open an unassigned conversation in Follow-ups. An agent only
@@ -170,6 +272,12 @@ async def telnyx_webhook(
             status_code=400,
             detail='Malformed webhook payload',
         )
+
+    data = payload.get('data') or {}
+    event_type = data.get('event_type') or data.get('type')
+    payload_data = data.get('payload') or data
+    if event_type in _DELIVERY_EVENTS:
+        return _handle_delivery_callback(db, event_type, payload_data)
 
     inbound = _extract_inbound(payload)
 
