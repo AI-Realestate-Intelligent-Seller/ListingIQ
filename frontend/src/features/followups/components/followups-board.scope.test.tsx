@@ -78,4 +78,44 @@ describe("FollowUpsBoard scope filter", () => {
     render(<FollowUpsBoard />);
     expect(screen.queryByRole("button", { name: /new conversation/i })).toBeNull();
   });
+
+  it("shows the carrier reason instead of waiting for a reply when delivery failed", async () => {
+    request.mockResolvedValueOnce([{
+      id: 41,
+      lead_id: null,
+      campaign_id: null,
+      campaign_name: null,
+      contact: "+15551234567",
+      name: "Test Owner",
+      property_address: "1 Main St",
+      area: null,
+      properties: [],
+      has_multiple_properties: false,
+      ai_enabled: true,
+      handled_by: "bobbie",
+      awaiting_broker_reply: false,
+      lead_status: "processing",
+      queue_status: "completed",
+      dnc_alert: false,
+      meeting_booked: false,
+      followup_state: "pending",
+      reason: "in_conversation",
+      reason_label: "Conversation in progress",
+      latest_outbound_status: "delivery_failed",
+      latest_outbound_failure_reason: "The destination is a landline.",
+      waiting_days: 0,
+      reply_count: 0,
+      message_count: 1,
+      first_reply_at: null,
+      last_reply_at: null,
+      latest_message: "Hello",
+      latest_message_at: "2026-10-08T14:30:00Z",
+      created_at: "2026-10-08T14:30:00Z",
+    }]);
+
+    render(<FollowUpsBoard />);
+
+    expect(await screen.findByText("Not delivered — The destination is a landline.")).toBeTruthy();
+    expect(screen.queryByText("Waiting for first reply")).toBeNull();
+  });
 });

@@ -135,6 +135,21 @@ def _recipient_delivery_status(payload_data: dict, message: Message) -> str | No
     return None
 
 
+def _delivery_failure(payload_data: dict) -> tuple[str | None, str | None]:
+    """Return the first provider error in a safe, displayable form."""
+    errors = payload_data.get('errors') or []
+    if not isinstance(errors, list):
+        return None, None
+    for error in errors:
+        if not isinstance(error, dict):
+            continue
+        code = str(error.get('code') or '').strip() or None
+        detail = str(error.get('detail') or error.get('title') or '').strip() or None
+        if code or detail:
+            return code, detail
+    return None, None
+
+
 def _should_update_delivery_status(current: str | None, incoming: str) -> bool:
     if current == incoming or current in _FINAL_DELIVERY_STATUSES:
         return False
@@ -181,6 +196,21 @@ def _handle_delivery_callback(db: Session, event_type: str, payload_data: dict) 
     updated = _should_update_delivery_status(previous_status, status)
     if updated:
         message.status = status
+        if status == 'delivered':
+            message.failure_code = None
+            message.failure_reason = None
+
+    failure_details_updated = False
+    if status in _FINAL_DELIVERY_STATUSES and status != 'delivered':
+        failure_code, failure_reason = _delivery_failure(payload_data)
+        if ((failure_code or failure_reason)
+                and (message.failure_code, message.failure_reason)
+                != (failure_code, failure_reason)):
+            message.failure_code = failure_code
+            message.failure_reason = failure_reason
+            failure_details_updated = True
+
+    if updated or failure_details_updated:
         db.add(message)
         db.commit()
 
@@ -194,6 +224,7 @@ def _handle_delivery_callback(db: Session, event_type: str, payload_data: dict) 
         status=message.status,
         callback_status=status,
         updated=updated,
+        failure_details_updated=failure_details_updated,
     )
     return {'ok': True}
 

@@ -130,6 +130,7 @@ async def preview_import(
     file: Optional[UploadFile] = File(None),
     token: str = Form(''),
     mapping: str = Form(''),
+    sheet: str = Form(''),
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
 ):
@@ -140,6 +141,7 @@ async def preview_import(
     """
     _require_access(current_user)
     overrides = _parse_mapping(mapping)
+    reused_token = bool(token)
 
     if token:
         # Re-previewing the staged file with a different column mapping.
@@ -155,7 +157,8 @@ async def preview_import(
     try:
         report = leads_service.analyze_upload(
             session, current_user, path.read_bytes(), name, overrides,
-            mapping_confirmed='property_address' in overrides)
+            mapping_confirmed='property_address' in overrides,
+            sheet_name=sheet)
     except Exception as error:  # noqa: BLE001 - the parser must never leak a traceback
         logger.exception('Lead preview failed for user %s', current_user.id)
         raise HTTPException(status_code=400, detail=f'The file could not be read: {error}')
@@ -163,7 +166,8 @@ async def preview_import(
     if not report['importable']:
         # A failed mapping ends this preview. The next attempt must upload the
         # source again instead of reusing potentially incorrect staged input.
-        uploads.discard(path)
+        if not reused_token:
+            uploads.discard(path)
         report.pop('rows', None)
         raise HTTPException(
             status_code=400,
@@ -181,6 +185,7 @@ async def import_leads(
     file: Optional[UploadFile] = File(None),
     token: str = Form(''),
     mapping: str = Form(''),
+    sheet: str = Form(''),
     limit: int = Form(0),
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
@@ -215,7 +220,7 @@ async def import_leads(
 
     try:
         result = leads_service.import_file(
-            session, current_user, path.read_bytes(), name, limit, overrides)
+            session, current_user, path.read_bytes(), name, limit, overrides, sheet)
     except Exception as error:  # noqa: BLE001 - the parser must never leak a traceback
         session.rollback()
         logger.exception('Lead import failed for user %s', current_user.id)

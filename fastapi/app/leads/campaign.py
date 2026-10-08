@@ -32,7 +32,6 @@ from .importer import normalize_phone
 from .service import (conversation_property_details, derive_stage, outreach_reason,
                       serialize, split_signals)
 
-MAX_CAMPAIGN_SIZE = 200
 PROVIDER_LEAD_SOURCE = 'provider_distribution'
 PROVIDER_CONTACT_SOURCE = 'provider_distribution_contact'
 
@@ -170,8 +169,6 @@ def create_draft(session: Session, user: User, lead_ids: list[int],
     """
     if not lead_ids:
         raise ValueError('Select at least one lead to build a campaign.')
-    if len(lead_ids) > MAX_CAMPAIGN_SIZE:
-        raise ValueError(f'A campaign can hold at most {MAX_CAMPAIGN_SIZE} leads.')
 
     campaign = Campaign(
         user_id=user.id,
@@ -338,7 +335,6 @@ def attach(session: Session, user: User, campaign: Campaign, lead_ids: list[int]
 
     left_behind: list[dict] = []
     eligible: list[int] = []
-    projected_recipients = len(members(session, user, campaign))
     for lead_id in lead_ids:
         lead = found.get(lead_id)
         if lead is None:
@@ -358,19 +354,7 @@ def attach(session: Session, user: User, campaign: Campaign, lead_ids: list[int]
             left_behind.append({'lead_id': lead.id, 'owner_name': lead.owner_name,
                                 'reason': f'Already in the draft “{name}”.'})
         else:
-            added_recipients = (
-                len(_provider_contacts(lead))
-                if lead.source == PROVIDER_LEAD_SOURCE else 1
-            )
-            if projected_recipients + added_recipients > MAX_CAMPAIGN_SIZE:
-                left_behind.append({
-                    'lead_id': lead.id,
-                    'owner_name': lead.owner_name,
-                    'reason': f'A campaign can hold at most {MAX_CAMPAIGN_SIZE} recipients.',
-                })
-                continue
             eligible.append(lead.id)
-            projected_recipients += added_recipients
 
     if eligible:
         # One guarded statement rather than a field assignment per lead: the
@@ -505,6 +489,8 @@ def _sent_view(session: Session, user: User, campaign: Campaign) -> tuple[list[d
             lead, message.text or '',
             conversation_id=lead.conversation_id,
             replied=bool(answered and answered >= message.created_at),
+            delivery_status=message.status,
+            delivery_failure_reason=message.failure_reason,
         ))
     return sent_rows, missed_rows
 
@@ -789,12 +775,17 @@ def _counts_by_campaign(session: Session, user: User) -> tuple[dict, dict, dict]
                          .group_by(Lead.campaign_id)
                          .all())
 
-    # "Delivered" is every opening message the campaign got out without an
-    # error. Carrier delivery receipts are not counted here.
+    # Pending/sent messages count as reached until a final failure arrives.
+    # A carrier-rejected message must not remain in "delivered" or "no reply".
+    failure_statuses = (
+        'failed', 'gw_timeout', 'dlr_timeout', 'delivery_failed',
+        'sending_failed', 'delivery_unconfirmed', 'rejected', 'undelivered',
+    )
     delivered = dict(session.query(Message.campaign_id, func.count(Message.id))
                      .join(Conversation, Conversation.id == Message.conversation_id)
                      .filter(Message.campaign_id.isnot(None),
                              Message.event_type == 'outreach.initial',
+                             ~Message.status.in_(failure_statuses),
                              Conversation.user_id.in_(scope))
                      .group_by(Message.campaign_id)
                      .all())

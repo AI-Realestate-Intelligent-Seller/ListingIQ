@@ -68,11 +68,12 @@ export function previewImport(file: File, accessToken: string): Promise<ImportPr
 export function repreviewImport(
   token: string,
   mapping: Record<string, string>,
+  sheet: string,
   accessToken: string,
 ): Promise<ImportPreview> {
   return postForm<ImportPreview>(
     `${LEADS}/preview`,
-    { token, mapping: JSON.stringify(mapping) },
+    { token, mapping: JSON.stringify(mapping), sheet },
     accessToken,
   );
 }
@@ -83,12 +84,17 @@ export function repreviewImport(
  */
 export function importLeads(
   token: string,
-  options: { limit: number; mapping: Record<string, string> },
+  options: { limit: number; mapping: Record<string, string>; sheet: string },
   accessToken: string,
 ): Promise<LeadImportResult> {
   return postForm<LeadImportResult>(
     `${LEADS}/import`,
-    { token, limit: String(options.limit), mapping: JSON.stringify(options.mapping) },
+    {
+      token,
+      limit: String(options.limit),
+      mapping: JSON.stringify(options.mapping),
+      sheet: options.sheet,
+    },
     accessToken,
   );
 }

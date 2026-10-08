@@ -164,7 +164,9 @@ def _serialize(conversation: Conversation, messages: list[Message], leads: list[
     lead = next((row for row in leads if row.property_address == conversation.property_address),
                 leads[-1] if leads else None)
     inbound = [message for message in messages if message.direction == 'inbound']
+    outbound = [message for message in messages if message.direction == 'outbound']
     latest = messages[-1] if messages else None
+    latest_outbound = outbound[-1] if outbound else None
     last_reply = inbound[-1] if inbound else None
     # The assignee owes a reply when Bobbie has stepped back and the owner spoke last.
     awaiting = bool(conversation.handled_by == 'broker' and latest is not None
@@ -204,6 +206,10 @@ def _serialize(conversation: Conversation, messages: list[Message], leads: list[
         'followup_state': conversation.followup_state or 'pending',
         'reason': reason,
         'reason_label': reason_label,
+        'latest_outbound_status': latest_outbound.status if latest_outbound else None,
+        'latest_outbound_failure_reason': (
+            latest_outbound.failure_reason if latest_outbound else None
+        ),
         'waiting_days': waiting_days,
         'reply_count': len(inbound),
         'message_count': len(messages),

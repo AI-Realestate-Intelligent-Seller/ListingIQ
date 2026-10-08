@@ -45,6 +45,8 @@ export type FollowUp = {
   followup_state: FollowUpState;
   reason: FollowUpReason;
   reason_label: string;
+  latest_outbound_status: string | null;
+  latest_outbound_failure_reason: string | null;
   waiting_days: number | null;
   reply_count: number;
   message_count: number;

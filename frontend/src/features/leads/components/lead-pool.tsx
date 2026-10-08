@@ -77,9 +77,6 @@ const STAGE_CLASS: Record<LeadStage, string> = {
   dnc: "dnc",
 };
 
-/** Mirrors MAX_CAMPAIGN_SIZE on the server, so the limit is visible before you click. */
-const MAX_CAMPAIGN_SIZE = 200;
-
 /** Score bands match the review queue: strong, worth a look, everything else. */
 function scoreClass(score: number): string {
   if (score >= 80) return "strong";
@@ -461,12 +458,12 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
   }
 
   /** Re-runs the dry run when the broker corrects a column. */
-  async function handleRemap(mapping: Record<string, string>): Promise<void> {
+  async function handleRemap(mapping: Record<string, string>, sheet: string): Promise<void> {
     if (!preview) return;
     setIsRemapping(true);
     setMappingError("");
     try {
-      setPreview(await repreviewImport(preview.token, mapping, token));
+      setPreview(await repreviewImport(preview.token, mapping, sheet, token));
     } catch (error) {
       // The file is still staged, so this is recoverable — keep the dialog open.
       setMappingError(error instanceof Error ? error.message : "That mapping cannot be used.");
@@ -478,6 +475,7 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
   async function handleImport(options: {
     limit: number;
     mapping: Record<string, string>;
+    sheet: string;
   }): Promise<void> {
     if (!pendingFile || !preview) return;
     setIsImporting(true);
@@ -1195,11 +1193,6 @@ useEffect(() => {
           <strong>
             {selectedVisible.length} {selectedVisible.length === 1 ? "lead" : "leads"} selected
           </strong>
-          {selectedVisible.length > MAX_CAMPAIGN_SIZE ? (
-            <span className="leads-selection-warning">
-              A campaign can hold at most {MAX_CAMPAIGN_SIZE} — narrow the selection to text these.
-            </span>
-          ) : null}
           <button type="button" className="leads-clear" onClick={() => setSelected([])}>
             Clear selection
           </button>
@@ -1211,12 +1204,7 @@ useEffect(() => {
               className="button"
               type="button"
               onClick={() => void handleDraftCampaign(selectedVisible)}
-              disabled={isDrafting || selectedVisible.length > MAX_CAMPAIGN_SIZE}
-              title={
-                selectedVisible.length > MAX_CAMPAIGN_SIZE
-                  ? `A campaign can hold at most ${MAX_CAMPAIGN_SIZE} leads.`
-                  : undefined
-              }
+              disabled={isDrafting}
             >
               {isDrafting ? "Opening…" : "✦ Create campaign"}
             </button>
@@ -1356,7 +1344,12 @@ useEffect(() => {
         ) : null}
       </div>
 
-      {errorMessage ? <p className="sms-toast error" role="alert">{errorMessage}</p> : null}
+      {errorMessage ? (
+        <div className="sms-toast error leads-error-toast" role="alert">
+          <span>{errorMessage}</span>
+          <button type="button" onClick={() => setErrorMessage("")} aria-label="Dismiss error">×</button>
+        </div>
+      ) : null}
       {notice ? (
         <p className="sms-toast" role="status" onAnimationEnd={() => setNotice("")}>
           {notice}
@@ -1380,7 +1373,7 @@ useEffect(() => {
         isImporting={isImporting}
         isRemapping={isRemapping}
         mappingError={mappingError}
-        onRemap={(mapping) => void handleRemap(mapping)}
+        onRemap={(mapping, sheet) => void handleRemap(mapping, sheet)}
         onClose={() => {
           setPendingFile(null);
           setPreview(null);

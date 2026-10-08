@@ -584,7 +584,8 @@ def facets(session: Session, user: User) -> dict:
 
 def analyze_upload(session: Session, user: User, content: bytes, filename: str,
                    overrides: dict[str, str] | None = None,
-                   mapping_confirmed: bool = True) -> dict:
+                   mapping_confirmed: bool = True,
+                   sheet_name: str = '') -> dict:
     """What this file would do, without writing anything.
 
     A property is one lead even when its address formatting changes. The same
@@ -598,7 +599,7 @@ def analyze_upload(session: Session, user: User, content: bytes, filename: str,
     parse_overrides = overrides
     if not mapping_confirmed:
         parse_overrides = {**(overrides or {}), 'property_address': ''}
-    rows, warnings, meta = parse_upload(content, filename, parse_overrides)
+    rows, warnings, meta = parse_upload(content, filename, parse_overrides, sheet_name)
     readable_count = len(rows)
     def identity(phone: str | None, address: str | None) -> tuple[str, str] | None:
         property_key = address_key.canonical(address)
@@ -622,6 +623,8 @@ def analyze_upload(session: Session, user: User, content: bytes, filename: str,
             'columns': meta['columns'],
             'mapping': meta['mapping'],
             'signal_columns': meta['signal_columns'],
+            'worksheets': meta.get('worksheets', []),
+            'selected_sheet': meta.get('selected_sheet'),
             'total_rows': readable_count,
             'importable': len(rows),
             'duplicate_count': 0,
@@ -664,6 +667,8 @@ def analyze_upload(session: Session, user: User, content: bytes, filename: str,
         'columns': meta['columns'],
         'mapping': meta['mapping'],
         'signal_columns': meta['signal_columns'],
+        'worksheets': meta.get('worksheets', []),
+        'selected_sheet': meta.get('selected_sheet'),
         'total_rows': readable_count,
         'importable': len(rows),
         'duplicate_count': duplicate_count,
@@ -689,7 +694,8 @@ IMPORT_CHUNK = 1000
 
 
 def import_file(session: Session, user: User, content: bytes, filename: str,
-                limit: int = 0, overrides: dict[str, str] | None = None) -> dict:
+                limit: int = 0, overrides: dict[str, str] | None = None,
+                sheet_name: str = '') -> dict:
     """Add a CSV or XLSX to the broker's pool, one lead per readable row.
 
     `limit` caps how many new, non-duplicate rows are taken (0 means all).
@@ -697,7 +703,8 @@ def import_file(session: Session, user: User, content: bytes, filename: str,
     the same property twice. A shared phone may still create separate leads for
     separate properties.
     """
-    report = analyze_upload(session, user, content, filename, overrides)
+    report = analyze_upload(
+        session, user, content, filename, overrides, sheet_name=sheet_name)
     rows = report['rows']
     if not rows:
         return {'created': 0, 'total_rows': report['total_rows'], 'warnings': report['warnings']}
@@ -719,7 +726,7 @@ def import_file(session: Session, user: User, content: bytes, filename: str,
                 details=json.dumps(row['details']) if row.get('details') else None,
                 score=row['score'],
                 source='csv_import',
-                dnc=False,
+                dnc=bool(row.get('dnc')),
                 created_at=now,
                 refreshed_at=now,
             )

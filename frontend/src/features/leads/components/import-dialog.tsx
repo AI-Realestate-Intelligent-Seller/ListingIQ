@@ -19,9 +19,13 @@ type ImportDialogProps = {
   isImporting: boolean;
   isRemapping: boolean;
   mappingError: string;
-  onRemap: (mapping: Record<string, string>) => void;
+  onRemap: (mapping: Record<string, string>, sheet: string) => void;
   onClose: () => void;
-  onConfirm: (options: { limit: number; mapping: Record<string, string> }) => Promise<void>;
+  onConfirm: (options: {
+    limit: number;
+    mapping: Record<string, string>;
+    sheet: string;
+  }) => Promise<void>;
 };
 
 /**
@@ -43,6 +47,7 @@ export function ImportDialog({
   // 0 means "no cap", matching the API, so the default agrees with "All leads".
   const [limit, setLimit] = useState("0");
   const [mapping, setMapping] = useState<Record<string, string> | null>(null);
+  const [sheet, setSheet] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
 
   if (!file) return null;
@@ -51,13 +56,19 @@ export function ImportDialog({
   const current: Record<string, string> =
     mapping ??
     Object.fromEntries(MAPPABLE.map(({ field }) => [field, preview?.mapping?.[field] ?? ""]));
+  const currentSheet = sheet || preview?.selected_sheet || "";
 
   function chooseColumn(field: string, column: string): void {
     const next = { ...current, [field]: column };
     setMapping(next);
-    onRemap(next);
+    onRemap(next, currentSheet);
   }
 
+  function chooseSheet(nextSheet: string): void {
+    setSheet(nextSheet);
+    setMapping(null);
+    onRemap({}, nextSheet);
+  }
 
   const available = preview?.importable ?? 0;
   const requested = Math.max(0, Math.min(Number(limit) || 0, available));
@@ -70,7 +81,7 @@ export function ImportDialog({
     if (isImporting) return;
     setErrorMessage("");
     try {
-      await onConfirm({ limit: capped ? requested : 0, mapping: current });
+      await onConfirm({ limit: capped ? requested : 0, mapping: current, sheet: currentSheet });
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "The file could not be imported.");
     }
@@ -99,6 +110,23 @@ export function ImportDialog({
           <p className="sms-muted">Reading the file…</p>
         ) : (
           <form onSubmit={handleSubmit}>
+            {preview.worksheets.length > 1 ? (
+              <fieldset className="import-fieldset import-sheet-fieldset">
+                <legend>Worksheet</legend>
+                <label>
+                  <span>Choose the sheet containing the leads</span>
+                  <select
+                    value={currentSheet}
+                    onChange={(event) => chooseSheet(event.target.value)}
+                    disabled={isImporting || isRemapping}
+                  >
+                    {preview.worksheets.map((worksheet) => (
+                      <option key={worksheet} value={worksheet}>{worksheet}</option>
+                    ))}
+                  </select>
+                </label>
+              </fieldset>
+            ) : null}
             <ul className="import-summary two">
               <li>
                 <strong>{preview.total_rows}</strong>

@@ -92,6 +92,7 @@
 .followup-reason.reason-appointment_pending { color: #8a5a00; }
 .followup-reason.reason-appointment_booked { color: #0f5548; }
 .followup-reason.reason-no_response { color: #b42318; }
+.followup-reason.reason-delivery_failed { color: #b42318; }
 .followup-reason.reason-opted_out { color: #b42318; }
 .followup-reason.reason-not_interested { color: #6b7280; }
 .followup-reason.reason-in_conversation { color: var(--accent); }

@@ -65,7 +65,23 @@ function deliveryLabel(status: string): string {
 }
 
 function isDeliveryFailure(status: string | null): boolean {
-  return /fail|reject|undeliver/i.test(status ?? "");
+  return /fail|reject|undeliver|timeout|unconfirmed/i.test(status ?? "");
+}
+
+function deliveryFailureReason(status: string | null, providerReason: string | null): string {
+  if (providerReason) return providerReason;
+  if (/timeout/i.test(status ?? "")) return "Carrier delivery confirmation timed out.";
+  if (/unconfirmed/i.test(status ?? "")) return "The carrier could not confirm delivery.";
+  if (/sending_failed/i.test(status ?? "")) return "The provider could not send the message.";
+  return "The carrier rejected the destination.";
+}
+
+function noReplyLabel(item: FollowUp): string {
+  if (!isDeliveryFailure(item.latest_outbound_status)) return "Waiting for first reply";
+  return `Not delivered — ${deliveryFailureReason(
+    item.latest_outbound_status,
+    item.latest_outbound_failure_reason,
+  )}`;
 }
 
 /** The channel line above a bubble, as on the prototype: who wrote it, and how. */
@@ -604,8 +620,12 @@ useEffect(() => {
                 <span className="followup-card-meta">
                   {[item.property_address, item.area].filter(Boolean).join(" · ") || item.contact}
                 </span>
-                <span className={`followup-reason reason-${item.reason}`}>
-                  {item.reply_count > 0 ? item.reason_label : "Waiting for first reply"}
+                <span className={`followup-reason reason-${
+                  item.reply_count === 0 && isDeliveryFailure(item.latest_outbound_status)
+                    ? "delivery_failed"
+                    : item.reason
+                }`}>
+                  {item.reply_count > 0 ? item.reason_label : noReplyLabel(item)}
                 </span>
                 {item.has_multiple_properties ? <span className="followup-multiple-signal">Multiple properties</span> : null}
                 {item.followup_state === "pending" ? null : (
@@ -726,7 +746,12 @@ useEffect(() => {
                               {message.direction === "inbound" ? active.name || "Owner" : "Outbound"}
                             </span>
                             {message.direction === "outbound" && message.status ? (
-                              <span>{deliveryLabel(message.status)} · </span>
+                              <span title={message.failure_reason ?? undefined}>
+                                {deliveryLabel(message.status)}
+                                {failed
+                                  ? ` — ${deliveryFailureReason(message.status, message.failure_reason)}`
+                                  : ""} ·{" "}
+                              </span>
                             ) : null}
                             <time dateTime={message.created_at ?? undefined}>
                               {formatClock(message.created_at)}

@@ -40,6 +40,8 @@ export type SmsMessage = {
   to_number: string | null;
   text: string | null;
   status: string | null;
+  failure_code: string | null;
+  failure_reason: string | null;
   event_type: string | null;
   created_at: string | null;
 };

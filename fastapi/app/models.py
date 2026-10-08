@@ -168,6 +168,12 @@ class Message(Base):
         index=True,
     )
 
+    # Telnyx includes carrier error details on finalized delivery callbacks.
+    # Keep them with the message so the UI can explain a failure instead of
+    # incorrectly presenting the conversation as merely awaiting a reply.
+    failure_code = Column(String(50), nullable=True)
+    failure_reason = Column(Text, nullable=True)
+
     created_at = Column(
         DateTime,
         default=datetime.utcnow,

@@ -449,6 +449,33 @@ def test_the_overview_counts_delivered_replied_and_silent(
     assert overview[0]['not_sent'] == 0
 
 
+def test_failed_delivery_is_not_counted_as_waiting_for_a_reply(
+        client, make_user, auth_header, sent_sms, session):
+    make_user(BROKER_EMAIL, role='broker')
+    headers = auth_header(BROKER_EMAIL)
+    upload(client, headers)
+    campaign_id = draft(client, headers, lead_ids(client, headers))['campaign']['id']
+    client.post(f'{CAMPAIGNS_URL}/{campaign_id}/send', headers=headers)
+
+    failed = (session.query(Message)
+              .filter(Message.campaign_id == campaign_id,
+                      Message.event_type == 'outreach.initial')
+              .first())
+    failed.status = 'delivery_failed'
+    failed.failure_code = '40001'
+    failed.failure_reason = 'The destination is a landline.'
+    session.commit()
+
+    campaign = client.get(f'{CAMPAIGNS_URL}/{campaign_id}', headers=headers).json()
+    recipient = next(row for row in campaign['preview']['recipients']
+                     if row['conversation_id'] == failed.conversation_id)
+    assert recipient['delivery_status'] == 'delivery_failed'
+    assert recipient['delivery_failure_reason'] == 'The destination is a landline.'
+    assert campaign['delivered'] == 2
+    assert campaign['no_reply'] == 2
+    assert campaign['not_sent'] == 1
+
+
 def test_follow_ups_can_be_filtered_to_one_campaign(
         client, make_user, auth_header, sent_sms, session):
     make_user(BROKER_EMAIL, role='broker')

@@ -45,6 +45,8 @@ export type CampaignRecipient = {
   /** Set once sent: these leads are no longer in the pool, so open them here. */
   conversation_id: number | null;
   replied: boolean;
+  delivery_status: string | null;
+  delivery_failure_reason: string | null;
 };
 
 export type CampaignSkip = {

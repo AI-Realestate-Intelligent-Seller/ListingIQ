@@ -36,6 +36,14 @@ function senderLabel(message: SmsMessage, conversation: SmsConversation): string
   return "Bobbie";
 }
 
+function deliveryFailureReason(status: string | null, providerReason: string | null): string {
+  if (providerReason) return providerReason;
+  if (/timeout/i.test(status ?? "")) return "Carrier delivery confirmation timed out.";
+  if (/unconfirmed/i.test(status ?? "")) return "The carrier could not confirm delivery.";
+  if (/sending_failed/i.test(status ?? "")) return "The provider could not send the message.";
+  return "The carrier rejected the destination.";
+}
+
 type SmsWorkspaceProps = {
   /** A thread to open on arrival, e.g. from the Lead Pool details panel. */
   focusConversationId?: number | null;
@@ -390,6 +398,7 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
                 messages.map((message, index) => {
                   const day = dateLabel(message.created_at);
                   const showDay = day !== "" && day !== dateLabel(messages[index - 1]?.created_at ?? null);
+                  const failed = /fail|reject|undeliver|timeout|unconfirmed/i.test(message.status ?? "");
                   return (
                     <Fragment key={message.id}>
                       {showDay ? <div className="sms-day-divider">{day}</div> : null}
@@ -399,14 +408,19 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
                         <div className="sms-bubble">{message.text}</div>
                         {/* A plain div, not <footer>: the global marketing stylesheet paints
                             every bare <footer> with a dark background. */}
-                        <div className="sms-meta">
+                        <div className={`sms-meta${failed ? " failed" : ""}`}>
                           {/* Sight users read the sender from the bubble's side and colour. */}
                           <span className="sr-only">{senderLabel(message, active)}</span>
                           <time dateTime={message.created_at ?? undefined}>
                             {formatTime(message.created_at)}
                           </time>
                           {message.direction === "outbound" && message.status ? (
-                            <span>· {message.status}</span>
+                            <span title={message.failure_reason ?? undefined}>
+                              · {failed ? "Not delivered" : message.status.replaceAll("_", " ")}
+                              {failed
+                                ? ` — ${deliveryFailureReason(message.status, message.failure_reason)}`
+                                : ""}
+                            </span>
                           ) : null}
                         </div>
                       </article>

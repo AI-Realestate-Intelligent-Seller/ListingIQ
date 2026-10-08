@@ -21,9 +21,19 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     'owner_name': ('owner', 'ownername', 'name', 'fullname', 'ownerfullname', 'contactname', 'seller'),
     'first_name': ('firstname', 'ownerfirstname', 'first'),
     'last_name': ('lastname', 'ownerlastname', 'last', 'surname'),
-    'phone': ('phone', 'phonenumber', 'mobile', 'cell', 'cellphone', 'contact', 'contactnumber', 'telephone'),
+    'phone': ('phone', 'phonenumber', 'phone1', 'primaryphone', 'primaryphonenumber',
+              'mobile', 'cell', 'cellphone', 'contact', 'contactnumber', 'telephone'),
+    # Numbered contact fields are common in CRM exports. The first usable
+    # number remains the lead's primary phone; the others travel in details.
+    'phone_2': ('phone2', 'secondaryphone', 'secondaryphonenumber'),
+    'phone_3': ('phone3', 'tertiaryphone', 'tertiaryphonenumber'),
     'property_address': ('propertyaddress', 'address', 'property', 'street', 'streetaddress', 'siteaddress'),
     'area': ('area', 'city', 'neighborhood', 'neighbourhood', 'market', 'town', 'submarket'),
+    'state': ('state', 'property_state', 'propertystate'),
+    'postal_code': ('zip', 'zipcode', 'postalcode', 'propertyzip', 'propertyzipcode'),
+    'email_1': ('email1', 'primaryemail'),
+    'email_2': ('email2', 'secondaryemail'),
+    'ok_to_text': ('oktotext', 'permissiontotext', 'smspermission', 'smsconsent', 'textconsent'),
     'signals': ('signals', 'signal', 'tags', 'tag', 'leadtype', 'lead_type', 'category',
                 'motivation', 'leadsource', 'source', 'listingstatus', 'status'),
     # Why this owner is being contacted, in the vendor's own words.
@@ -42,6 +52,40 @@ _DETAIL_SIGNALS: tuple[tuple[str, str, str], ...] = (
 )
 
 _TRUTHY = {'1', 'y', 'yes', 'true', 't', 'x', 'active'}
+
+# Lofty puts useful CRM facts in separate columns rather than a JSON details
+# cell. Preserve those facts in the existing details JSON; this intentionally
+# requires no database/schema change.
+_LOFTY_DETAIL_COLUMNS: dict[str, str] = {
+    'Lofty Lead ID': 'lofty_lead_id',
+    'Other Properties': 'other_properties',
+    'Est. Home Value': 'estimated_value',
+    'Purchase Date': 'purchase_date',
+    'Lead Type': 'lead_type',
+    'Selling Timeframe': 'selling_timeframe',
+    'Has Listing Agent': 'has_listing_agent',
+    'Opportunity': 'opportunity',
+    'Lead Source': 'lead_source',
+    'Lofty Stage': 'lofty_stage',
+    'Assigned Agent': 'assigned_agent',
+    'Ownership': 'ownership',
+    'Created': 'crm_created_at',
+    'Last Touch': 'last_touch',
+    'Last Site Visit': 'last_site_visit',
+    'Outreach Attempts (since 2024)': 'outreach_attempts_since_2024',
+    'Texts Sent': 'texts_sent',
+    'Calls Made': 'calls_made',
+    'Emails Sent': 'emails_sent',
+    'Email Opens': 'email_opens',
+    'First Outreach': 'first_outreach',
+    'Last Outreach': 'last_outreach',
+    'Lead Score': 'crm_lead_score',
+    'Language': 'language',
+    'Level of Interest': 'level_of_interest',
+    'Fello Link': 'fello_link',
+    'Household Contacts': 'household_contacts',
+    'Tags': 'crm_tags',
+}
 
 
 def _key(header: str) -> str:
@@ -181,11 +225,15 @@ def _text(cell: object) -> str:
     return str(cell).strip()
 
 
-def parse_workbook(content: bytes, overrides: dict[str, str] | None = None):
-    """Parse the first sheet of an .xlsx workbook using the same column rules.
+def parse_workbook(content: bytes, overrides: dict[str, str] | None = None,
+                   sheet_name: str = ''):
+    """Parse one lead-like sheet of an .xlsx using the same column rules.
 
-    Only the first sheet is read: a lead list is one table, and silently
-    merging extra sheets would import data the broker did not see.
+    CRM workbooks often begin with a Read Me or summary sheet. Select the first
+    sheet whose header contains a recognised phone or property-address column,
+    but never merge multiple sheets: a lead list remains one explicit table.
+    If no sheet is recognisable, retain the old first-nonempty-sheet behaviour
+    so the normal mapping error remains useful.
     """
     try:
         from openpyxl import load_workbook
@@ -198,19 +246,42 @@ def parse_workbook(content: bytes, overrides: dict[str, str] | None = None):
         return [], [f'The workbook could not be opened: {error}'], _empty_meta()
 
     try:
-        sheet = workbook[workbook.sheetnames[0]]
-        rows = sheet.iter_rows(values_only=True)
-        header: list[str] = []
-        for row in rows:
-            values = [_text(cell) for cell in row]
-            if any(values):
-                header = values
+        worksheet_names = list(workbook.sheetnames)
+        selected = None
+        fallback = None
+        # A short scan also handles exports that put a title above the table.
+        if sheet_name and sheet_name not in worksheet_names:
+            meta = _empty_meta()
+            meta['worksheets'] = worksheet_names
+            return [], [f'The worksheet “{sheet_name}” was not found.'], meta
+
+        candidates = [workbook[sheet_name]] if sheet_name else workbook.worksheets
+        for sheet in candidates:
+            for row_number, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+                values = [_text(cell) for cell in row]
+                if not any(values):
+                    if row_number >= 50:
+                        break
+                    continue
+                if fallback is None:
+                    fallback = (sheet, row_number, values)
+                mapped, _flags = _map_headers(values, overrides)
+                if 'phone' in mapped or 'property_address' in mapped:
+                    selected = (sheet, row_number, values)
+                    break
+                if row_number >= 50:
+                    break
+            if selected is not None:
                 break
-        if not header:
+
+        selected = selected or fallback
+        if selected is None:
             return [], ['The workbook has no header row.'], _empty_meta()
 
+        sheet, header_row, header = selected
+
         records = []
-        for row in rows:
+        for row in sheet.iter_rows(min_row=header_row + 1, values_only=True):
             values = [_text(cell) for cell in row]
             if not any(values):
                 continue
@@ -220,24 +291,38 @@ def parse_workbook(content: bytes, overrides: dict[str, str] | None = None):
     finally:
         workbook.close()
 
-    return _read_rows(header, records, overrides)
+    parsed = _read_rows(header, records, overrides)
+    parsed[2]['worksheets'] = worksheet_names
+    parsed[2]['selected_sheet'] = sheet.title
+    return parsed
 
 
-def parse_upload(content: bytes, filename: str, overrides: dict[str, str] | None = None):
+def parse_upload(content: bytes, filename: str, overrides: dict[str, str] | None = None,
+                 sheet_name: str = ''):
     """Dispatch on file extension. Anything else is rejected by the route."""
     if filename.lower().endswith('.xlsx'):
-        return parse_workbook(content, overrides)
+        return parse_workbook(content, overrides, sheet_name)
     return parse_csv(content, overrides)
 
 
 def _empty_meta() -> dict:
-    return {'columns': [], 'mapping': {}, 'signal_columns': {}}
+    return {
+        'columns': [], 'mapping': {}, 'signal_columns': {},
+        'worksheets': [], 'selected_sheet': None,
+    }
 
 
 def _read_rows(fieldnames: list[str], rows: Iterable[dict],
                overrides: dict[str, str] | None = None):
     """Map header-aligned dict rows onto normalized leads. Shared by CSV and XLSX."""
-    fields, flags = _map_headers(list(fieldnames), overrides)
+    is_lofty = any(_key(column) == 'loftyleadid' for column in fieldnames)
+    effective_overrides = dict(overrides or {})
+    # "Lead Type" precedes "Tags" in Lofty exports, but it describes the CRM
+    # contact type (Seller/Buyer), not a property signal. Tags can contain real
+    # supported signals such as Expired and FSBO.
+    if is_lofty and 'signals' not in effective_overrides and 'Tags' in fieldnames:
+        effective_overrides['signals'] = 'Tags'
+    fields, flags = _map_headers(list(fieldnames), effective_overrides)
     meta = {
         'columns': list(fieldnames),
         'mapping': {field: fields.get(field) for field in MAPPABLE_FIELDS},
@@ -258,13 +343,22 @@ def _read_rows(fieldnames: list[str], rows: Iterable[dict],
         if not name:
             name = ' '.join(part for part in (cell('first_name'), cell('last_name')) if part).strip()
 
-        phone = normalize_phone(cell('phone'))
+        raw_phones = [cell('phone'), cell('phone_2'), cell('phone_3')]
+        phones: list[str] = []
+        for raw_phone in raw_phones:
+            normalized = normalize_phone(raw_phone)
+            if normalized and normalized not in phones:
+                phones.append(normalized)
+        phone = phones[0] if phones else None
         address = cell('property_address')
+        if is_lofty and address:
+            address = ', '.join(part for part in (
+                address, cell('area'), cell('state'), cell('postal_code')) if part)
         if not phone and not address:
             if any(str(value or '').strip() for value in row.values()):
                 warnings.append(f'Row {number}: no usable phone or property address — skipped.')
             continue
-        if cell('phone') and not phone:
+        if cell('phone') and not normalize_phone(cell('phone')):
             warnings.append(f'Row {number}: "{cell("phone")}" is not a usable phone number.')
 
         signals = parse_signals(cell('signals'))
@@ -273,6 +367,21 @@ def _read_rows(fieldnames: list[str], rows: Iterable[dict],
                 signals.append(signal)
 
         details = parse_details(row.get(fields['details'])) if 'details' in fields else {}
+        dnc = bool(cell('ok_to_text') and cell('ok_to_text').strip().lower() not in _TRUTHY)
+        if is_lofty:
+            for column, key in _LOFTY_DETAIL_COLUMNS.items():
+                value = str(row.get(column) or '').strip()
+                if value:
+                    details[key] = value
+            emails = [cell('email_1'), cell('email_2')]
+            emails = list(dict.fromkeys(value for value in emails if value))
+            if emails:
+                details['emails'] = emails
+            if phones:
+                details['_phone_numbers'] = [
+                    {'phone': value, 'dnc': dnc, 'owner_name': name}
+                    for value in phones
+                ]
         for signal in signals_from_details(details):
             if signal not in signals:
                 signals.append(signal)
@@ -285,6 +394,7 @@ def _read_rows(fieldnames: list[str], rows: Iterable[dict],
             'signals': signals,
             'outreach_reason': cell('outreach_reason')[:300] or None,
             'details': details,
+            'dnc': dnc,
             'score': score_lead(signals, bool(phone), bool(address)),
         })
 

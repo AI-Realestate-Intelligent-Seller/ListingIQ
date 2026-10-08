@@ -76,13 +76,14 @@ def store_outbound_message(session, *, telnyx_id='telnyx-outbound-1',
     return telnyx_id
 
 
-def delivery_callback(event_type, provider_message_id, recipients):
+def delivery_callback(event_type, provider_message_id, recipients, errors=None):
     return {'data': {
         'event_type': event_type,
         'payload': {
             'id': provider_message_id,
             'text': 'Existing outbound message',
             'to': recipients,
+            'errors': errors or [],
         },
     }}
 
@@ -737,6 +738,44 @@ def test_message_finalized_updates_final_delivery_status(session):
 
     assert response == {'ok': True}
     assert session.query(Message).one().status == 'delivered'
+
+
+def test_message_finalized_stores_carrier_failure_reason(session):
+    telnyx_id = store_outbound_message(session, status='sent')
+
+    response = invoke_telnyx_webhook(session, delivery_callback(
+        'message.finalized', telnyx_id,
+        [{'phone_number': CONTACT, 'status': 'delivery_failed'}],
+        errors=[{
+            'code': '40001',
+            'title': 'Not routable',
+            'detail': 'The destination is a landline or non-routable wireless number.',
+        }],
+    ))
+
+    assert response == {'ok': True}
+    message = session.query(Message).one()
+    assert message.status == 'delivery_failed'
+    assert message.failure_code == '40001'
+    assert message.failure_reason == (
+        'The destination is a landline or non-routable wireless number.'
+    )
+
+
+def test_duplicate_failure_callback_can_add_late_carrier_reason(session):
+    telnyx_id = store_outbound_message(session, status='delivery_failed')
+
+    response = invoke_telnyx_webhook(session, delivery_callback(
+        'message.finalized', telnyx_id,
+        [{'phone_number': CONTACT, 'status': 'delivery_failed'}],
+        errors=[{'code': '40012', 'detail': 'The carrier deemed the number invalid.'}],
+    ))
+
+    assert response == {'ok': True}
+    message = session.query(Message).one()
+    assert message.status == 'delivery_failed'
+    assert message.failure_code == '40012'
+    assert message.failure_reason == 'The carrier deemed the number invalid.'
 
 
 @pytest.mark.parametrize(

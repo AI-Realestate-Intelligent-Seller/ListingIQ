@@ -921,6 +921,12 @@
   padding: 0; margin-bottom: 9px;
   color: #5b6b66; font-size: 10px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
 }
+.import-sheet-fieldset label { display: grid; gap: 6px; }
+.import-sheet-fieldset label > span { color: var(--ink); font-size: 12.5px; font-weight: 600; }
+.import-sheet-fieldset select {
+  width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--white); font: inherit; font-size: 12.5px;
+}
 .import-option {
   display: flex; gap: 11px; align-items: flex-start;
   padding: 11px 13px; margin-bottom: 7px;
@@ -946,4 +952,31 @@
 @media (max-width: 560px) {
   .import-summary { grid-template-columns: repeat(2, 1fr); }
   .import-mapping label { grid-template-columns: 1fr; gap: 4px; }
+}
+.leads-error-toast {
+  position: fixed;
+  top: max(18px, env(safe-area-inset-top));
+  bottom: auto;
+  z-index: 1200;
+  width: max-content;
+  max-width: min(680px, calc(100vw - 32px));
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  border-radius: 12px;
+  white-space: normal;
+  line-height: 1.45;
+}
+
+.leads-error-toast button {
+  flex: 0 0 auto;
+  margin: -3px -7px -3px 0;
+  padding: 1px 6px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
 }

@@ -166,6 +166,8 @@ class SmsMessageOut(BaseModel):
     to_number: Optional[str]
     text: Optional[str]
     status: Optional[str]
+    failure_code: Optional[str] = None
+    failure_reason: Optional[str] = None
     event_type: Optional[str]
     created_at: Optional[datetime]
 
@@ -242,6 +244,8 @@ class FollowUpOut(BaseModel):
     followup_state: str
     reason: str
     reason_label: str
+    latest_outbound_status: Optional[str] = None
+    latest_outbound_failure_reason: Optional[str] = None
     waiting_days: Optional[int] = None
     reply_count: int = 0
     message_count: int = 0
@@ -300,15 +304,19 @@ class LeadDeleteRequest(BaseModel):
 class LeadCampaignRequest(BaseModel):
     """Hand a selection of leads to Bobbie as one outreach batch.
 
-    The real batch limit lives in the campaign service so an oversized
-    selection gets a sentence explaining the cap, not a validation error.
+    The high request ceiling protects the API from a runaway payload; it is
+    not a user-facing campaign-size limit.
     """
     lead_ids: List[int] = Field(min_items=1, max_items=100_000)
     # Optional: when blank, each lead's own signals supply the reason.
     outreach_reason: Optional[str] = Field(None, max_length=300)
 
 class CampaignDraftRequest(BaseModel):
-    """Turn a selection in the Lead Pool into a draft campaign to compose."""
+    """Turn a selection in the Lead Pool into a draft campaign to compose.
+
+    The high request ceiling protects the API from a runaway payload; it is
+    not a user-facing campaign-size limit.
+    """
     lead_ids: List[int] = Field(min_items=1, max_items=100_000)
     name: Optional[str] = Field(None, max_length=200)
     message_template: Optional[str] = Field(None, max_length=1600)
@@ -365,6 +373,8 @@ class CampaignRecipient(BaseModel):
     # — they no longer appear in the lead pool.
     conversation_id: Optional[int] = None
     replied: bool = False
+    delivery_status: Optional[str] = None
+    delivery_failure_reason: Optional[str] = None
 
 class CampaignSkip(BaseModel):
     lead_id: int

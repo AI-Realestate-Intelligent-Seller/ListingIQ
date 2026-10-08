@@ -89,6 +89,10 @@ export type ImportPreview = {
   mapping: Record<string, string | null>;
   /** Columns treated as yes/no signal flags, keyed by signal. */
   signal_columns: Record<string, string>;
+  /** Workbook sheets available for import; empty for CSV files. */
+  worksheets: string[];
+  /** The single worksheet currently represented by this preview. */
+  selected_sheet: string | null;
   total_rows: number;
   /** Readable rows remaining after existing and repeated phone numbers are removed. */
   importable: number;

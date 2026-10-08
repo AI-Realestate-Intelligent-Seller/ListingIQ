@@ -230,6 +230,10 @@
 .campaign-reply-badge.replied {
   border-color: var(--accent-line); background: #eef6f2; color: #0f5548;
 }
+.campaign-reply-badge.failed {
+  border-color: #f0b8b2; background: #fff1f0; color: #b42318;
+  white-space: normal;
+}
 
 /* -- the campaign's leads ---------------------------------------------------
    Deliberately the Lead Pool's own .leads-table: these leads left the pool and

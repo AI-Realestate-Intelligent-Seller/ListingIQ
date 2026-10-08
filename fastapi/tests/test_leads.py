@@ -9,10 +9,11 @@ import pytest
 from openpyxl import Workbook
 
 from app import db
+from app.leads import campaign as campaign_service
 from app.leads import service as leads_service
 from app.leads.catalog import parse_signals
-from app.leads.importer import normalize_phone, parse_csv, score_lead
-from app.models import Conversation, Lead, Message
+from app.leads.importer import normalize_phone, parse_csv, parse_workbook, score_lead
+from app.models import Conversation, Lead, Message, User
 
 BROKER_EMAIL = 'ather.shamim@linchpinglobal.net'
 LEADS_URL = '/api/v1/leads'
@@ -85,6 +86,65 @@ def test_parse_csv_reads_aliased_headers_and_flag_columns():
     assert set(rows[0]['signals']) == {'fsbo', 'tax_delinquent'}
 
 
+def test_parse_csv_reads_lofty_crm_exports_without_manual_mapping():
+    text = (
+        'Lofty Lead ID,First Name,Last Name,Phone 1,Phone 2,Email 1,OK to Text,'
+        'Property Address,City,State,Zip,Lead Type,Lead Source,Tags,Est. Home Value\n'
+        'lofty-42,Ana,Diaz,(312) 555-0120,312-555-0121,ana@example.test,No,'
+        '950 Edgar Dr,Charleston,IL,61920,Seller,CSV Import,"Expired, SM-Seller",185000\n'
+    )
+
+    rows, warnings, meta = parse_csv(text.encode('utf-8'))
+
+    assert warnings == []
+    assert meta['mapping']['phone'] == 'Phone 1'
+    assert meta['mapping']['signals'] == 'Tags'
+    assert rows[0]['owner_name'] == 'Ana Diaz'
+    assert rows[0]['phone'] == '+13125550120'
+    assert rows[0]['property_address'] == '950 Edgar Dr, Charleston, IL, 61920'
+    assert rows[0]['area'] == 'Charleston'
+    assert rows[0]['signals'] == ['expired']
+    assert rows[0]['dnc'] is True
+    assert rows[0]['details']['estimated_value'] == '185000'
+    assert rows[0]['details']['emails'] == ['ana@example.test']
+    assert rows[0]['details']['_phone_numbers'] == [
+        {'phone': '+13125550120', 'dnc': True, 'owner_name': 'Ana Diaz'},
+        {'phone': '+13125550121', 'dnc': True, 'owner_name': 'Ana Diaz'},
+    ]
+
+
+def test_lofty_text_permission_is_enforced_after_import(session):
+    broker = User(
+        email=BROKER_EMAIL,
+        hashed_password='not-used',
+        role='broker',
+        brokerage_id='brokerage-1',
+        is_verified=True,
+        is_active=True,
+    )
+    session.add(broker)
+    session.commit()
+    text = (
+        'Lofty Lead ID,First Name,Last Name,Phone 1,Phone 2,OK to Text,'
+        'Property Address,City,State,Zip,Tags\n'
+        'lofty-42,Ana,Diaz,3125550120,3125550121,No,'
+        '950 Edgar Dr,Charleston,IL,61920,Expired\n'
+    )
+
+    result = leads_service.import_file(
+        session, broker, text.encode('utf-8'), 'lofty-export.csv')
+
+    assert result['created'] == 1
+    lead = session.query(Lead).one()
+    serialized = leads_service.serialize(lead)
+    assert serialized['stage'] == 'dnc'
+    assert serialized['property_address'] == '950 Edgar Dr, Charleston, IL, 61920'
+    assert serialized['phone_numbers'] == [
+        {'phone': '+13125550120', 'dnc': True, 'owner_name': 'Ana Diaz'},
+        {'phone': '+13125550121', 'dnc': True, 'owner_name': 'Ana Diaz'},
+    ]
+
+
 def test_parse_csv_skips_rows_without_phone_or_address():
     rows, warnings, _meta = parse_csv(b'owner,phone,address\nNo Contact,,\n')
     assert rows == []
@@ -142,6 +202,38 @@ def test_import_reads_an_xlsx_workbook(client, make_user, auth_header):
     by_name = {item['owner_name']: item for item in leads}
     assert by_name['Marcus Webb']['phone'] == '+13125550142'
     assert [s['label'] for s in by_name['Ruth Callahan']['signals']] == ['Vacant Property']
+
+
+def test_workbook_skips_readme_and_selects_the_lead_sheet():
+    workbook = Workbook()
+    readme = workbook.active
+    readme.title = 'Read Me'
+    readme.append(['Instructions for this CRM export'])
+    leads = workbook.create_sheet('Prospect List')
+    leads.append(['First Name', 'Last Name', 'Phone 1', 'Property Address'])
+    leads.append(['Ana', 'Diaz', '3125550120', '950 Edgar Dr'])
+    review = workbook.create_sheet('Review')
+    review.append(['First Name', 'Last Name', 'Phone 1', 'Property Address'])
+    review.append(['Ruth', 'Callahan', '3125550122', '12 Review Lane'])
+    workbook.create_sheet('Counts').append(['Bucket', 'Leads'])
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+
+    rows, warnings, meta = parse_workbook(buffer.getvalue())
+
+    assert warnings == []
+    assert meta['worksheets'] == ['Read Me', 'Prospect List', 'Review', 'Counts']
+    assert meta['selected_sheet'] == 'Prospect List'
+    assert meta['mapping']['phone'] == 'Phone 1'
+    assert rows[0]['owner_name'] == 'Ana Diaz'
+    assert rows[0]['phone'] == '+13125550120'
+    assert rows[0]['property_address'] == '950 Edgar Dr'
+
+    review_rows, review_warnings, review_meta = parse_workbook(
+        buffer.getvalue(), sheet_name='Review')
+    assert review_warnings == []
+    assert review_meta['selected_sheet'] == 'Review'
+    assert review_rows[0]['owner_name'] == 'Ruth Callahan'
 
 
 def test_a_corrupt_workbook_is_reported_not_raised(client, make_user, auth_header):
@@ -577,20 +669,29 @@ def test_bulk_delete_handles_a_pool_larger_than_the_bind_parameter_limit(
     assert client.get(LEADS_URL, headers=headers).json()['facets']['total'] == 0
 
 
-def test_an_oversized_campaign_explains_the_limit(client, make_user, auth_header, session):
-    user = make_user(BROKER_EMAIL, role='broker')
+def test_a_campaign_can_hold_more_than_200_leads(session):
+    user = User(
+        email=BROKER_EMAIL,
+        hashed_password='not-used',
+        role='broker',
+        brokerage_id='brokerage-1',
+        is_verified=True,
+        is_active=True,
+    )
+    session.add(user)
+    session.flush()
     session.bulk_save_objects([
         Lead(user_id=user.id, owner_name=f'Owner {n}', phone=f'+1312555{n:04d}',
              property_address=f'{n} Test Ave', signals='fsbo', score=36)
         for n in range(250)
     ])
     session.commit()
-    headers = auth_header(BROKER_EMAIL)
-    ids = [item['id'] for item in client.get(LEADS_URL, headers=headers).json()['leads']]
+    ids = [row[0] for row in session.query(Lead.id).all()]
 
-    response = client.post(f'{LEADS_URL}/campaign', headers=headers, json={'lead_ids': ids})
-    assert response.status_code == 400
-    assert response.json()['detail'] == 'A campaign can hold at most 200 leads.'
+    campaign, not_added = campaign_service.create_draft(session, user, ids)
+
+    assert not_added == []
+    assert len(campaign_service.members(session, user, campaign)) == 250
 
 
 # -- detail panel ----------------------------------------------------------
