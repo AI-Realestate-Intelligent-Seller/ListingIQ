@@ -99,6 +99,27 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("Internal Console BatchData", () => {
+  it("allows a property-search fetch size above twenty", async () => {
+    render(<BatchDataView detail />);
+    await screen.findByText("Connection status");
+    fireEvent.click(screen.getByRole("button", { name: "Data" }));
+    fireEvent.change(screen.getByLabelText("Results per category"), {
+      target: { value: "250" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Preview Endpoint" }));
+
+    await waitFor(() =>
+      expect(
+        mock.mock.calls.some(
+          ([path, options]) =>
+            path.endsWith("/products/property-search") &&
+            (options?.payload as { rows_per_category?: number })
+              ?.rows_per_category === 250,
+        ),
+      ).toBe(true),
+    );
+  });
+
   it("keeps completed Property Search results when switching products", async () => {
     const prompt = vi.spyOn(window, "prompt").mockReturnValue("search test");
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);

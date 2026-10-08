@@ -796,11 +796,9 @@ function ProductData({
                 </small>
               </label>
               <NumberField
-                title="Results per category (maximum 20)"
+                title="Results per category"
                 value={draft.rowsPerCategory}
-                onChange={(value) =>
-                  change("rowsPerCategory", Math.min(20, value))
-                }
+                onChange={(value) => change("rowsPerCategory", value)}
               />
             </div>
             <div className="pr-categories">

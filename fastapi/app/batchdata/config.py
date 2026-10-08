@@ -83,7 +83,7 @@ class Configuration(BaseModel):
     listingUnitCost: float = Field(0.10, ge=0, le=1000)
     contactEnrichmentUnitCost: float = Field(0.07, ge=0, le=1000)
     allowOverage: Literal[False] = False
-    rowsPerCategory: int = Field(20, ge=1, le=20)
+    rowsPerCategory: int = Field(20, ge=1)
     selectedCategories: list[str] = Field(
         default_factory=lambda: list(PROVIDER_QUICK_LISTS),
         max_items=21,
@@ -133,7 +133,7 @@ class ProductRequest(BaseModel):
     locations: list[str] = Field(min_items=1, max_items=100)
     # Optional: only AND narrows the results; empty or OR keeps every returned page.
     combination: Literal["AND", "OR"] | None = None
-    rows_per_category: int = Field(20, ge=1, le=20)
+    rows_per_category: int = Field(20, ge=1)
     confirmed: bool = False
     reason: str = Field("", max_length=500)
 

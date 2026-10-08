@@ -30,6 +30,18 @@ from app.batchdata.service import Service, UnsafeOperation, _rows, initialize
 from app.db import Base
 
 
+def test_property_search_rows_per_category_is_not_capped_at_twenty():
+    configuration = Configuration(rowsPerCategory=250)
+    request = ProductRequest(
+        selected_categories=["fsbo"],
+        locations=["Chicago, IL"],
+        rows_per_category=250,
+    )
+
+    assert configuration.rowsPerCategory == 250
+    assert request.rows_per_category == 250
+
+
 def test_selected_stage_accepts_selection_across_more_than_100_records():
     ids = list(range(1, 122))
     payload = ContactEnrichmentRequest(property_ids=ids)
