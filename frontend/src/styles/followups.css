@@ -92,7 +92,7 @@
 .followup-reason.reason-appointment_pending { color: #8a5a00; }
 .followup-reason.reason-appointment_booked { color: #0f5548; }
 .followup-reason.reason-no_response { color: #b42318; }
-.followup-reason.reason-delivery_failed { color: #b42318; }
+.followup-reason.reason-delivery_failed { color: #8a5a00; }
 .followup-reason.reason-opted_out { color: #b42318; }
 .followup-reason.reason-not_interested { color: #6b7280; }
 .followup-reason.reason-in_conversation { color: var(--accent); }
@@ -200,7 +200,7 @@
   margin: 0 4px 4px; color: #8d9693;
   font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
 }
-.sms-meta.failed { color: #b42318; font-weight: 700; }
+.sms-meta.failed { color: #8a5a00; font-weight: 700; }
 
 /* A system note in the thread, e.g. where the assignee stepped in. */
 .followups-event {

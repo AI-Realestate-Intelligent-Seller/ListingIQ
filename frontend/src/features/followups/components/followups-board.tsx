@@ -54,34 +54,14 @@ const DELIVERY_LABELS: Record<string, string> = {
   queued: "Queued",
   sending: "Sending",
   sent: "Sent",
-  delivered: "Delivered",
-  delivery_failed: "Not delivered",
-  sending_failed: "Not sent",
+  delivered: "Sent",
+  delivery_failed: "Sent",
+  sending_failed: "Sent",
   received: "Received",
 };
 
 function deliveryLabel(status: string): string {
   return DELIVERY_LABELS[status] ?? status.replaceAll("_", " ");
-}
-
-function isDeliveryFailure(status: string | null): boolean {
-  return /fail|reject|undeliver|timeout|unconfirmed/i.test(status ?? "");
-}
-
-function deliveryFailureReason(status: string | null, providerReason: string | null): string {
-  if (providerReason) return providerReason;
-  if (/timeout/i.test(status ?? "")) return "Carrier delivery confirmation timed out.";
-  if (/unconfirmed/i.test(status ?? "")) return "The carrier could not confirm delivery.";
-  if (/sending_failed/i.test(status ?? "")) return "The provider could not send the message.";
-  return "The carrier rejected the destination.";
-}
-
-function noReplyLabel(item: FollowUp): string {
-  if (!isDeliveryFailure(item.latest_outbound_status)) return "Waiting for first reply";
-  return `Not delivered — ${deliveryFailureReason(
-    item.latest_outbound_status,
-    item.latest_outbound_failure_reason,
-  )}`;
 }
 
 /** The channel line above a bubble, as on the prototype: who wrote it, and how. */
@@ -620,12 +600,8 @@ useEffect(() => {
                 <span className="followup-card-meta">
                   {[item.property_address, item.area].filter(Boolean).join(" · ") || item.contact}
                 </span>
-                <span className={`followup-reason reason-${
-                  item.reply_count === 0 && isDeliveryFailure(item.latest_outbound_status)
-                    ? "delivery_failed"
-                    : item.reason
-                }`}>
-                  {item.reply_count > 0 ? item.reason_label : noReplyLabel(item)}
+                <span className={`followup-reason reason-${item.reason}`}>
+                  {item.reply_count > 0 ? item.reason_label : "Waiting for first reply"}
                 </span>
                 {item.has_multiple_properties ? <span className="followup-multiple-signal">Multiple properties</span> : null}
                 {item.followup_state === "pending" ? null : (
@@ -725,7 +701,6 @@ useEffect(() => {
                     const day = dateLabel(message.created_at);
                     const showDay =
                       day !== "" && day !== dateLabel(messages[index - 1]?.created_at ?? null);
-                    const failed = isDeliveryFailure(message.status);
                     return (
                       <Fragment key={message.id}>
                         {showDay ? <div className="sms-day-divider">{day}</div> : null}
@@ -741,17 +716,12 @@ useEffect(() => {
                             <span className="followups-channel">{channelLabel(message)}</span>
                           ) : null}
                           <div className="sms-bubble">{message.text}</div>
-                          <div className={`sms-meta${failed ? " failed" : ""}`}>
+                          <div className="sms-meta">
                             <span className="sr-only">
                               {message.direction === "inbound" ? active.name || "Owner" : "Outbound"}
                             </span>
                             {message.direction === "outbound" && message.status ? (
-                              <span title={message.failure_reason ?? undefined}>
-                                {deliveryLabel(message.status)}
-                                {failed
-                                  ? ` — ${deliveryFailureReason(message.status, message.failure_reason)}`
-                                  : ""} ·{" "}
-                              </span>
+                              <span>{deliveryLabel(message.status)} ·{" "}</span>
                             ) : null}
                             <time dateTime={message.created_at ?? undefined}>
                               {formatClock(message.created_at)}

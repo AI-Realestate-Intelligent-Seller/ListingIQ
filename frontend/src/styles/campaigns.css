@@ -231,7 +231,7 @@
   border-color: var(--accent-line); background: #eef6f2; color: #0f5548;
 }
 .campaign-reply-badge.failed {
-  border-color: #f0b8b2; background: #fff1f0; color: #b42318;
+  border-color: #ead49a; background: #fff8e6; color: #8a5a00;
   white-space: normal;
 }
 

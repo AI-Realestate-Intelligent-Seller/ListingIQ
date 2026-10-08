@@ -31,7 +31,7 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     'area': ('area', 'city', 'neighborhood', 'neighbourhood', 'market', 'town', 'submarket'),
     'state': ('state', 'property_state', 'propertystate'),
     'postal_code': ('zip', 'zipcode', 'postalcode', 'propertyzip', 'propertyzipcode'),
-    'email_1': ('email1', 'primaryemail'),
+    'email_1': ('email', 'emailaddress', 'email1', 'primaryemail'),
     'email_2': ('email2', 'secondaryemail'),
     'ok_to_text': ('oktotext', 'permissiontotext', 'smspermission', 'smsconsent', 'textconsent'),
     'signals': ('signals', 'signal', 'tags', 'tag', 'leadtype', 'lead_type', 'category',
@@ -93,8 +93,12 @@ def _key(header: str) -> str:
 
 
 # Fields a broker may map by hand when the guess is wrong.
-MAPPABLE_FIELDS = ('owner_name', 'first_name', 'last_name', 'phone',
-                   'property_address', 'area', 'signals', 'outreach_reason', 'details')
+MAPPABLE_FIELDS = (
+    'owner_name', 'first_name', 'last_name',
+    'phone', 'phone_2', 'phone_3', 'email_1', 'email_2',
+    'property_address', 'area', 'state', 'postal_code',
+    'signals', 'outreach_reason', 'details',
+)
 
 
 def _map_headers(fieldnames: list[str],
@@ -351,9 +355,16 @@ def _read_rows(fieldnames: list[str], rows: Iterable[dict],
                 phones.append(normalized)
         phone = phones[0] if phones else None
         address = cell('property_address')
-        if is_lofty and address:
-            address = ', '.join(part for part in (
-                address, cell('area'), cell('state'), cell('postal_code')) if part)
+        # When a vendor splits state/ZIP out, build one geocodable address.
+        # A city-only companion column remains `area` and does not unexpectedly
+        # alter older files that already carry a complete address.
+        if address and (cell('state') or cell('postal_code')):
+            parts = [address]
+            current = address.lower()
+            for part in (cell('area'), cell('state'), cell('postal_code')):
+                if part and part.lower() not in current:
+                    parts.append(part)
+            address = ', '.join(parts)
         if not phone and not address:
             if any(str(value or '').strip() for value in row.values()):
                 warnings.append(f'Row {number}: no usable phone or property address — skipped.')
@@ -373,15 +384,31 @@ def _read_rows(fieldnames: list[str], rows: Iterable[dict],
                 value = str(row.get(column) or '').strip()
                 if value:
                     details[key] = value
-            emails = [cell('email_1'), cell('email_2')]
-            emails = list(dict.fromkeys(value for value in emails if value))
-            if emails:
-                details['emails'] = emails
-            if phones:
-                details['_phone_numbers'] = [
-                    {'phone': value, 'dnc': dnc, 'owner_name': name}
-                    for value in phones
-                ]
+        # Contact columns use the same existing details contract for every
+        # vendor, not only known Lofty exports.
+        emails = [cell('email_1'), cell('email_2')]
+        emails = list(dict.fromkeys(value for value in emails if value))
+        if emails:
+            details['emails'] = emails
+        if phones:
+            details['_phone_numbers'] = [
+                {'phone': value, 'dnc': dnc, 'owner_name': name}
+                for value in phones
+            ]
+
+        # Preserve all other source fields exactly as labelled by the vendor.
+        # Core/mapped columns stay authoritative and are not duplicated here.
+        used_columns = set(fields.values()) | set(flags.values())
+        if is_lofty:
+            used_columns.update(_LOFTY_DETAIL_COLUMNS)
+        imported_fields = {
+            str(column): value
+            for column in fieldnames
+            if column not in used_columns
+            if (value := _text(row.get(column)))
+        }
+        if imported_fields:
+            details['_imported_fields'] = imported_fields
         for signal in signals_from_details(details):
             if signal not in signals:
                 signals.append(signal)

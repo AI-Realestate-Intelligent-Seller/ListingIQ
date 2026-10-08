@@ -86,6 +86,46 @@ def test_parse_csv_reads_aliased_headers_and_flag_columns():
     assert set(rows[0]['signals']) == {'fsbo', 'tax_delinquent'}
 
 
+def test_parse_csv_preserves_unmapped_vendor_fields_for_the_info_drawer():
+    text = (
+        'Contact Name,Phone,Property Address,Email,Estimated Value,Custom Motivation\n'
+        'Ana Diaz,3125550120,950 Edgar Dr,ana@example.test,185000,Moving soon\n'
+    )
+
+    rows, warnings, _meta = parse_csv(text.encode('utf-8'))
+
+    assert warnings == []
+    assert rows[0]['details']['emails'] == ['ana@example.test']
+    assert rows[0]['details']['_imported_fields'] == {
+        'Estimated Value': '185000',
+        'Custom Motivation': 'Moving soon',
+    }
+    assert 'Phone' not in rows[0]['details']['_imported_fields']
+    assert 'Property Address' not in rows[0]['details']['_imported_fields']
+
+
+def test_manual_core_mapping_accepts_unfamiliar_headers_and_keeps_the_rest():
+    text = (
+        'Person Label,Contact Digits,Home Location,Township,Province,Postal,Vendor Fact\n'
+        'Ana Diaz,3125550120,950 Edgar Dr,Charleston,IL,61920,Moving soon\n'
+    )
+    mapping = {
+        'owner_name': 'Person Label',
+        'phone': 'Contact Digits',
+        'property_address': 'Home Location',
+        'area': 'Township',
+        'state': 'Province',
+        'postal_code': 'Postal',
+    }
+
+    rows, warnings, meta = parse_csv(text.encode('utf-8'), mapping)
+
+    assert warnings == []
+    assert meta['mapping']['phone'] == 'Contact Digits'
+    assert rows[0]['property_address'] == '950 Edgar Dr, Charleston, IL, 61920'
+    assert rows[0]['details']['_imported_fields'] == {'Vendor Fact': 'Moving soon'}
+
+
 def test_parse_csv_reads_lofty_crm_exports_without_manual_mapping():
     text = (
         'Lofty Lead ID,First Name,Last Name,Phone 1,Phone 2,Email 1,OK to Text,'

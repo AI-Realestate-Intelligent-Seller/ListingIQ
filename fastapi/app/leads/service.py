@@ -117,6 +117,7 @@ def conversation_property_details(lead: Lead) -> dict:
         'contacts',
         'contact_match_metadata',
         'phones',
+        '_imported_fields',
         'provider_property_details',
         'provider_sources',
         'distribution_run_id',
@@ -609,11 +610,11 @@ def analyze_upload(session: Session, user: User, content: bytes, filename: str,
         return ('phone', normalized_phone) if normalized_phone else None
 
     existing_keys: set[tuple[str, str]] = set()
-    existing_leads = (session.query(Lead)
+    existing_leads = (session.query(Lead.phone, Lead.property_address)
                       .filter(Lead.user_id.in_(brokerage_user_ids(session, user)))
                       .all())
-    for lead in existing_leads:
-        key = identity(lead.phone, lead.property_address)
+    for phone, property_address in existing_leads:
+        key = identity(phone, property_address)
         if key:
             existing_keys.add(key)
 
@@ -714,25 +715,27 @@ def import_file(session: Session, user: User, content: bytes, filename: str,
 
     now = datetime.utcnow()
     for start in range(0, len(rows), IMPORT_CHUNK):
-        session.bulk_save_objects([
-            Lead(
-                user_id=user.id,
-                owner_name=row['owner_name'],
-                phone=row['phone'],
-                property_address=row['property_address'],
-                area=row['area'],
-                signals=','.join(row['signals']),
-                outreach_reason=row.get('outreach_reason'),
-                details=json.dumps(row['details']) if row.get('details') else None,
-                score=row['score'],
-                source='csv_import',
-                dnc=bool(row.get('dnc')),
-                created_at=now,
-                refreshed_at=now,
-            )
+        session.bulk_insert_mappings(Lead, [
+            {
+                'user_id': user.id,
+                'owner_name': row['owner_name'],
+                'phone': row['phone'],
+                'property_address': row['property_address'],
+                'area': row['area'],
+                'signals': ','.join(row['signals']),
+                'outreach_reason': row.get('outreach_reason'),
+                'details': json.dumps(row['details']) if row.get('details') else None,
+                'score': row['score'],
+                'source': 'csv_import',
+                'dnc': bool(row.get('dnc')),
+                'created_at': now,
+                'refreshed_at': now,
+            }
             for row in rows[start:start + IMPORT_CHUNK]
         ])
-        session.commit()
+    # One transaction for the entire file is both faster and atomic: a failed
+    # 10,000-row import never leaves a partially imported list behind.
+    session.commit()
 
     return {'created': len(rows), 'total_rows': report['total_rows'],
             'warnings': report['warnings']}

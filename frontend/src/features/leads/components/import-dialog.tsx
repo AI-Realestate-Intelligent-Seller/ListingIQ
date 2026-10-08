@@ -7,10 +7,19 @@ import type { ImportPreview } from "../types/leads.types";
 /** The fields a broker can point at a column, in the order they are shown. */
 const MAPPABLE: { field: string; label: string; hint?: string }[] = [
   { field: "owner_name", label: "Owner name" },
+  { field: "first_name", label: "First name" },
+  { field: "last_name", label: "Last name" },
   { field: "phone", label: "Phone", hint: "Duplicate fallback when no property is selected" },
+  { field: "phone_2", label: "Additional phone" },
+  { field: "phone_3", label: "Third phone" },
+  { field: "email_1", label: "Email" },
+  { field: "email_2", label: "Additional email" },
   { field: "property_address", label: "Property address", hint: "Select this to match duplicate properties" },
   { field: "area", label: "Area or city" },
+  { field: "state", label: "State" },
+  { field: "postal_code", label: "ZIP or postal code" },
   { field: "signals", label: "Signals" },
+  { field: "outreach_reason", label: "Outreach reason" },
 ];
 
 type ImportDialogProps = {
@@ -144,6 +153,7 @@ export function ImportDialog({
               <p className="import-mapping-note">
                 Select the property-address column before importing. Other fields are
                 detected from the header, and the counts update as you change them.
+                Every other non-empty column is preserved under Imported fields in the lead info drawer.
               </p>
               <div className={`import-mapping${isRemapping ? " busy" : ""}`}>
                 {MAPPABLE.map(({ field, label, hint }) => (
@@ -270,8 +280,12 @@ export function ImportDialog({
               >
                 Cancel
               </button>
-              <button className="button" type="submit" disabled={isImporting || isRemapping}>
-                {isImporting ? "Importing…" : `Import ${takes} lead${takes === 1 ? "" : "s"}`}
+              <button className="button" type="submit" disabled={isImporting || isRemapping || takes === 0}>
+                {isImporting
+                  ? "Importing…"
+                  : takes === 0
+                    ? "Map a phone or property column"
+                    : `Import ${takes} lead${takes === 1 ? "" : "s"}`}
               </button>
             </div>
           </form>

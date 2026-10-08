@@ -163,9 +163,10 @@ async def preview_import(
         logger.exception('Lead preview failed for user %s', current_user.id)
         raise HTTPException(status_code=400, detail=f'The file could not be read: {error}')
 
-    if not report['importable']:
-        # A failed mapping ends this preview. The next attempt must upload the
-        # source again instead of reusing potentially incorrect staged input.
+    if not report['importable'] and (reused_token or not report.get('columns')):
+        # The first preview may legitimately have unfamiliar headers: return
+        # its columns so the broker can map them. A failed re-preview reports
+        # the bad mapping while retaining the staged file for another choice.
         if not reused_token:
             uploads.discard(path)
         report.pop('rows', None)

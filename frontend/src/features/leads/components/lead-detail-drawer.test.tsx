@@ -80,6 +80,36 @@ afterEach(() => {
 });
 
 describe("LeadDetailDrawer", () => {
+  it("shows adaptive fields preserved from an uploaded spreadsheet", async () => {
+    vi.mocked(fetchLead).mockResolvedValue({
+      ...distributedLead,
+      source: "csv_import",
+      details: {
+        emails: ["ana@example.com"],
+        _imported_fields: {
+          "Estimated Home Value": "185000",
+          "Custom Motivation": "Moving soon",
+        },
+      },
+    });
+
+    render(
+      <LeadDetailDrawer
+        leadId={distributedLead.id}
+        accessToken="token"
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByText("Imported fields")).toBeTruthy();
+    expect(screen.getByText("2 fields")).toBeTruthy();
+    expect(screen.getByText("Estimated Home Value")).toBeTruthy();
+    expect(screen.getByText("185000")).toBeTruthy();
+    expect(screen.getByText("Custom Motivation")).toBeTruthy();
+    expect(screen.getByText("Moving soon")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "ana@example.com" })).toBeTruthy();
+  });
+
   it("renders nested provider-distribution details without passing objects to React", async () => {
     vi.mocked(fetchLead).mockResolvedValue(distributedLead);
 

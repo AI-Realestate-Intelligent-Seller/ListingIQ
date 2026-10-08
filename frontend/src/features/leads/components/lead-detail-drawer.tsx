@@ -251,6 +251,32 @@ function hasRealEstateProfile(details: Record<string, unknown>): boolean {
     || positiveQuickLists(record.quickLists).length > 0;
 }
 
+const HIDDEN_DETAIL_KEYS = new Set([
+  "contacts", "contact_match_metadata", "phones", "emails", "_imported_fields",
+]);
+
+function visibleDetailEntries(details: Record<string, unknown>): [string, unknown][] {
+  return Object.entries(details).filter(([key]) => !HIDDEN_DETAIL_KEYS.has(key));
+}
+
+function ImportedFields({ details }: { details: Record<string, unknown> }) {
+  const fields = Object.entries(objectValue(details._imported_fields));
+  if (fields.length === 0) return null;
+  return (
+    <DetailSection title="Imported fields" defaultOpen fullWidth summaryValue={`${fields.length} fields`}>
+      <dl className="leads-facts">
+        {fields.map(([key, value]) => (
+          <div key={key}>
+            <dt>{attributeLabel(key)}</dt>
+            <dd>{attributeValue(value)}</dd>
+          </div>
+        ))}
+      </dl>
+      <p className="leads-drawer-note">Preserved from the uploaded CSV or Excel row.</p>
+    </DetailSection>
+  );
+}
+
 function PropertyMapSection({ latitude, longitude }: { latitude: number; longitude: number }) {
   return (
     <DetailSection title="Property location" defaultOpen fullWidth>
@@ -632,11 +658,12 @@ export function LeadDetailDrawer({
 
               <RealEstateProfile details={shown.details} latitude={shown.latitude} longitude={shown.longitude} leadSignals={shown.signals} />
 
-              {Object.keys(shown.details).length > 0 && !hasRealEstateProfile(shown.details) ? (
+              <ImportedFields details={shown.details} />
+
+              {visibleDetailEntries(shown.details).length > 0 && !hasRealEstateProfile(shown.details) ? (
                 <DetailSection title="Property details" fullWidth>
                   <dl className="leads-facts">
-                    {Object.entries(shown.details)
-                      .filter(([key]) => !["contacts", "contact_match_metadata", "phones", "emails"].includes(key))
+                    {visibleDetailEntries(shown.details)
                       .map(([key, value]) => (
                       <div key={key}>
                         <dt>{attributeLabel(key)}</dt>

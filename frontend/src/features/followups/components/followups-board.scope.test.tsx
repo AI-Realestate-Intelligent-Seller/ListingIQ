@@ -79,7 +79,7 @@ describe("FollowUpsBoard scope filter", () => {
     expect(screen.queryByRole("button", { name: /new conversation/i })).toBeNull();
   });
 
-  it("shows the carrier reason instead of waiting for a reply when delivery failed", async () => {
+  it("keeps waiting for a reply when the stored delivery status failed", async () => {
     request.mockResolvedValueOnce([{
       id: 41,
       lead_id: null,
@@ -115,7 +115,7 @@ describe("FollowUpsBoard scope filter", () => {
 
     render(<FollowUpsBoard />);
 
-    expect(await screen.findByText("Not delivered — The destination is a landline.")).toBeTruthy();
-    expect(screen.queryByText("Waiting for first reply")).toBeNull();
+    expect(await screen.findByText("Waiting for first reply")).toBeTruthy();
+    expect(screen.queryByText("Not delivered — The destination is a landline.")).toBeNull();
   });
 });
