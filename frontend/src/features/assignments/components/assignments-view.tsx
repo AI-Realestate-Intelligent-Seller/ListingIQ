@@ -2,8 +2,10 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { RetrievalProgress } from "@/components/loading/retrieval-progress";
+import type { QueryProgress } from "@/lib/api/query-progress";
 import { readAuthSession } from "@/features/auth/lib/auth-storage";
-import { assignLead, listAssignments, roundRobinAssignments } from "../api/assignments-api";
+import { assignLead, listAssignmentsWithProgress, roundRobinAssignments } from "../api/assignments-api";
 import type { AssignmentLead, AssignmentsResponse } from "../types/assignments.types";
 import { NotificationBell } from "@/features/dashboard/components/notification-bell";
 
@@ -15,6 +17,7 @@ function activity(value: string | null): string {
 export function AssignmentsView() {
   const [data, setData] = useState<AssignmentsResponse>({ leads: [], agents: [] });
   const [isLoading, setIsLoading] = useState(true);
+  const [loadProgress, setLoadProgress] = useState<QueryProgress<AssignmentsResponse> | null>(null);
   const [savingId, setSavingId] = useState<number | null>(null);
   const [openAssigneeId, setOpenAssigneeId] = useState<number | null>(null);
   const [assigneeMenuPosition, setAssigneeMenuPosition] = useState({ top: 0, left: 0, width: 180 });
@@ -27,13 +30,15 @@ export function AssignmentsView() {
     const session = readAuthSession();
     if (!session) return;
     const controller = new AbortController();
-    listAssignments(session.access_token, controller.signal)
+    listAssignmentsWithProgress(session.access_token, setLoadProgress, controller.signal)
       .then(setData)
       .catch((reason: unknown) => {
         if (reason instanceof DOMException && reason.name === "AbortError") return;
         setError(reason instanceof Error ? reason.message : "We could not load replied leads.");
       })
-      .finally(() => setIsLoading(false));
+      .finally(() => {
+        if (!controller.signal.aborted) setIsLoading(false);
+      });
     return () => controller.abort();
   }, []);
 
@@ -163,7 +168,18 @@ export function AssignmentsView() {
         </div>
       </section>
       ))}
-      {isLoading ? <p className="sms-muted">Loading replied leads…</p> : null}
+      {isLoading ? (
+        <RetrievalProgress
+          eyebrow="ASSIGNMENTS"
+          title="Retrieving assignments"
+          description="Preparing replied leads and agent assignments."
+          status="Fetching assignments for you"
+          detail="Loading campaigns, replied leads, and assignees"
+          ariaLabel="Loading assignments"
+          progress={loadProgress}
+          progressUnit="leads"
+        />
+      ) : null}
       {!isLoading && data.leads.length === 0 ? <div className="leads-empty broker-assignments-empty"><div>◎</div><h3>No replied leads yet</h3><p>Leads will appear here after an owner replies to a campaign sent by you.</p></div> : null}
       {!isLoading && data.agents.length === 0 ? <p className="assignments-note">No agents are linked to you yet. Ask your HOB to assign an agent to you.</p> : null}
       {notice ? <p className="sms-toast" role="status">{notice}</p> : null}

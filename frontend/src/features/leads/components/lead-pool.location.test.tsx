@@ -149,6 +149,31 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("LeadPool dependent location filters", () => {
+  it("shows the database query loader until the lead pool response arrives", async () => {
+    let finishLoad: ((value: typeof emptyPool) => void) | undefined;
+    vi.mocked(fetchLeadPool).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        finishLoad = resolve;
+      }),
+    );
+
+    render(<LeadPool />);
+
+    expect(
+      await screen.findByRole("status", { name: "Loading lead pool" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("progressbar", { name: "Lead pool database query" }),
+    ).toBeTruthy();
+
+    await waitFor(() => expect(fetchLeadPool).toHaveBeenCalled());
+    finishLoad?.(emptyPool);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("status", { name: "Loading lead pool" })).toBeNull();
+    });
+  });
+
   it("opens the map when a mapped lead is clicked in the table", async () => {
     vi.mocked(fetchLeadPool).mockResolvedValueOnce({
       ...emptyPool,

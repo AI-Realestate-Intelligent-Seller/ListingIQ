@@ -831,17 +831,20 @@ def _stats(campaign: Campaign, members_count: int, delivered: int, replied: int)
     }
 
 
-def overview(session: Session, user: User) -> list[dict]:
+def overview(session: Session, user: User, progress=None) -> list[dict]:
     """Every campaign this broker owns, newest first, with its counts."""
-    member_counts, delivered, replied = _counts_by_campaign(session, user)
     campaigns = (session.query(Campaign)
                  .filter(Campaign.user_id.in_(brokerage_user_ids(session, user)))
                  .order_by(Campaign.created_at.desc(), Campaign.id.desc())
                  .all())
+    total = len(campaigns)
+    if progress:
+        progress(total, 0)
+    member_counts, delivered, replied = _counts_by_campaign(session, user)
     owners = {owner.id: owner for owner in session.query(User).filter(
         User.id.in_({campaign.user_id for campaign in campaigns})).all()} if campaigns else {}
     rows = []
-    for campaign in campaigns:
+    for loaded, campaign in enumerate(campaigns, start=1):
         stats = _stats(campaign, member_counts.get(campaign.id, 0),
                        delivered.get(campaign.id, 0), replied.get(campaign.id, 0))
         owner = owners.get(campaign.user_id)
@@ -852,6 +855,8 @@ def overview(session: Session, user: User) -> list[dict]:
             broker_role=owner.role if owner else None,
         )
         rows.append(stats)
+        if progress:
+            progress(total, loaded)
     return rows
 
 

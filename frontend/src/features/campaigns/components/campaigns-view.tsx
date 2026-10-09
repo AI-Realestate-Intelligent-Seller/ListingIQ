@@ -5,11 +5,13 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { ConfirmDialog, type ConfirmRequest } from "@/components/dialog/confirm-dialog";
+import { RetrievalProgress } from "@/components/loading/retrieval-progress";
+import type { QueryProgress } from "@/lib/api/query-progress";
 import { readAuthSession } from "@/features/auth/lib/auth-storage";
 import { endSession } from "@/features/auth/lib/session-guard";
 import { ApiRequestError } from "@/lib/api/http-client";
 
-import { deleteCampaign, fetchCampaign, listCampaigns } from "../api/campaigns-api";
+import { deleteCampaign, fetchCampaign, listCampaignsWithProgress } from "../api/campaigns-api";
 import type { Campaign, CampaignDetail } from "../types/campaigns.types";
 import { CampaignComposer } from "./campaign-composer";
 import { NotificationBell } from "@/features/dashboard/components/notification-bell";
@@ -60,6 +62,7 @@ export function CampaignsView({
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [open, setOpen] = useState<CampaignDetail | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadProgress, setLoadProgress] = useState<QueryProgress<Campaign[]> | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [notice, setNotice] = useState("");
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
@@ -88,12 +91,12 @@ export function CampaignsView({
     async (signal?: AbortSignal) => {
       if (!token) return;
       try {
-        setCampaigns(await listCampaigns(token, signal));
+        setCampaigns(await listCampaignsWithProgress(token, setLoadProgress, signal));
         setErrorMessage("");
       } catch (error) {
         handleApiError(error, "Could not load your campaigns.");
       } finally {
-        setIsLoading(false);
+        if (!signal?.aborted) setIsLoading(false);
       }
     },
     [token, handleApiError],
@@ -204,7 +207,18 @@ export function CampaignsView({
 
       {notice ? <p className="campaigns-notice" role="status">{notice}</p> : null}
       {errorMessage ? <p className="sms-error" role="alert">{errorMessage}</p> : null}
-      {isLoading ? <p className="sms-muted">Loading…</p> : null}
+      {isLoading ? (
+        <RetrievalProgress
+          eyebrow="CAMPAIGNS"
+          title="Retrieving campaigns"
+          description="Preparing your campaign activity and results."
+          status="Fetching campaigns for you"
+          detail="Loading drafts, recipients, and performance totals"
+          ariaLabel="Loading campaigns"
+          progress={loadProgress}
+          progressUnit="campaigns"
+        />
+      ) : null}
 
       <div className="campaigns-scroll-area">
       {sent.length > 0 ? (

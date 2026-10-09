@@ -6,12 +6,14 @@ or send another's. The lead pool decides *who* is contacted; this module owns
 *what they are sent* and *how it went*.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from ..db import SessionLocal
 from ..leads import campaign as campaign_service
 from ..logger import get_logger
 from ..models import User
+from .. import query_progress
 from ..schemas import (
     CampaignDetail,
     CampaignDraftRequest,
@@ -48,6 +50,41 @@ def list_campaigns(current_user: User = Depends(get_current_user),
     """Every campaign with its delivered / replied / no-reply counts."""
     _require_access(current_user)
     return campaign_service.overview(session, current_user)
+
+
+def _load_campaigns_job(job_id: str, user_id: int) -> None:
+    session = SessionLocal()
+    try:
+        user = session.get(User, user_id)
+        if user is None:
+            raise LookupError('The account no longer exists.')
+        rows = campaign_service.overview(
+            session,
+            user,
+            progress=lambda total, loaded: query_progress.update(
+                job_id, total=total, loaded=loaded,
+            ),
+        )
+        query_progress.complete(job_id, rows, total=len(rows))
+    except Exception as error:  # noqa: BLE001 - the job must report every failure
+        query_progress.fail(job_id, error)
+    finally:
+        session.close()
+
+
+@router.post('/load', status_code=202)
+def start_campaign_load(
+    background: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+):
+    """Start a counted campaign query whose progress is held in Redis."""
+    _require_access(current_user)
+    try:
+        job = query_progress.create(current_user.id, 'campaigns')
+    except query_progress.ProgressStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error))
+    background.add_task(_load_campaigns_job, job['job_id'], current_user.id)
+    return {'job_id': job['job_id']}
 
 
 @router.post('/draft', response_model=CampaignDraftResult)

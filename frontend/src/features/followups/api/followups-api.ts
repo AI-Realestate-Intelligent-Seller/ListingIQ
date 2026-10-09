@@ -1,4 +1,5 @@
 import { getJson, patchJson, postJson } from "@/lib/api/http-client";
+import { loadQueryWithProgress, type QueryProgress } from "@/lib/api/query-progress";
 import type { LeadStatus } from "@/features/sms/types/sms.types";
 
 import type {
@@ -23,10 +24,21 @@ export function listFollowUps(
   state?: FollowUpState,
   signal?: AbortSignal,
   campaignId?: number,
+  onProgress?: (progress: QueryProgress<FollowUp[]>) => void,
 ): Promise<FollowUp[]> {
   const query = new URLSearchParams({ scope });
   if (state) query.set("state", state);
   if (campaignId !== undefined) query.set("campaign_id", String(campaignId));
+  if (onProgress) {
+    return loadQueryWithProgress({
+      startPath: `${FOLLOWUPS}/load?${query}`,
+      fallback: () => getJson<FollowUp[]>(`${FOLLOWUPS}?${query}`, accessToken, signal),
+      accessToken,
+      signal,
+      onProgress,
+      fetchResultAfterCompletion: true,
+    });
+  }
   return getJson<FollowUp[]>(`${FOLLOWUPS}?${query}`, accessToken, signal);
 }
 

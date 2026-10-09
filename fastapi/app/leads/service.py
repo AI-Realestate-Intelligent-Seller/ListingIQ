@@ -404,7 +404,7 @@ def list_leads(session: Session, user: User, search: str = '', signals: list[str
                south: float | None = None, east: float | None = None,
                west: float | None = None,
                polygon: list[tuple[float, float]] | None = None,
-               addresses: list[str] | None = None) -> list[dict]:
+               addresses: list[str] | None = None, progress=None) -> list[dict]:
     """The brokerage's leads, filtered by text, signals, stage and location.
 
     Signal, stage and location filters run in Python: signals are a packed
@@ -443,6 +443,10 @@ def list_leads(session: Session, user: User, search: str = '', signals: list[str
         )
     now = datetime.utcnow()
     rows = query.order_by(Lead.score.desc(), Lead.id.desc()).all()
+    total = len(rows)
+    progress_step = max(total // 100, 1)
+    if progress:
+        progress(total, 0)
     wanted = {key for key in (signals or []) if key}
     want_states = {key for key in (states or []) if key}
     want_cities = {key for key in (cities or []) if key}
@@ -458,7 +462,9 @@ def list_leads(session: Session, user: User, search: str = '', signals: list[str
         city_zips = _zips_for_cities(locations, want_cities, city_states)
 
     result = []
-    for lead in rows:
+    for index, lead in enumerate(rows, start=1):
+        if progress and (index == 1 or (index - 1) % progress_step == 0):
+            progress(total, index - 1)
         if (polygon and not _point_in_polygon(
                 float(lead.latitude), float(lead.longitude), polygon)):
             continue
@@ -478,6 +484,8 @@ def list_leads(session: Session, user: User, search: str = '', signals: list[str
         if stage and item['stage'] != stage:
             continue
         result.append(item)
+    if progress:
+        progress(total, total)
     return result
 
 

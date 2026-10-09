@@ -20,6 +20,7 @@ from .routes import (
     messages,
     platform_admin,
     propertyradar,
+    query_progress,
     sms,
     team,
     webhooks,
@@ -92,6 +93,7 @@ app.include_router(sms.router, prefix="/api/v1/sms", tags=["sms"])
 app.include_router(leads.router, prefix="/api/v1/leads", tags=["leads"])
 app.include_router(followups.router, prefix="/api/v1/followups", tags=["followups"])
 app.include_router(campaigns.router, prefix="/api/v1/campaigns", tags=["campaigns"])
+app.include_router(query_progress.router, prefix="/api/v1/query-progress", tags=["query-progress"])
 app.include_router(
     assignments.router, prefix="/api/v1/assignments", tags=["assignments"]
 )

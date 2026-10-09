@@ -15,9 +15,11 @@ either.
 from collections import defaultdict
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from .. import query_progress
+from ..db import SessionLocal
 from ..leads import address as address_key
 from ..leads.catalog import signal_label
 from ..leads.service import split_signals
@@ -247,6 +249,17 @@ def list_followups(
     board answers "who replied to the campaign I sent on Tuesday".
     """
     _require_access(current_user)
+    return _followups_payload(session, current_user, state, campaign_id, scope)
+
+
+def _followups_payload(
+    session: Session,
+    current_user: User,
+    state: str | None,
+    campaign_id: int | None,
+    scope: str,
+    progress=None,
+) -> list[dict]:
     if state is not None and state not in FOLLOWUP_STATES:
         raise HTTPException(status_code=400,
                             detail=f"State must be one of: {', '.join(FOLLOWUP_STATES)}.")
@@ -255,6 +268,9 @@ def list_followups(
 
     ids = (_replied_conversation_ids(session, current_user) if scope == 'replied' else
            _visible_conversation_ids(session, current_user))
+    total = len(ids)
+    if progress:
+        progress(total, 0)
     if not ids:
         return []
 
@@ -266,9 +282,12 @@ def list_followups(
     campaign_names = _campaign_names(session, current_user)
     now = datetime.utcnow()
 
-    rows = [_serialize(conversation, messages.get(conversation.id, []),
-                       leads.get(conversation.id, []), now, campaign_names)
-            for conversation in conversations]
+    rows = []
+    for loaded, conversation in enumerate(conversations, start=1):
+        rows.append(_serialize(conversation, messages.get(conversation.id, []),
+                               leads.get(conversation.id, []), now, campaign_names))
+        if progress:
+            progress(total, loaded)
     if campaign_id is not None:
         rows = [row for row in rows if row['campaign_id'] == campaign_id]
     if state is not None:
@@ -279,6 +298,61 @@ def list_followups(
     rows.sort(key=lambda row: (row[sort_field] is not None, row[sort_field] or datetime.min),
               reverse=True)
     return rows
+
+
+def _load_followups_job(
+    job_id: str,
+    user_id: int,
+    state: str | None,
+    campaign_id: int | None,
+    scope: str,
+) -> None:
+    session = SessionLocal()
+    try:
+        user = session.get(User, user_id)
+        if user is None:
+            raise LookupError('The account no longer exists.')
+        _require_access(user)
+        rows = _followups_payload(
+            session,
+            user,
+            state,
+            campaign_id,
+            scope,
+            progress=lambda total, loaded: query_progress.update(
+                job_id, total=total, loaded=loaded,
+            ),
+        )
+        job = query_progress.read(job_id)
+        query_progress.complete(job_id, rows, total=int(job['total']) if job else len(rows))
+    except Exception as error:  # noqa: BLE001 - the job must report every failure
+        query_progress.fail(job_id, error)
+    finally:
+        session.close()
+
+
+@router.post('/load', status_code=202)
+def start_followups_load(
+    background: BackgroundTasks,
+    state: str | None = Query(None),
+    campaign_id: int | None = Query(None),
+    scope: str = Query('replied'),
+    current_user: User = Depends(get_current_user),
+):
+    _require_access(current_user)
+    if state is not None and state not in FOLLOWUP_STATES:
+        raise HTTPException(status_code=400,
+                            detail=f"State must be one of: {', '.join(FOLLOWUP_STATES)}.")
+    if scope not in {'replied', 'all'}:
+        raise HTTPException(status_code=400, detail="Scope must be one of: replied, all.")
+    try:
+        job = query_progress.create(current_user.id, 'followups')
+    except query_progress.ProgressStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error))
+    background.add_task(
+        _load_followups_job, job['job_id'], current_user.id, state, campaign_id, scope,
+    )
+    return {'job_id': job['job_id']}
 
 
 @router.get('/{conversation_id}', response_model=FollowUpOut)

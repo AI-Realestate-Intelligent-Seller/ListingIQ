@@ -1,4 +1,5 @@
 import { getJson, postFile, postForm, postJson } from "@/lib/api/http-client";
+import { loadQueryWithProgress, type QueryProgress } from "@/lib/api/query-progress";
 
 import type {
   ImportPreview,
@@ -11,11 +12,7 @@ import type {
 
 const LEADS = "/leads";
 
-export function fetchLeadPool(
-  query: LeadQuery,
-  accessToken: string,
-  signal?: AbortSignal,
-): Promise<LeadPoolResponse> {
+function leadPoolQuery(query: LeadQuery): string {
   const params = new URLSearchParams();
   if (query.search) params.set("search", query.search);
   for (const value of query.addresses ?? []) params.append("address", value);
@@ -36,7 +33,29 @@ export function fetchLeadPool(
     params.set("polygon", JSON.stringify(query.polygon));
   }
 
-  const suffix = params.toString();
+  return params.toString();
+}
+
+export function fetchLeadPool(
+  query: LeadQuery,
+  accessToken: string,
+  signal?: AbortSignal,
+  onProgress?: (progress: QueryProgress<LeadPoolResponse>) => void,
+): Promise<LeadPoolResponse> {
+  const suffix = leadPoolQuery(query);
+  if (onProgress) {
+    return loadQueryWithProgress({
+      startPath: `${LEADS}/load${suffix ? `?${suffix}` : ""}`,
+      fallback: () => getJson<LeadPoolResponse>(
+        `${LEADS}${suffix ? `?${suffix}` : ""}`,
+        accessToken,
+        signal,
+      ),
+      accessToken,
+      signal,
+      onProgress,
+    });
+  }
   return getJson<LeadPoolResponse>(`${LEADS}${suffix ? `?${suffix}` : ""}`, accessToken, signal);
 }
 

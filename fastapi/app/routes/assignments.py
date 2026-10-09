@@ -3,14 +3,16 @@
 import json
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..core.email import EmailDeliveryError, send_lead_assigned_email
+from ..db import SessionLocal
 from ..leads import events as lead_events
 from ..leads.response_analytics import get_agent_response_analytics
 from ..leads.service import serialize
 from ..models import Booking, Campaign, Conversation, Lead, Message, User
+from .. import query_progress
 from ..reminder.notification import notify_user
 from ..schemas import LeadAssignmentRequest, LeadAssignmentStageRequest
 from .auth import get_current_user, get_db
@@ -118,25 +120,73 @@ def _serialize_assignment(session: Session, lead: Lead,
     return item
 
 
+def _assignment_payload(session: Session, current_user: User, progress=None) -> dict:
+    agents = _linked_agents(session, current_user)
+    leads = _replied_leads(session, current_user)
+    total = len(leads)
+    if progress:
+        progress(total, 0)
+    # One lookup for every campaign name; a lead may point at a deleted campaign.
+    campaign_ids = {lead.campaign_id for lead in leads if lead.campaign_id}
+    campaign_names = dict(session.query(Campaign.id, Campaign.name)
+                          .filter(Campaign.id.in_(campaign_ids)).all()) if campaign_ids else {}
+    serialized = []
+    for loaded, lead in enumerate(leads, start=1):
+        serialized.append(_serialize_assignment(session, lead, campaign_names))
+        if progress:
+            progress(total, loaded)
+    return {
+        'leads': serialized,
+        'agents': [
+            {'id': agent.id, 'full_name': agent.full_name, 'email': agent.email}
+            for agent in agents
+        ],
+    }
+
+
 @router.get('')
 def list_assignments(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
 ):
     _require_broker(current_user)
-    agents = _linked_agents(session, current_user)
-    leads = _replied_leads(session, current_user)
-    # One lookup for every campaign name; a lead may point at a deleted campaign.
-    campaign_ids = {lead.campaign_id for lead in leads if lead.campaign_id}
-    campaign_names = dict(session.query(Campaign.id, Campaign.name)
-                          .filter(Campaign.id.in_(campaign_ids)).all()) if campaign_ids else {}
-    return {
-        'leads': [_serialize_assignment(session, lead, campaign_names) for lead in leads],
-        'agents': [
-            {'id': agent.id, 'full_name': agent.full_name, 'email': agent.email}
-            for agent in agents
-        ],
-    }
+    return _assignment_payload(session, current_user)
+
+
+def _load_assignments_job(job_id: str, user_id: int) -> None:
+    session = SessionLocal()
+    try:
+        user = session.get(User, user_id)
+        if user is None:
+            raise LookupError('The account no longer exists.')
+        _require_broker(user)
+        payload = _assignment_payload(
+            session,
+            user,
+            progress=lambda total, loaded: query_progress.update(
+                job_id, total=total, loaded=loaded,
+            ),
+        )
+        query_progress.complete(job_id, payload, total=len(payload['leads']))
+    except Exception as error:  # noqa: BLE001 - the job must report every failure
+        query_progress.fail(job_id, error)
+    finally:
+        session.close()
+
+
+@router.post('/load', status_code=202)
+def start_assignments_load(
+    background: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+):
+    """Start a counted broker-assignment query backed by Redis progress."""
+    _require_broker(current_user)
+    try:
+        job = query_progress.create(current_user.id, 'assignments')
+    except query_progress.ProgressStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error))
+    background.add_task(_load_assignments_job, job['job_id'], current_user.id)
+    return {'job_id': job['job_id']}
 
 
 @router.get('/overview')
@@ -146,16 +196,27 @@ def broker_overview(
 ):
     """Campaign, assignment, and booking metrics for an Area Broker."""
     _require_broker(current_user)
+    return _broker_overview_payload(session, current_user)
+
+
+def _broker_overview_payload(session: Session, current_user: User, progress=None) -> dict:
+    total = 5
     campaigns = session.query(Campaign).filter(Campaign.user_id == current_user.id).all()
+    if progress:
+        progress(total, 1)
     sent_campaign_ids = [campaign.id for campaign in campaigns if campaign.status == 'sent']
     campaign_leads = ([] if not sent_campaign_ids else
                       session.query(Lead).filter(
                           Lead.user_id == current_user.id,
                           Lead.campaign_id.in_(sent_campaign_ids),
                       ).all())
+    if progress:
+        progress(total, 2)
     conversation_ids = [lead.conversation_id for lead in campaign_leads if lead.conversation_id]
     conversations = ([] if not conversation_ids else
                      session.query(Conversation).filter(Conversation.id.in_(conversation_ids)).all())
+    if progress:
+        progress(total, 3)
     matured_conversation_ids = {
         conversation.id for conversation in conversations
         if conversation.lead_status in ('interested', 'ready_to_sell') or conversation.meeting_booked
@@ -165,12 +226,16 @@ def broker_overview(
         Lead.user_id == current_user.id,
         Lead.assigned_agent_id.isnot(None),
     ).all()
+    if progress:
+        progress(total, 4)
     in_progress = sum(1 for lead in assigned if _assignment_stage(lead) in IN_PROGRESS_STAGES)
     completed = sum(1 for lead in assigned if _assignment_stage(lead) in COMPLETED_STAGES)
     booked = session.query(Conversation).filter(
         Conversation.user_id == current_user.id,
         Conversation.meeting_booked.is_(True),
     ).count()
+    if progress:
+        progress(total, 5)
 
     return {
         'campaigns_started': len(campaigns),
@@ -185,6 +250,42 @@ def broker_overview(
         'total_completed': completed,
         'total_booked': booked,
     }
+
+
+def _load_broker_overview_job(job_id: str, user_id: int) -> None:
+    session = SessionLocal()
+    try:
+        user = session.get(User, user_id)
+        if user is None:
+            raise LookupError('The account no longer exists.')
+        _require_broker(user)
+        payload = _broker_overview_payload(
+            session,
+            user,
+            progress=lambda total, loaded: query_progress.update(
+                job_id, total=total, loaded=loaded,
+            ),
+        )
+        query_progress.complete(job_id, payload, total=5)
+    except Exception as error:  # noqa: BLE001 - the job must report every failure
+        query_progress.fail(job_id, error)
+    finally:
+        session.close()
+
+
+@router.post('/overview/load', status_code=202)
+def start_broker_overview_load(
+    background: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+):
+    """Start the five measured query stages used by the broker overview."""
+    _require_broker(current_user)
+    try:
+        job = query_progress.create(current_user.id, 'broker-overview')
+    except query_progress.ProgressStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error))
+    background.add_task(_load_broker_overview_job, job['job_id'], current_user.id)
+    return {'job_id': job['job_id']}
 
 
 @router.get('/mine')

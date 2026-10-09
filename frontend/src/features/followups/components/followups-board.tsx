@@ -22,6 +22,8 @@ import { ApiRequestError } from "@/lib/api/http-client";
 import { LeadDetailDrawer } from "@/features/leads/components/lead-detail-drawer";
 import { LeadTimeline } from "@/features/leads/components/lead-timeline";
 import { NotificationBell } from "@/features/dashboard/components/notification-bell";
+import { RetrievalProgress } from "@/components/loading/retrieval-progress";
+import type { QueryProgress } from "@/lib/api/query-progress";
 
 import { bookAppointment, listFollowUps, setFollowUpStatus, suggestReplies } from "../api/followups-api";
 import type {
@@ -99,6 +101,7 @@ export function FollowUpsBoard({
   );
   const [search, setSearch] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [loadProgress, setLoadProgress] = useState<QueryProgress<FollowUp[]> | null>(null);
   const [isWorking, setIsWorking] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [isSchedulerOpen, setIsSchedulerOpen] = useState(false);
@@ -146,16 +149,18 @@ export function FollowUpsBoard({
   const ideas = drafts !== null && drafts.conversationId === activeId ? drafts : null;
 
   const refreshFollowUps = useCallback(
-    async (signal?: AbortSignal) => {
+    async (signal?: AbortSignal, withProgress = false) => {
       if (!token) return;
       try {
+        const campaignFilter = selectedCampaignId ? Number(selectedCampaignId) : undefined;
         setFollowUps(
           await listFollowUps(
             token,
             followUpScope,
             undefined,
             signal,
-            selectedCampaignId ? Number(selectedCampaignId) : undefined,
+            campaignFilter,
+            withProgress ? setLoadProgress : undefined,
           ),
         );
         setErrorMessage("");
@@ -183,7 +188,7 @@ export function FollowUpsBoard({
   // Initial load.
   useEffect(() => {
     const controller = new AbortController();
-    void refreshFollowUps(controller.signal);
+    void refreshFollowUps(controller.signal, true);
     return () => controller.abort();
   }, [refreshFollowUps]);
 
@@ -490,7 +495,11 @@ useEffect(() => {
               type="button"
               className={scope === "replied" ? "active" : undefined}
               aria-pressed={scope === "replied"}
-              onClick={() => setScope("replied")}
+              onClick={() => {
+                if (scope === "replied") return;
+                setIsLoading(true);
+                setScope("replied");
+              }}
             >
               Replied
             </button>
@@ -498,7 +507,11 @@ useEffect(() => {
               type="button"
               className={scope === "all" ? "active" : undefined}
               aria-pressed={scope === "all"}
-              onClick={() => setScope("all")}
+              onClick={() => {
+                if (scope === "all") return;
+                setIsLoading(true);
+                setScope("all");
+              }}
             >
               All
             </button>
@@ -536,6 +549,7 @@ useEffect(() => {
                       aria-selected={selectedCampaignId === ""}
                       className={selectedCampaignId === "" ? "active" : undefined}
                       onClick={() => {
+                        if (selectedCampaignId !== "") setIsLoading(true);
                         setSelectedCampaignId("");
                         setIsCampaignMenuOpen(false);
                       }}
@@ -553,6 +567,7 @@ useEffect(() => {
                           aria-selected={selected}
                           className={selected ? "active" : undefined}
                           onClick={() => {
+                            if (!selected) setIsLoading(true);
                             setSelectedCampaignId(String(item.id));
                             setIsCampaignMenuOpen(false);
                           }}
@@ -572,7 +587,18 @@ useEffect(() => {
           </div>
 
           <div className="followups-list" role="list">
-            {isLoading ? <p className="sms-muted">Loading…</p> : null}
+            {isLoading ? (
+              <RetrievalProgress
+                eyebrow="FOLLOW-UPS"
+                title="Retrieving follow-ups"
+                description="Finding conversations that need your attention."
+                status="Fetching follow-ups for you"
+                detail="Loading conversations, replies, and campaign filters"
+                ariaLabel="Loading follow-ups"
+                progress={loadProgress}
+                progressUnit="conversations"
+              />
+            ) : null}
             {!isLoading && visible.length === 0 ? (
               <p className="sms-muted">
                 {followUps.length === 0

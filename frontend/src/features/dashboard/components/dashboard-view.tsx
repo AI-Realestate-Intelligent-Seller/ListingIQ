@@ -4,6 +4,8 @@ import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Brand } from "@/components/brand/brand";
+import { RetrievalProgress } from "@/components/loading/retrieval-progress";
+import type { QueryProgress } from "@/lib/api/query-progress";
 import {
   clearAuthSession,
   readAuthSession,
@@ -16,7 +18,7 @@ import { FollowUpsBoard } from "@/features/followups/components/followups-board"
 import { LeadPool } from "@/features/leads/components/lead-pool";
 import { AssignmentsView } from "@/features/assignments/components/assignments-view";
 import { AgentLeadsView } from "@/features/assignments/components/agent-leads-view";
-import { getAgentOverview, getBrokerOverview, getMyBroker } from "@/features/assignments/api/assignments-api";
+import { getAgentOverview, getBrokerOverviewWithProgress, getMyBroker } from "@/features/assignments/api/assignments-api";
 import type { AgentOverview, BrokerOverview } from "@/features/assignments/types/assignments.types";
 import { CalendarContainer } from "@/features/calendar/calendar-container";
 import { NotificationBell} from "./notification-bell";
@@ -204,6 +206,7 @@ export function DashboardView() {
   const [agentOverviewError, setAgentOverviewError] = useState("");
   const [brokerOverview, setBrokerOverview] = useState<BrokerOverview | null>(null);
   const [brokerOverviewError, setBrokerOverviewError] = useState("");
+  const [brokerOverviewProgress, setBrokerOverviewProgress] = useState<QueryProgress<BrokerOverview> | null>(null);
 
   useEffect(() => {
     const session = readAuthSession();
@@ -245,7 +248,7 @@ export function DashboardView() {
     const session = readAuthSession();
     if (!session) return;
     const controller = new AbortController();
-    getBrokerOverview(session.access_token, controller.signal)
+    getBrokerOverviewWithProgress(session.access_token, setBrokerOverviewProgress, controller.signal)
       .then((response) => {
         setBrokerOverview(response);
         setBrokerOverviewError("");
@@ -806,7 +809,16 @@ useEffect(() => {
               </article>
             </div>
           ) : null}
-          {user.role === "hob" && !hobOverview && !hobOverviewError ? <p className="sms-muted">Loading brokerage analytics…</p> : null}
+          {user.role === "hob" && !hobOverview && !hobOverviewError ? (
+            <RetrievalProgress
+              eyebrow="OVERVIEW"
+              title="Retrieving your overview"
+              description="Preparing your latest brokerage activity and performance."
+              status="Fetching your overview"
+              detail="Loading campaigns, leads, appointments, and team activity"
+              ariaLabel="Loading brokerage overview"
+            />
+          ) : null}
           {user.role === "hob" && hobOverviewError ? <p className="sms-toast error" role="alert">{hobOverviewError}</p> : null}
           {user.role === "agent" && agentOverview ? (
             <div className="agent-analytics-grid">
@@ -879,7 +891,16 @@ useEffect(() => {
             </div>
 
           ) : null}
-          {user.role === "agent" && !agentOverview && !agentOverviewError ? <p className="sms-muted">Loading assignment analytics…</p> : null}
+          {user.role === "agent" && !agentOverview && !agentOverviewError ? (
+            <RetrievalProgress
+              eyebrow="OVERVIEW"
+              title="Retrieving your overview"
+              description="Preparing your latest assignments and performance."
+              status="Fetching your overview"
+              detail="Loading assignments, replies, and upcoming appointments"
+              ariaLabel="Loading agent overview"
+            />
+          ) : null}
           {user.role === "agent" && agentOverviewError ? <p className="sms-toast error" role="alert">{agentOverviewError}</p> : null}
           {user.role === "broker" && brokerOverview ? (
             <div className="broker-analytics-grid">
@@ -916,7 +937,18 @@ useEffect(() => {
               </article>
             </div>
           ) : null}
-          {user.role === "broker" && !brokerOverview && !brokerOverviewError ? <p className="sms-muted">Loading broker analytics…</p> : null}
+          {user.role === "broker" && !brokerOverview && !brokerOverviewError ? (
+            <RetrievalProgress
+              eyebrow="OVERVIEW"
+              title="Retrieving your overview"
+              description="Preparing your latest campaign and assignment activity."
+              status="Fetching your overview"
+              detail="Loading campaigns, assignments, and appointment totals"
+              ariaLabel="Loading broker overview"
+              progress={brokerOverviewProgress}
+              progressUnit="data groups"
+            />
+          ) : null}
           {user.role === "broker" && brokerOverviewError ? <p className="sms-toast error" role="alert">{brokerOverviewError}</p> : null}
         </section>
         </>

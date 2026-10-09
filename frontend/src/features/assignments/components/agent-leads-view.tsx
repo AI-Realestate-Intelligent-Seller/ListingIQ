@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { RetrievalProgress } from "@/components/loading/retrieval-progress";
 import { readAuthSession } from "@/features/auth/lib/auth-storage";
 import { listMyAssignedLeads, updateMyLeadStage } from "../api/assignments-api";
 import type { AssignmentLead, AssignmentStage } from "../types/assignments.types";
@@ -49,7 +50,9 @@ export function AgentLeadsView({ focusLeadId = null }: { focusLeadId?: number | 
         if (reason instanceof DOMException && reason.name === "AbortError") return;
         setError(reason instanceof Error ? reason.message : "We could not load your assigned leads.");
       })
-      .finally(() => setIsLoading(false));
+      .finally(() => {
+        if (!controller.signal.aborted) setIsLoading(false);
+      });
     return () => controller.abort();
   }, []);
 
@@ -143,7 +146,16 @@ export function AgentLeadsView({ focusLeadId = null }: { focusLeadId?: number | 
           </div>
         </section>
       ))}
-      {isLoading ? <p className="sms-muted">Loading assigned leads…</p> : null}
+      {isLoading ? (
+        <RetrievalProgress
+          eyebrow="ASSIGNMENTS"
+          title="Retrieving assignments"
+          description="Preparing the leads assigned to you."
+          status="Fetching assignments for you"
+          detail="Loading campaigns, lead details, and current stages"
+          ariaLabel="Loading assignments"
+        />
+      ) : null}
       {!isLoading && !error && focusLeadId !== null && !leads.some((lead) => lead.id === focusLeadId) ? (
         <p role="status">This lead is no longer assigned to you.</p>
       ) : null}

@@ -1,4 +1,5 @@
 import { deleteJson, getJson, patchJson, postJson } from "@/lib/api/http-client";
+import { loadQueryWithProgress, type QueryProgress } from "@/lib/api/query-progress";
 
 import type {
   Campaign,
@@ -13,6 +14,20 @@ const CAMPAIGNS = "/campaigns";
 /** Every campaign with its delivered / replied / no-reply counts. */
 export function listCampaigns(accessToken: string, signal?: AbortSignal): Promise<Campaign[]> {
   return getJson<Campaign[]>(CAMPAIGNS, accessToken, signal);
+}
+
+export function listCampaignsWithProgress(
+  accessToken: string,
+  onProgress: (progress: QueryProgress<Campaign[]>) => void,
+  signal?: AbortSignal,
+): Promise<Campaign[]> {
+  return loadQueryWithProgress({
+    startPath: `${CAMPAIGNS}/load`,
+    fallback: () => listCampaigns(accessToken, signal),
+    accessToken,
+    signal,
+    onProgress,
+  });
 }
 
 export function fetchCampaign(

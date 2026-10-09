@@ -8,7 +8,9 @@ import dynamic from "next/dynamic";
 import { readAuthSession } from "@/features/auth/lib/auth-storage";
 import { endSession } from "@/features/auth/lib/session-guard";
 import { ConfirmDialog, type ConfirmRequest } from "@/components/dialog/confirm-dialog";
+import { RetrievalProgress } from "@/components/loading/retrieval-progress";
 import { ApiRequestError } from "@/lib/api/http-client";
+import type { QueryProgress } from "@/lib/api/query-progress";
 
 import { createCampaignDraft } from "@/features/campaigns/api/campaigns-api";
 import { NotificationBell } from "@/features/dashboard/components/notification-bell";
@@ -191,6 +193,8 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
   const [location, setLocation] = useState<LocationSelection>(NO_LOCATION);
   const [selected, setSelected] = useState<number[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadProgress, setLoadProgress] = useState<QueryProgress<LeadPoolResponse> | null>(null);
+  const [hasLoadedPool, setHasLoadedPool] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   /** The chosen file waiting on the import options, and its dry-run counts. */
   const [pendingFile, setPendingFile] = useState<File | null>(null);
@@ -218,6 +222,7 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
   const fileRef = useRef<HTMLInputElement | null>(null);
   const mapSectionRef = useRef<HTMLDivElement | null>(null);
   const dragDepthRef = useRef(0);
+  const leadPoolRequestRef = useRef(0);
   const router = useRouter();
   const token = useMemo(() => readAuthSession()?.access_token ?? "", []);
 
@@ -250,43 +255,51 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
 
   const refresh = useCallback(
     async (signal?: AbortSignal) => {
-      if (!token) return;
+      const requestId = ++leadPoolRequestRef.current;
+      if (!token) {
+        setIsLoading(false);
+        return;
+      }
+      setIsLoading(true);
       try {
         const stateCode = locationFilter.state ? locationFilter.state.split(",")[1]?.trim() : "";
-        setPool(
-          await fetchLeadPool(
-  {
-    search,
-    addresses: locationFilter.addressQuery ? [locationFilter.addressQuery] : [],
-    signals: activeSignals,
-    stage,
-   states: stateCode
-        ? [stateCode]
-        : [],
-    // For a geocoded place/alias, filter by the canonical ZIP(s) returned by
-    // the resolver. Do not send raw text such as "Brington" as a database city.
-    cities: locationFilter.cityKeys.length > 0
-      ? locationFilter.cityKeys
-      : locationFilter.matches.length === 0 && locationFilter.city
-        ? [locationFilter.city]
-        : [],
-    zips: locationFilter.zips.length > 0
-      ? locationFilter.zips
-      : locationFilter.cityKeys.length > 0 || locationFilter.addressQuery
-        ? []
-        : [...new Set(locationFilter.matches.map((item) => item.zip).filter(Boolean))],
-    bounds: mapBounds ?? undefined,
-    polygon: mapPolygon ?? undefined,
-  },
-  token,
-  signal,
-),
+        const nextPool = await fetchLeadPool(
+          {
+            search,
+            addresses: locationFilter.addressQuery ? [locationFilter.addressQuery] : [],
+            signals: activeSignals,
+            stage,
+            states: stateCode ? [stateCode] : [],
+            // For a geocoded place/alias, filter by the canonical ZIP(s) returned by
+            // the resolver. Do not send raw text such as "Brington" as a database city.
+            cities: locationFilter.cityKeys.length > 0
+              ? locationFilter.cityKeys
+              : locationFilter.matches.length === 0 && locationFilter.city
+                ? [locationFilter.city]
+                : [],
+            zips: locationFilter.zips.length > 0
+              ? locationFilter.zips
+              : locationFilter.cityKeys.length > 0 || locationFilter.addressQuery
+                ? []
+                : [...new Set(locationFilter.matches.map((item) => item.zip).filter(Boolean))],
+            bounds: mapBounds ?? undefined,
+            polygon: mapPolygon ?? undefined,
+          },
+          token,
+          signal,
+          setLoadProgress,
         );
+        if (requestId !== leadPoolRequestRef.current || signal?.aborted) return;
+        setPool(nextPool);
         setErrorMessage("");
       } catch (error) {
+        if (requestId !== leadPoolRequestRef.current) return;
         handleApiError(error, "Could not load the lead pool.");
       } finally {
-        setIsLoading(false);
+        if (requestId === leadPoolRequestRef.current) {
+          setIsLoading(false);
+          setHasLoadedPool(true);
+        }
       }
     },
     [token, search, activeSignals, stage, locationFilter.state, locationFilter.city, locationFilter.cityKeys, locationFilter.addressQuery, locationFilter.zips, locationFilter.matches, mapBounds, mapPolygon, handleApiError],
@@ -298,6 +311,7 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
     const timer = window.setTimeout(() => void refresh(controller.signal), 220);
     return () => {
       window.clearTimeout(timer);
+      leadPoolRequestRef.current += 1;
       controller.abort();
     };
   }, [refresh]);
@@ -1212,7 +1226,27 @@ useEffect(() => {
         </div>
       ) : null}
 
-      <div className="leads-table-wrap">
+      <div
+        className={`leads-table-wrap${isLoading ? " is-loading" : ""}${
+          isLoading && !hasLoadedPool ? " initial-load" : ""
+        }`}
+        aria-busy={isLoading}
+      >
+        {isLoading ? (
+          <RetrievalProgress
+            eyebrow="LEAD POOL"
+            title="Retrieving leads"
+            description="Finding matching leads and preparing your Lead Pool."
+            status="Fetching leads for you"
+            detail={hasLoadedPool
+              ? `${leadsToShow.length.toLocaleString()} current ${leadsToShow.length === 1 ? "lead remains" : "leads remain"} visible`
+              : "Preparing leads, filters, and map totals"}
+            ariaLabel={hasLoadedPool ? "Refreshing lead pool" : "Loading lead pool"}
+            progressLabel="Lead pool database query"
+            progress={loadProgress}
+            progressUnit="records"
+          />
+        ) : null}
         <table className="leads-table">
           <thead>
             <tr>
@@ -1328,7 +1362,6 @@ useEffect(() => {
           </tbody>
         </table>
 
-        {isLoading ? <p className="sms-muted">Loading leads…</p> : null}
         {!isLoading && leadsToShow.length === 0 ? (
           <div className="leads-empty">
             <div aria-hidden="true">◎</div>
