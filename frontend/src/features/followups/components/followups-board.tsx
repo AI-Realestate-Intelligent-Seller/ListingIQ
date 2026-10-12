@@ -626,7 +626,9 @@ useEffect(() => {
                 <span className="followup-card-meta">
                   {[item.property_address, item.area].filter(Boolean).join(" · ") || item.contact}
                 </span>
-                <span className={`followup-reason reason-${item.reason}`}>
+                <span className={`followup-reason reason-${
+                  item.reply_count > 0 ? item.reason : "reply_needed"
+                }`}>
                   {item.reply_count > 0 ? item.reason_label : "Waiting for first reply"}
                 </span>
                 {item.has_multiple_properties ? <span className="followup-multiple-signal">Multiple properties</span> : null}

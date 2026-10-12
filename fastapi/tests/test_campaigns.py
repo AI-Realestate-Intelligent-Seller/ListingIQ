@@ -472,8 +472,57 @@ def test_failed_delivery_is_not_counted_as_waiting_for_a_reply(
     assert recipient['delivery_status'] == 'delivery_failed'
     assert recipient['delivery_failure_reason'] == 'The destination is a landline.'
     assert campaign['delivered'] == 2
-    assert campaign['no_reply'] == 2
+    assert campaign['no_reply'] == 3
     assert campaign['not_sent'] == 1
+
+
+def test_campaign_reporting_counts_unique_property_addresses(session):
+    user = User(email=BROKER_EMAIL, hashed_password='unused', role='broker',
+                brokerage_id='brokerage-1')
+    campaign = Campaign(user=user, name='One property', status='sent')
+    session.add_all([user, campaign])
+    session.flush()
+
+    addresses = (
+        '415 Northview Lane, Hoffman Estates, IL, 60169',
+        '415 Northview Ln, Hoffman Estates IL 60169',
+    )
+    property_key = canonical(addresses[0])
+    conversations = [
+        Conversation(user_id=user.id, contact='+13125550142', property_address=addresses[0]),
+        Conversation(user_id=user.id, contact='+13125559999', property_address=addresses[1]),
+    ]
+    session.add_all(conversations)
+    session.flush()
+    session.add_all([
+        Lead(user_id=user.id, campaign_id=campaign.id, owner_name='Dana Whitfield',
+             phone=conversations[0].contact, property_address=addresses[0]),
+        Lead(user_id=user.id, campaign_id=campaign.id, owner_name='Alex Whitfield',
+             phone=conversations[1].contact, property_address=addresses[1]),
+        Message(conversation_id=conversations[0].id, campaign_id=campaign.id,
+                direction='outbound', event_type='outreach.initial', status='sent',
+                property_key=property_key),
+        Message(conversation_id=conversations[1].id, campaign_id=campaign.id,
+                direction='outbound', event_type='outreach.initial', status='sent',
+                property_key=property_key),
+    ])
+    session.commit()
+
+    # Both phone attempts remain, but the campaign reports one property.
+    members, delivered, replied = campaign_service._counts_by_campaign(session, user)
+    assert members[campaign.id] == 1
+    assert delivered[campaign.id] == 1
+    assert replied.get(campaign.id, 0) == 0
+    assert campaign_service._stats(campaign, members[campaign.id],
+                                   delivered[campaign.id], 0)['no_reply'] == 1
+
+    session.add(Message(conversation_id=conversations[0].id, direction='inbound',
+                        event_type='sms.inbound', status='received', text='Interested'))
+    session.commit()
+    _members, _delivered, replied = campaign_service._counts_by_campaign(session, user)
+    assert replied[campaign.id] == 1
+    assert campaign_service._stats(campaign, members[campaign.id],
+                                   delivered[campaign.id], replied[campaign.id])['no_reply'] == 0
 
 
 def test_follow_ups_can_be_filtered_to_one_campaign(

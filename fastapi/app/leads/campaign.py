@@ -763,17 +763,25 @@ def launch(session: Session, user: User, lead_ids: list[int], reason: str = '') 
 
 
 def _counts_by_campaign(session: Session, user: User) -> tuple[dict, dict, dict]:
-    """Members, outreach delivered, and outreach that got a reply.
+    """Properties selected, reached, and replied for each campaign.
 
-    Delivery is counted per outreach message rather than per thread. One thread
-    can carry outreach from two campaigns — a landlord with two listings — and
-    counting threads would credit one campaign and lose the other.
+    Campaign reporting is property-based: two contact numbers for the same
+    canonical address are one lead in the overview. Messages still remain
+    separate delivery attempts, and one thread can still carry different
+    properties from different campaigns.
     """
     scope = brokerage_user_ids(session, user)
-    member_counts = dict(session.query(Lead.campaign_id, func.count(Lead.id))
-                         .filter(Lead.user_id.in_(scope), Lead.campaign_id.isnot(None))
-                         .group_by(Lead.campaign_id)
-                         .all())
+    member_properties: dict[int, set[str]] = {}
+    member_rows = (session.query(Lead.id, Lead.campaign_id, Lead.property_address)
+                   .filter(Lead.user_id.in_(scope), Lead.campaign_id.isnot(None))
+                   .all())
+    for lead_id, campaign_id, property_address in member_rows:
+        property_key = address_key.canonical(property_address) or f'__lead_{lead_id}'
+        member_properties.setdefault(campaign_id, set()).add(property_key)
+    member_counts = {
+        campaign_id: len(properties)
+        for campaign_id, properties in member_properties.items()
+    }
 
     # Pending/sent messages count as reached until a final failure arrives.
     # A carrier-rejected message must not remain in "delivered" or "no reply".
@@ -781,14 +789,21 @@ def _counts_by_campaign(session: Session, user: User) -> tuple[dict, dict, dict]
         'failed', 'gw_timeout', 'dlr_timeout', 'delivery_failed',
         'sending_failed', 'delivery_unconfirmed', 'rejected', 'undelivered',
     )
-    delivered = dict(session.query(Message.campaign_id, func.count(Message.id))
-                     .join(Conversation, Conversation.id == Message.conversation_id)
-                     .filter(Message.campaign_id.isnot(None),
-                             Message.event_type == 'outreach.initial',
-                             ~Message.status.in_(failure_statuses),
-                             Conversation.user_id.in_(scope))
-                     .group_by(Message.campaign_id)
-                     .all())
+    delivered_properties: dict[int, set[str]] = {}
+    delivered_rows = (session.query(Message.id, Message.campaign_id, Message.property_key)
+                      .join(Conversation, Conversation.id == Message.conversation_id)
+                      .filter(Message.campaign_id.isnot(None),
+                              Message.event_type == 'outreach.initial',
+                              ~Message.status.in_(failure_statuses),
+                              Conversation.user_id.in_(scope))
+                      .all())
+    for message_id, campaign_id, property_key in delivered_rows:
+        key = property_key or f'__message_{message_id}'
+        delivered_properties.setdefault(campaign_id, set()).add(key)
+    delivered = {
+        campaign_id: len(properties)
+        for campaign_id, properties in delivered_properties.items()
+    }
 
     # Attribute an inbound reply to the most recent campaign outreach in its
     # thread. Crediting every earlier campaign on a shared phone-number thread
@@ -798,15 +813,16 @@ def _counts_by_campaign(session: Session, user: User) -> tuple[dict, dict, dict]
                 .filter(Conversation.user_id.in_(scope))
                 .order_by(Message.conversation_id, Message.created_at, Message.id)
                 .all())
-    latest_campaign: dict[int, int] = {}
-    replied_pairs: set[tuple[int, int]] = set()
+    latest_campaign: dict[int, tuple[int, str]] = {}
+    replied_properties: set[tuple[int, str]] = set()
     for message in timeline:
         if message.event_type == 'outreach.initial' and message.campaign_id is not None:
-            latest_campaign[message.conversation_id] = message.campaign_id
+            property_key = message.property_key or f'__message_{message.id}'
+            latest_campaign[message.conversation_id] = (message.campaign_id, property_key)
         elif message.direction == 'inbound' and message.conversation_id in latest_campaign:
-            replied_pairs.add((latest_campaign[message.conversation_id], message.conversation_id))
+            replied_properties.add(latest_campaign[message.conversation_id])
     replied: dict[int, int] = {}
-    for campaign_id, _conversation_id in replied_pairs:
+    for campaign_id, _property_key in replied_properties:
         replied[campaign_id] = replied.get(campaign_id, 0) + 1
     return member_counts, delivered, replied
 
@@ -823,8 +839,9 @@ def _stats(campaign: Campaign, members_count: int, delivered: int, replied: int)
         'recipients': members_count,
         'delivered': delivered,
         'replied': replied,
-        # Only a thread that actually received the message can be "waiting".
-        'no_reply': max(delivered - replied, 0),
+        # Every selected property that has not replied is shown as "No reply",
+        # including addresses whose phone attempt was rejected by the carrier.
+        'no_reply': max(members_count - replied, 0),
         # Members the send could not reach: no phone, on the DNC list, already
         # in another thread. Zero for a draft, which has not tried yet.
         'not_sent': max(members_count - delivered, 0) if campaign.status == 'sent' else 0,

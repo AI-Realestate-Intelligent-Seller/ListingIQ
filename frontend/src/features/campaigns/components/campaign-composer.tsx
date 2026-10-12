@@ -34,18 +34,6 @@ const TOKEN_ORDER = [
   "agent_name",
 ];
 
-function isDeliveryFailure(status: string | null): boolean {
-  return /fail|reject|undeliver|timeout|unconfirmed/i.test(status ?? "");
-}
-
-function deliveryFailureReason(status: string | null, providerReason: string | null): string {
-  if (providerReason) return providerReason;
-  if (/timeout/i.test(status ?? "")) return "Carrier delivery confirmation timed out.";
-  if (/unconfirmed/i.test(status ?? "")) return "The carrier could not confirm delivery.";
-  if (/sending_failed/i.test(status ?? "")) return "The provider could not send the message.";
-  return "The carrier rejected the destination.";
-}
-
 /**
  * Writes one campaign: its name, its message, and the per-recipient preview of
  * what that message becomes.
@@ -364,7 +352,7 @@ export function CampaignComposer({
       <div className="campaign-people">
         <div className="campaign-people-head">
           <h3>{isSent ? "Who was contacted" : "Who this will reach"}</h3>
-          <span className="sms-count">{recipients.length}</span>
+          <span className="sms-count">{campaign.recipients}</span>
         </div>
 
         {recipients.length === 0 ? (
@@ -408,24 +396,8 @@ export function CampaignComposer({
                     <td className="campaign-message-cell">{item.text}</td>
                     <td>
                       {isSent ? (
-                        <span
-                          className={`campaign-reply-badge${
-                            item.replied
-                              ? " replied"
-                              : isDeliveryFailure(item.delivery_status)
-                                ? " failed"
-                                : ""
-                          }`}
-                          title={item.delivery_failure_reason ?? undefined}
-                        >
-                          {item.replied
-                            ? "Replied"
-                            : isDeliveryFailure(item.delivery_status)
-                              ? `Not delivered — ${deliveryFailureReason(
-                                  item.delivery_status,
-                                  item.delivery_failure_reason,
-                                )}`
-                              : "No reply yet"}
+                        <span className={`campaign-reply-badge${item.replied ? " replied" : ""}`}>
+                          {item.replied ? "Replied" : "No reply Yet"}
                         </span>
                       ) : (
                         <small className={item.is_long ? "campaign-long" : undefined}>

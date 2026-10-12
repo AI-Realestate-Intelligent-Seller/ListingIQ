@@ -38,8 +38,8 @@ function formatDate(value: string | null): string {
 
 /** Reply rate is the number the broker is actually judging a campaign on. */
 function replyRate(campaign: Campaign): string {
-  if (!campaign.delivered) return "—";
-  return `${Math.round((campaign.replied / campaign.delivered) * 100)}%`;
+  if (!campaign.recipients) return "—";
+  return `${Math.round((campaign.replied / campaign.recipients) * 100)}%`;
 }
 
 /** Newest first, with the numeric id as a stable fallback for missing dates. */
@@ -243,17 +243,12 @@ export function CampaignsView({
                   {campaign.recipients === 1 ? "lead" : "leads"} ·{" "}
                   <span className="campaigns-card-status">Active</span>
                 </span>
-                {campaign.not_sent > 0 ? (
-                  <span className="campaigns-card-warning">
-                    {campaign.not_sent} could not be texted
-                  </span>
-                ) : null}
               </button>
 
               <div className="campaigns-card-stats" aria-label={`${campaign.name} performance`}>
                 <span className="campaigns-card-stat">
-                  <b>{campaign.delivered}</b>
-                  <span>Delivered</span>
+                  <b>{campaign.recipients}</b>
+                  <span>Total leads</span>
                 </span>
                 <span className="campaigns-card-stat">
                   <b>{campaign.replied}</b>

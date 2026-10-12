@@ -11,15 +11,15 @@ export type Campaign = {
   status: CampaignStatus;
   sent_at: string | null;
   created_at: string | null;
-  /** Leads held by the campaign, whether or not they could be texted. */
+  /** Unique property addresses held by the campaign. */
   recipients: number;
-  /** Threads the opening message actually went out on. */
+  /** Unique property addresses reached by an opening message. */
   delivered: number;
-  /** Of those, the ones the owner has answered. */
+  /** Of those property addresses, the ones with an owner reply. */
   replied: number;
-  /** Delivered but still silent. */
+  /** Selected property addresses still without a reply. */
   no_reply: number;
-  /** Members the send could not reach — no phone, on the DNC list, already texted. */
+  /** Selected property addresses the send could not reach. */
   not_sent: number;
   broker_id: number | null;
   broker_name: string | null;

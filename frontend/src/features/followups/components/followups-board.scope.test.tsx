@@ -115,7 +115,8 @@ describe("FollowUpsBoard scope filter", () => {
 
     render(<FollowUpsBoard />);
 
-    expect(await screen.findByText("Waiting for first reply")).toBeTruthy();
+    const waitingLabel = await screen.findByText("Waiting for first reply");
+    expect(waitingLabel.classList.contains("reason-reply_needed")).toBe(true);
     expect(screen.queryByText("Not delivered — The destination is a landline.")).toBeNull();
   });
 });
