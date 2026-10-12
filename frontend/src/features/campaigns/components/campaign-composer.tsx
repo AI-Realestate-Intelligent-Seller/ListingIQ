@@ -34,18 +34,6 @@ const TOKEN_ORDER = [
   "agent_name",
 ];
 
-function isDeliveryFailure(status: string | null): boolean {
-  return /fail|reject|undeliver|timeout|unconfirmed/i.test(status ?? "");
-}
-
-function deliveryFailureReason(status: string | null, providerReason: string | null): string {
-  if (providerReason) return providerReason;
-  if (/timeout/i.test(status ?? "")) return "Carrier delivery confirmation timed out.";
-  if (/unconfirmed/i.test(status ?? "")) return "The carrier could not confirm delivery.";
-  if (/sending_failed/i.test(status ?? "")) return "The provider could not send the message.";
-  return "The carrier rejected the destination.";
-}
-
 /**
  * Writes one campaign: its name, its message, and the per-recipient preview of
  * what that message becomes.
@@ -181,6 +169,8 @@ export function CampaignComposer({
     name !== campaign.name ||
     template !== campaign.message_template ||
     reason !== campaign.outreach_reason;
+  // One row per phone number; the send button speaks in properties.
+  const propertyCount = new Set(recipients.map((item) => item.property_id ?? item.lead_id)).size;
   const canSend =
     !isSent && recipients.length > 0 && !preview.template_error && !isSaving && !isDirty;
 
@@ -222,7 +212,7 @@ export function CampaignComposer({
             >
               {isSending
                 ? "Sending…"
-                : `Send to ${recipients.length} ${recipients.length === 1 ? "lead" : "leads"}`}
+                : `Send to ${propertyCount} ${propertyCount === 1 ? "lead" : "leads"}`}
             </button>
           </div>
         ) : null}
@@ -380,7 +370,6 @@ export function CampaignComposer({
                 <tr>
                   <th scope="col">Owner / Property</th>
                   <th scope="col">Signals</th>
-                  <th scope="col" className="leads-numeric">Score</th>
                   <th scope="col">{isSent ? "Message sent" : "Message"}</th>
                   <th scope="col">{isSent ? "Reply" : "Length"}</th>
                   <th scope="col"><span className="sr-only">Actions</span></th>
@@ -404,28 +393,12 @@ export function CampaignComposer({
                         )}
                       </span>
                     </td>
-                    <td className="leads-numeric">{item.score}</td>
                     <td className="campaign-message-cell">{item.text}</td>
                     <td>
                       {isSent ? (
-                        <span
-                          className={`campaign-reply-badge${
-                            item.replied
-                              ? " replied"
-                              : isDeliveryFailure(item.delivery_status)
-                                ? " failed"
-                                : ""
-                          }`}
-                          title={item.delivery_failure_reason ?? undefined}
-                        >
-                          {item.replied
-                            ? "Replied"
-                            : isDeliveryFailure(item.delivery_status)
-                              ? `Not delivered — ${deliveryFailureReason(
-                                  item.delivery_status,
-                                  item.delivery_failure_reason,
-                                )}`
-                              : "No reply yet"}
+                        // Carrier failures are not surfaced here; the broker only needs reply state.
+                        <span className={`campaign-reply-badge${item.replied ? " replied" : ""}`}>
+                          {item.replied ? "Replied" : "No reply yet"}
                         </span>
                       ) : (
                         <small className={item.is_long ? "campaign-long" : undefined}>

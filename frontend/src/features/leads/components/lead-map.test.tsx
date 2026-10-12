@@ -118,7 +118,7 @@ describe("LeadMap", () => {
     );
 
     expect(fakeCluster.zoomToShowLayer).toHaveBeenCalledWith(fakeMarker, expect.any(Function));
-    expect(fakeMap.flyTo).toHaveBeenLastCalledWith({ lat: 41.88, lng: -87.74 }, 16, { duration: 0.5 });
+    expect(fakeMap.flyTo).toHaveBeenLastCalledWith({ lat: 41.88, lng: -87.74 }, 18, { duration: 0.5 });
     expect(fakeMarker.openPopup).toHaveBeenCalled();
     expect(fakeMap.fitBounds).not.toHaveBeenCalled();
 

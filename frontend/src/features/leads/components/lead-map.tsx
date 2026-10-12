@@ -73,7 +73,8 @@ function BoundsReporter({ onChange }: { onChange: (bounds: MapBounds) => void })
 }
 
 
-const FOCUS_ZOOM = 16;
+// Close enough on the satellite imagery to pick out the house itself.
+const FOCUS_ZOOM = 18;
 
 // The subset of Leaflet.markercluster's group API used here (its typings are not installed).
 type ClusterLayer = L.FeatureGroup & {

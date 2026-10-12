@@ -144,6 +144,8 @@ def lead_phone_numbers(lead: Lead) -> list[dict]:
                     row = {'phone': phone, 'dnc': bool(item.get('dnc'))}
                     if item.get('owner_name'):
                         row['owner_name'] = str(item['owner_name'])
+                    if item.get('type'):
+                        row['type'] = str(item['type'])
                     stored.append(row)
 
     if lead.phone and all(row['phone'] != lead.phone for row in stored):
@@ -154,6 +156,63 @@ def lead_phone_numbers(lead: Lead) -> list[dict]:
                 row['dnc'] = bool(row['dnc'] or lead.dnc)
                 break
     return stored
+
+
+def lead_emails(details: dict) -> list[dict]:
+    """Skip-traced email addresses, each tagged with the contact it belongs to."""
+    stored: list[dict] = []
+    contacts = details.get('contacts')
+    for contact in contacts if isinstance(contacts, list) else []:
+        if not isinstance(contact, dict):
+            continue
+        full_name = contact.get('name')
+        name = contact.get('owner_name') or (
+            full_name.get('full') if isinstance(full_name, dict) else None)
+        emails = contact.get('emails')
+        for item in emails if isinstance(emails, list) else []:
+            email = item.get('email') if isinstance(item, dict) else item
+            if not isinstance(email, str) or not email.strip():
+                continue
+            email = email.strip()
+            if all(row['email'].lower() != email.lower() for row in stored):
+                row = {'email': email}
+                if name:
+                    row['owner_name'] = str(name)
+                stored.append(row)
+    return stored
+
+
+def card_facts(details: dict) -> dict:
+    """The home and listing facts a pool card shows, provider data first.
+
+    BatchData leads keep the full provider record; CSV imports only have the
+    flat columns, so each fact falls back to those. Missing facts stay None.
+    """
+    provider = details.get('provider_property_details')
+    provider = provider if isinstance(provider, dict) else {}
+    listing = provider.get('listing') if isinstance(provider.get('listing'), dict) else {}
+    building = provider.get('building') if isinstance(provider.get('building'), dict) else {}
+    valuation = provider.get('valuation') if isinstance(provider.get('valuation'), dict) else {}
+    quick_lists = provider.get('quickLists') if isinstance(provider.get('quickLists'), dict) else {}
+
+    def first(*values):
+        for value in values:
+            if value not in (None, ''):
+                return value
+        return None
+
+    return {
+        'mls_number': first(listing.get('listingNumber'), details.get('mls_number')),
+        'listing_status': first(listing.get('status'), details.get('listing_status')),
+        'home_type': first(listing.get('propertyType'), details.get('property_type')),
+        'beds': first(listing.get('bedroomCount'), building.get('bedroomCount'), details.get('beds')),
+        'baths': first(listing.get('bathroomCount'), building.get('bathroomCount'), details.get('baths')),
+        'living_area_sqft': first(listing.get('livingArea'), building.get('livingAreaSquareFeet'),
+                                  details.get('area_sqft')),
+        'equity_percent': first(valuation.get('equityPercent'), details.get('equity_percent')),
+        # Provider flags behind "Why this lead stands out"; labels live in the UI.
+        'opportunity_flags': [key for key, value in quick_lists.items() if value is True],
+    }
 
 
 def derive_stage(lead: Lead, now: datetime | None = None) -> str:
@@ -199,6 +258,8 @@ def serialize(lead: Lead, now: datetime | None = None) -> dict:
         'estimated_value': detail_value('estimated_value', 'estimatedValue', 'Estimated Value'),
         'listing_price': detail_value('listing_price', 'listingPrice', 'Listing Price'),
         'signals': [{'key': key, 'label': signal_label(key)} for key in signals],
+        **card_facts(details),
+        'emails': lead_emails(details),
         'score': lead.score,
         'outreach_reason': lead.outreach_reason,
         'stage': derive_stage(lead, now),

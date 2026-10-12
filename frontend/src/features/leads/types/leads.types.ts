@@ -11,7 +11,9 @@ export type Lead = {
   id: number;
   owner_name: string | null;
   phone: string | null;
-  phone_numbers: { phone: string; dnc: boolean; owner_name?: string }[];
+  phone_numbers: { phone: string; dnc: boolean; owner_name?: string; type?: string }[];
+  /** Skip-traced emails, tagged with the contact they belong to. */
+  emails?: { email: string; owner_name?: string }[];
   property_address: string | null;
   area: string | null;
   latitude: number | null;
@@ -23,6 +25,16 @@ export type Lead = {
   estimated_value: string | number | null;
   listing_price: string | number | null;
   signals: LeadSignal[];
+  /** Card facts, provider record first. Optional: campaign rows reuse this type. */
+  mls_number?: string | null;
+  listing_status?: string | null;
+  home_type?: string | null;
+  beds?: number | null;
+  baths?: number | null;
+  living_area_sqft?: number | null;
+  equity_percent?: number | null;
+  /** BatchData quickLists keys that are true, e.g. "highEquity". */
+  opportunity_flags?: string[];
   score: number;
   /** The reason shipped with the lead, if the import carried one. */
   outreach_reason: string | null;

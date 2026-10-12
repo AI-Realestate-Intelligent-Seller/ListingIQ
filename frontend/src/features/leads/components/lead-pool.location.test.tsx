@@ -174,7 +174,7 @@ describe("LeadPool dependent location filters", () => {
     });
   });
 
-  it("opens the map when a mapped lead is clicked in the table", async () => {
+  it("opens the map from a mapped lead card's menu", async () => {
     vi.mocked(fetchLeadPool).mockResolvedValueOnce({
       ...emptyPool,
       leads: [{
@@ -205,8 +205,87 @@ describe("LeadPool dependent location filters", () => {
     });
 
     render(<LeadPool />);
-    fireEvent.click(await screen.findByRole("button", { name: "Mapped Owner" }));
+    fireEvent.click(await screen.findByRole("button", { name: "More actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Show on map" }));
     expect(screen.getByRole("button", { name: "Hide map" })).toBeTruthy();
+  });
+
+  it("opens the map when a card's address is clicked", async () => {
+    vi.mocked(fetchLeadPool).mockResolvedValueOnce({
+      ...emptyPool,
+      leads: [{
+        id: 72,
+        owner_name: "Mapped Owner",
+        phone: null,
+        phone_numbers: [],
+        property_address: "6331 S Throop St, Chicago, IL 60636",
+        area: "Chicago",
+        latitude: 41.78,
+        longitude: -87.65,
+        geocoding_status: "success",
+        geocoding_provider: "nominatim",
+        source: "provider_distribution",
+        property_type: null,
+        estimated_value: null,
+        listing_price: null,
+        signals: [],
+        score: 70,
+        outreach_reason: null,
+        stage: "ready",
+        last_activity_at: null,
+        conversation_id: null,
+        created_at: null,
+      }],
+      map: { mappable_count: 1, pending_count: 0, failed_count: 0 },
+      facets: { total: 1, signals: {}, stages: { ready: 1 } },
+    });
+
+    render(<LeadPool />);
+    fireEvent.click(await screen.findByRole("button", { name: "6331 S Throop St" }));
+    expect(screen.getByRole("button", { name: "Hide map" })).toBeTruthy();
+  });
+
+  it("keeps card checkboxes in sync with the bulk-action bar", async () => {
+    const lead = (id: number, owner: string) => ({
+      id,
+      owner_name: owner,
+      phone: null,
+      phone_numbers: [],
+      property_address: `${id} Main St, Chicago, IL, 60601`,
+      area: "Chicago",
+      latitude: null,
+      longitude: null,
+      geocoding_status: "pending" as const,
+      geocoding_provider: null,
+      source: "csv",
+      property_type: null,
+      estimated_value: null,
+      listing_price: null,
+      signals: [],
+      score: 50,
+      outreach_reason: null,
+      stage: "ready" as const,
+      last_activity_at: null,
+      conversation_id: null,
+      created_at: null,
+    });
+    vi.mocked(fetchLeadPool).mockResolvedValueOnce({
+      ...emptyPool,
+      leads: [lead(1, "First Owner"), lead(2, "Second Owner")],
+      facets: { total: 2, signals: {}, stages: { ready: 2 } },
+    });
+
+    render(<LeadPool />);
+    const first = await screen.findByRole("checkbox", { name: "Select lead 1 Main St" });
+    fireEvent.click(first);
+    expect(screen.getByText("1 lead selected")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select all leads shown" }));
+    expect(screen.getByText("2 leads selected")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear selection" }));
+    expect(screen.queryByText(/selected$/)).toBeNull();
+    expect((first as HTMLInputElement).checked).toBe(false);
   });
 
   it("shows only the selected state's cities and ZIP codes after the state changes", async () => {

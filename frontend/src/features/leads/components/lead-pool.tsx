@@ -28,12 +28,14 @@ import type {
   Lead,
   LeadDetail,
   LeadPoolResponse,
-  LeadStage,
   MapBounds,
   MapPoint,
 } from "../types/leads.types";
 import { ImportDialog } from "./import-dialog";
+import { LeadCard, LeadCardSkeleton } from "./lead-card";
+import { toLeadCardLead } from "./lead-card-adapter";
 import { LeadDetailDrawer } from "./lead-detail-drawer";
+import { LeadRowMenu } from "./lead-row-menu";
 import {
   LocationFilter,
   NO_LOCATION,
@@ -70,36 +72,6 @@ const LeadMap = dynamic(
   () => import("./lead-map").then((module) => module.LeadMap),
   { ssr: false, loading: () => <div className="leads-map-loading">Loading map…</div> },
 );
-
-/** Stages carry meaning, so each gets its own colour rather than one grey chip. */
-const STAGE_CLASS: Record<LeadStage, string> = {
-  ready: "ready",
-  in_campaign: "campaign",
-  needs_review: "review",
-  dnc: "dnc",
-};
-
-/** Score bands match the review queue: strong, worth a look, everything else. */
-function scoreClass(score: number): string {
-  if (score >= 80) return "strong";
-  if (score >= 70) return "fair";
-  return "plain";
-}
-
-function relativeTime(value: string | null): string {
-  if (!value) return "Just added";
-  const stamp = new Date(/[Z+]/.test(value) ? value : `${value}Z`);
-  if (Number.isNaN(stamp.getTime())) return "Just added";
-
-  const minutes = Math.round((Date.now() - stamp.getTime()) / 60000);
-  if (minutes < 1) return "Just now";
-  if (minutes < 60) return `${minutes} ${minutes === 1 ? "minute" : "minutes"} ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} ${hours === 1 ? "hour" : "hours"} ago`;
-  const days = Math.round(hours / 24);
-  if (days < 30) return `${days} ${days === 1 ? "day" : "days"} ago`;
-  return stamp.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
-}
 
 type LeadPoolProps = {
   /**
@@ -205,6 +177,8 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
   /** The lead whose details panel is open, or null. */
   const [detailId, setDetailId] = useState<number | null>(null);
+  /** The card whose "More actions" menu is open, and the button it opened from. */
+  const [rowMenu, setRowMenu] = useState<{ leadId: number; anchor: HTMLButtonElement } | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [notice, setNotice] = useState("");
   const [isDraggingFile, setIsDraggingFile] = useState(false);
@@ -374,6 +348,16 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
       current.includes(id) ? current.filter((item) => item !== id) : [...current, id],
     );
   }
+
+  /** The card reports the checkbox's new state with its id as a string. */
+  function setLeadSelected(cardId: string, checked: boolean): void {
+    const id = Number(cardId);
+    setSelected((current) =>
+      checked ? (current.includes(id) ? current : [...current, id]) : current.filter((item) => item !== id),
+    );
+  }
+
+  const closeRowMenu = useCallback(() => setRowMenu(null), []);
 
   function focusLeadOnMap(lead: Lead): void {
     if (lead.latitude == null || lead.longitude == null) {
@@ -972,6 +956,8 @@ useEffect(() => {
 
     const isFiltered = Boolean(stage || activeSignals.length || islocationFiltered || mapBounds || mapPolygon);
   const stageLabels = Object.fromEntries(pool.stage_catalog.map((item) => [item.key, item.label]));
+  // The menu closes on its own when its lead drops out of the results.
+  const rowMenuLead = rowMenu ? leadsToShow.find((lead) => lead.id === rowMenu.leadId) : undefined;
 
   return (
     <section className="leads-pool">
@@ -1116,15 +1102,28 @@ useEffect(() => {
       </div>
 
       <div className="leads-viewbar">
-        <div className="leads-view-toggle" role="group" aria-label="Map visibility">
-          <button
-            type="button"
-            className={showMap ? "on" : undefined}
-            aria-pressed={showMap}
-            onClick={() => setShowMap((visible) => !visible)}
-          >
-            {showMap ? "Hide map" : "Show map"}
-          </button>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="leads-view-toggle" role="group" aria-label="Map visibility">
+            <button
+              type="button"
+              className={showMap ? "on" : undefined}
+              aria-pressed={showMap}
+              onClick={() => setShowMap((visible) => !visible)}
+            >
+              {showMap ? "Hide map" : "Show map"}
+            </button>
+          </div>
+          <label className="flex cursor-pointer items-center gap-2 text-[13px] text-gray-600">
+            <input
+              type="checkbox"
+              checked={allSelected}
+              onChange={toggleAll}
+              disabled={visibleIds.length === 0}
+              aria-label="Select all leads shown"
+              className="h-4 w-4 cursor-pointer accent-(--blue)"
+            />
+            Select all shown
+          </label>
         </div>
         {showMap ? (
           <div className="leads-map-actions">
@@ -1226,12 +1225,7 @@ useEffect(() => {
         </div>
       ) : null}
 
-      <div
-        className={`leads-table-wrap${isLoading ? " is-loading" : ""}${
-          isLoading && !hasLoadedPool ? " initial-load" : ""
-        }`}
-        aria-busy={isLoading}
-      >
+      <div className="relative" aria-busy={isLoading}>
         {isLoading ? (
           <RetrievalProgress
             eyebrow="LEAD POOL"
@@ -1239,7 +1233,7 @@ useEffect(() => {
             description="Finding matching leads and preparing your Lead Pool."
             status="Fetching leads for you"
             detail={hasLoadedPool
-              ? `${leadsToShow.length.toLocaleString()} current ${leadsToShow.length === 1 ? "lead remains" : "leads remain"} visible`
+              ? `Refreshing ${leadsToShow.length.toLocaleString()} current ${leadsToShow.length === 1 ? "lead" : "leads"}`
               : "Preparing leads, filters, and map totals"}
             ariaLabel={hasLoadedPool ? "Refreshing lead pool" : "Loading lead pool"}
             progressLabel="Lead pool database query"
@@ -1247,123 +1241,33 @@ useEffect(() => {
             progressUnit="records"
           />
         ) : null}
-        <table className="leads-table">
-          <thead>
-            <tr>
-              <th scope="col" className="leads-select-cell">
-                <input
-                  type="checkbox"
-                  checked={allSelected}
-                  onChange={toggleAll}
-                  disabled={visibleIds.length === 0}
-                  aria-label="Select all leads shown"
-                />
-              </th>
-              <th scope="col">Owner / Property</th>
-              <th scope="col">Signals</th>
-              <th scope="col" className="leads-numeric leads-score-header">
-                <span>Score</span>
-                <span className="leads-score-help">
-                  <button
-                    type="button"
-                    aria-label="About ListingIQ lead scores"
-                    aria-describedby="leads-score-explanation"
-                  >
-                    ?
-                  </button>
-                  <span id="leads-score-explanation" role="tooltip">
-                    This is ListingIQ’s estimated lead score based on the signals available for this record.
-                  </span>
-                </span>
-              </th>
-              <th scope="col">Stage</th>
-              <th scope="col">Last activity</th>
-              <th scope="col">Source</th>
-              <th scope="col"><span className="sr-only">Actions</span></th>
-            </tr>
-          </thead>
-          <tbody>
-           {leadsToShow.map((lead) => {
-              const isChecked = selected.includes(lead.id);
-              return (
-                <tr
+
+        <div className="flex flex-col gap-2.5">
+          {isLoading
+            ? Array.from({ length: 5 }).map((_, i) => <LeadCardSkeleton key={i} />)
+            : leadsToShow.map((lead) => (
+                // The wrapper carries the map hover link the table rows used to.
+                <div
                   key={lead.id}
-                  className={`${isChecked ? "selected " : ""}${activeFocusId === lead.id ? "map-focused" : ""}`.trim() || undefined}
                   onMouseEnter={() => setHoveredLeadId(lead.id)}
                   onMouseLeave={() => setHoveredLeadId((current) => (current === lead.id ? null : current))}
                 >
-                  <td className="leads-select-cell">
-                    <input
-                      type="checkbox"
-                      checked={isChecked}
-                      onChange={() => toggleLead(lead.id)}
-                      aria-label={`Select ${lead.owner_name || lead.phone || "lead"}`}
-                    />
-                  </td>
-                  <td>
-                    <button
-                      type="button"
-                      className="leads-owner"
-                      onClick={() => focusLeadOnMap(lead)}
-                      title={lead.latitude == null || lead.longitude == null ? "Map location pending" : "Locate this lead on the map"}
-                    >
-                      {lead.owner_name || lead.phone || "Unnamed owner"}
-                    </button>
-                    <span className="leads-address">
-                      {lead.property_address || "No address on file"}
-                      {lead.area ? ` · ${lead.area}` : ""}
-                    </span>
-                  </td>
-                  <td>
-                    <span className="leads-signals">
-                      {lead.signals.length === 0 ? (
-                        <span className="leads-none">—</span>
-                      ) : (
-                        lead.signals.map((signal) => (
-                          <span key={signal.key} className="leads-signal">
-                            {signal.label}
-                          </span>
-                        ))
-                      )}
-                    </span>
-                  </td>
-                  <td className="leads-numeric">
-                    <span className={`leads-score ${scoreClass(lead.score)}`}>{lead.score}</span>
-                  </td>
-                  <td>
-                    <span className={`leads-stage ${STAGE_CLASS[lead.stage]}`}>
-                      {stageLabels[lead.stage] ?? lead.stage}
-                    </span>
-                  </td>
-                  <td className="leads-activity">{relativeTime(lead.last_activity_at)}</td>
-                  <td className="leads-row-actions">
-                    <button
-                      type="button"
-                      className="sms-icon-button"
-                      onClick={() => setDetailId(lead.id)}
-                      aria-label={`View details for ${lead.owner_name || "lead"}`}
-                      title="View property details"
-                    >
-                      ⓘ
-                    </button>
-                    <button
-                      type="button"
-                      className="sms-icon-button"
-                      onClick={() => confirmRemoveOne(lead)}
-                      aria-label={`Remove ${lead.owner_name || "lead"}`}
-                      title="Remove from pool"
-                    >
-                      🗑
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+                  <LeadCard
+                    lead={toLeadCardLead(lead)}
+                    selected={selected.includes(lead.id)}
+                    onSelectedChange={setLeadSelected}
+                    onAddressClick={() => focusLeadOnMap(lead)}
+                    onMore={(_, anchor) =>
+                      setRowMenu((current) => (current?.leadId === lead.id ? null : { leadId: lead.id, anchor }))
+                    }
+                    className={activeFocusId === lead.id ? "ring-2 ring-(--blue)/50" : undefined}
+                  />
+                </div>
+              ))}
+        </div>
 
         {!isLoading && leadsToShow.length === 0 ? (
-          <div className="leads-empty">
+          <div className="leads-empty rounded-xl border border-gray-200 bg-white">
             <div aria-hidden="true">◎</div>
             <h3>{pool.facets.total === 0 ? "No leads yet" : "Nothing matches those filters"}</h3>
             <p>
@@ -1376,6 +1280,26 @@ useEffect(() => {
           </div>
         ) : null}
       </div>
+
+      {rowMenuLead && rowMenu ? (
+        <LeadRowMenu
+          anchor={rowMenu.anchor}
+          onClose={closeRowMenu}
+          items={[
+            { label: "View details", onSelect: () => setDetailId(rowMenuLead.id) },
+            {
+              label: "Show on map",
+              onSelect: () => focusLeadOnMap(rowMenuLead),
+              disabled: rowMenuLead.latitude == null || rowMenuLead.longitude == null,
+              title:
+                rowMenuLead.latitude == null || rowMenuLead.longitude == null
+                  ? "Map location pending"
+                  : undefined,
+            },
+            { label: "Remove from pool", tone: "danger", onSelect: () => confirmRemoveOne(rowMenuLead) },
+          ]}
+        />
+      ) : null}
 
       {errorMessage ? (
         <div className="sms-toast error leads-error-toast" role="alert">

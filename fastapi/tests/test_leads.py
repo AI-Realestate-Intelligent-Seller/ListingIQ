@@ -1301,3 +1301,59 @@ def test_a_large_import_is_written_in_batches(client, make_user, auth_header):
         f'Owner {n},+1312{n:07d},{n} Test Ave,fsbo\n' for n in range(2500))
     assert upload(client, headers, text).json()['created'] == 2500
     assert client.get(LEADS_URL, headers=headers).json()['facets']['total'] == 2500
+
+
+def test_serialize_carries_the_provider_facts_a_pool_card_shows():
+    details = {
+        'estimated_value': 570000,
+        'property_type': 'Apartments',
+        'provider_property_details': {
+            'listing': {
+                'listingNumber': '12349610', 'status': 'Pending', 'propertyType': 'MULTI_FAMILY',
+                'bedroomCount': 9, 'bathroomCount': 6, 'livingArea': 3366,
+            },
+            'building': {'bedroomCount': 9, 'bathroomCount': 4},
+            'valuation': {'equityPercent': 25.1},
+            'quickLists': {'highEquity': True, 'preforeclosure': True, 'vacant': False},
+        },
+        'contacts': [{
+            'owner_name': 'Lajuan P Freeman',
+            'emails': [{'email': 'one@example.com'}, {'email': 'ONE@example.com'}, 'two@example.com'],
+        }],
+        '_phone_numbers': [
+            {'phone': '+13125550101', 'dnc': True, 'type': 'Mobile', 'owner_name': 'Lajuan P Freeman'},
+        ],
+    }
+    lead = Lead(owner_name='Maita San', phone='+13125550101', signals='pre_foreclosure',
+                details=json.dumps(details), score=0)
+
+    item = leads_service.serialize(lead)
+
+    assert item['mls_number'] == '12349610'
+    assert item['listing_status'] == 'Pending'
+    # The listing's own home facts win over the building record and the flat import columns.
+    assert (item['home_type'], item['beds'], item['baths'], item['living_area_sqft']) == (
+        'MULTI_FAMILY', 9, 6, 3366)
+    assert item['equity_percent'] == 25.1
+    assert item['opportunity_flags'] == ['highEquity', 'preforeclosure']
+    assert item['phone_numbers'] == [
+        {'phone': '+13125550101', 'dnc': True, 'owner_name': 'Lajuan P Freeman', 'type': 'Mobile'},
+    ]
+    assert item['emails'] == [
+        {'email': 'one@example.com', 'owner_name': 'Lajuan P Freeman'},
+        {'email': 'two@example.com', 'owner_name': 'Lajuan P Freeman'},
+    ]
+
+
+def test_serialize_falls_back_to_import_columns_without_provider_data():
+    lead = Lead(owner_name='Ana Diaz', phone=None, score=0,
+                details=json.dumps({'beds': 3, 'baths': 2, 'area_sqft': 1500,
+                                    'property_type': 'Single family'}))
+
+    item = leads_service.serialize(lead)
+
+    assert (item['home_type'], item['beds'], item['baths'], item['living_area_sqft']) == (
+        'Single family', 3, 2, 1500)
+    assert item['mls_number'] is None
+    assert item['opportunity_flags'] == []
+    assert item['emails'] == []

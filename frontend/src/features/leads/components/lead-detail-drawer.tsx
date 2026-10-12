@@ -5,6 +5,7 @@ import dynamic from "next/dynamic";
 
 import { fetchLead } from "../api/leads-api";
 import type { LeadDetail, LeadStage } from "../types/leads.types";
+import { QUICK_LIST_LABELS } from "./opportunity-signals";
 
 const PropertySatelliteMap = dynamic(
   () => import("./property-satellite-map").then((module) => module.PropertySatelliteMap),
@@ -208,35 +209,6 @@ function safeWebUrl(value: unknown): string | null {
     return null;
   }
 }
-
-const QUICK_LIST_LABELS: Record<string, string> = {
-  activeAuction: "Active auction",
-  activeListing: "Actively listed",
-  cashBuyer: "Cash buyer",
-  corporateOwned: "Corporate owned",
-  expiredListing: "Expired listing",
-  failedListing: "Failed listing",
-  fixAndFlip: "Fix & flip",
-  forSaleByOwner: "For sale by owner",
-  freeAndClear: "Free & clear",
-  highEquity: "High equity",
-  inherited: "Inherited property",
-  listedBelowMarketPrice: "Below market price",
-  noticeOfDefault: "Notice of default",
-  noticeOfLisPendens: "Lis pendens filed",
-  noticeOfSale: "Notice of sale",
-  onMarket: "On market",
-  outOfStateOwner: "Out-of-state owner",
-  ownerOccupied: "Owner occupied",
-  pendingListing: "Pending listing",
-  preforeclosure: "Pre-foreclosure",
-  recentlySold: "Recently sold",
-  taxDefault: "Tax default",
-  tiredLandlord: "Tired landlord",
-  trustOwned: "Trust owned",
-  vacant: "Vacant",
-  vacantLot: "Vacant lot",
-};
 
 function positiveQuickLists(value: unknown): { key: string; label: string }[] {
   return Object.entries(objectValue(value))

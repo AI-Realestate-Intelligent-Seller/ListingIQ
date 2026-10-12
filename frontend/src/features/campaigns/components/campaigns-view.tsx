@@ -243,11 +243,6 @@ export function CampaignsView({
                   {campaign.recipients === 1 ? "lead" : "leads"} ·{" "}
                   <span className="campaigns-card-status">Active</span>
                 </span>
-                {campaign.not_sent > 0 ? (
-                  <span className="campaigns-card-warning">
-                    {campaign.not_sent} could not be texted
-                  </span>
-                ) : null}
               </button>
 
               <div className="campaigns-card-stats" aria-label={`${campaign.name} performance`}>

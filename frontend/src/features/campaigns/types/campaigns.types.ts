@@ -11,13 +11,13 @@ export type Campaign = {
   status: CampaignStatus;
   sent_at: string | null;
   created_at: string | null;
-  /** Leads held by the campaign, whether or not they could be texted. */
+  /** Properties held by the campaign — one per address, however many numbers it has. */
   recipients: number;
-  /** Threads the opening message actually went out on. */
+  /** Properties where at least one number received the opening message. */
   delivered: number;
-  /** Of those, the ones the owner has answered. */
+  /** Of those, the properties where any number answered. */
   replied: number;
-  /** Delivered but still silent. */
+  /** Delivered properties still silent. */
   no_reply: number;
   /** Members the send could not reach — no phone, on the DNC list, already texted. */
   not_sent: number;
@@ -30,6 +30,8 @@ export type Campaign = {
 /** One recipient of a draft, with the message they would actually receive. */
 export type CampaignRecipient = {
   lead_id: number;
+  /** The property this row's number belongs to; shared by every number at one address. */
+  property_id?: number;
   owner_name: string | null;
   phone: string | null;
   property_address: string | null;

@@ -1189,3 +1189,52 @@ def test_the_campaign_table_carries_what_the_pool_table_showed(
         assert row['area'] == was['area']
         assert row['score'] == was['score']
         assert [s['label'] for s in row['signals']] == [s['label'] for s in was['signals']]
+
+
+def test_campaign_counts_properties_not_phone_numbers(make_user, session):
+    owner = make_user(BROKER_EMAIL, role='broker')
+    user = session.get(User, owner.id)
+    campaign = Campaign(user_id=user.id, name='Expired', status='sent')
+    session.add(campaign)
+    session.commit()
+
+    def thread(phone, *, failed=False, reply=False):
+        conversation = Conversation(contact=phone, user_id=user.id)
+        session.add(conversation)
+        session.flush()
+        session.add(Message(conversation_id=conversation.id, campaign_id=campaign.id,
+                            direction='outbound', event_type='outreach.initial',
+                            status='failed' if failed else 'delivered', text='Hi'))
+        if reply:
+            session.add(Message(conversation_id=conversation.id, direction='inbound',
+                                event_type='inbound', status='received', text='Yes'))
+        return conversation.id
+
+    # One property split into three numbers: one failed, one delivered, one replied.
+    parent = Lead(user_id=user.id, campaign_id=campaign.id, phone='+13125550101',
+                  property_address='1 Main St', conversation_id=thread('+13125550101', failed=True))
+    session.add(parent)
+    session.flush()
+    for phone, reply in (('+13125550102', False), ('+13125550103', True)):
+        session.add(Lead(user_id=user.id, campaign_id=campaign.id, phone=phone,
+                         property_address='1 Main St', conversation_id=thread(phone, reply=reply),
+                         details=json.dumps({'_parent_lead_id': parent.id})))
+    # A second property whose only number was rejected.
+    session.add(Lead(user_id=user.id, campaign_id=campaign.id, phone='+13125550201',
+                     property_address='2 Main St', conversation_id=thread('+13125550201', failed=True)))
+    session.commit()
+
+    members, delivered, replied = campaign_service._counts_by_campaign(session, user)
+    stats = campaign_service._stats(campaign, members[campaign.id], delivered.get(campaign.id, 0),
+                                    replied.get(campaign.id, 0))
+
+    assert (stats['recipients'], stats['delivered'], stats['replied'], stats['no_reply']) == (2, 1, 1, 0)
+
+
+def test_preview_rows_from_one_property_share_its_property_id():
+    parent = Lead(id=41, owner_name='Dana', phone='+13125550101', score=0)
+    clone = Lead(id=42, owner_name='Dana', phone='+13125550102', score=0,
+                 details=json.dumps({'_parent_lead_id': 41}))
+
+    assert campaign_service._row(parent, 'Hi')['property_id'] == 41
+    assert campaign_service._row(clone, 'Hi')['property_id'] == 41
