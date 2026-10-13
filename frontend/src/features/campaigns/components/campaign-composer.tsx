@@ -210,7 +210,7 @@ export function CampaignComposer({
             >
               {isSending
                 ? "Sending…"
-                : `Send to ${recipients.length} ${recipients.length === 1 ? "lead" : "leads"}`}
+                : `Send to ${campaign.recipients} ${campaign.recipients === 1 ? "lead" : "leads"}`}
             </button>
           </div>
         ) : null}
