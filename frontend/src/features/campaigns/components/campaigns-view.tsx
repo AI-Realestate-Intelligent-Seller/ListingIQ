@@ -153,14 +153,14 @@ export function CampaignsView({
           accessToken={token}
           onChange={setOpen}
           onSent={(result) => {
-            const started = result.started.length;
+            const queued = result.queued;
             const skipped = result.skipped.length;
             setNotice(
-              started > 0
+              queued > 0
                 ? skipped > 0
-                  ? "Campaign started, but some leads were skipped."
-                  : "Campaign started successfully."
-                : "No conversations were started.",
+                  ? `${queued} messages queued; some leads were skipped.`
+                  : `${queued} messages queued for sending.`
+                : "No messages were queued.",
             );
             closeComposer();
           }}
@@ -176,7 +176,7 @@ export function CampaignsView({
   const brokerFirst = (a: Campaign, b: Campaign): number =>
     (a.broker_name || "").localeCompare(b.broker_name || "") || newestFirst(a, b);
   const drafts = campaigns.filter((item) => item.status === "draft").sort(isHob ? brokerFirst : newestFirst);
-  const sent = campaigns.filter((item) => item.status === "sent").sort(isHob ? brokerFirst : newestFirst);
+  const sent = campaigns.filter((item) => item.status !== "draft").sort(isHob ? brokerFirst : newestFirst);
   const sentPages = Math.max(1, Math.ceil(sent.length / CAMPAIGNS_PER_PAGE));
   const draftPages = Math.max(1, Math.ceil(drafts.length / CAMPAIGNS_PER_PAGE));
   const currentSentPage = Math.min(sentPage, sentPages);

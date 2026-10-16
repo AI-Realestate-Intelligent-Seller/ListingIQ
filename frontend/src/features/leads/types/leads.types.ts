@@ -11,7 +11,16 @@ export type Lead = {
   id: number;
   owner_name: string | null;
   phone: string | null;
-  phone_numbers: { phone: string; dnc: boolean; owner_name?: string }[];
+  phone_numbers: {
+    phone: string;
+    dnc: boolean;
+    owner_name?: string;
+    type?: string | null;
+    carrier?: string | null;
+    reachable?: boolean | null;
+    lookup_status?: string;
+    lookup_checked_at?: string | null;
+  }[];
   property_address: string | null;
   area: string | null;
   latitude: number | null;

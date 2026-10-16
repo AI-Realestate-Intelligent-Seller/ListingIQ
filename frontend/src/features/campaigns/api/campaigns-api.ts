@@ -1,4 +1,4 @@
-import { deleteJson, getJson, patchJson, postJson } from "@/lib/api/http-client";
+import { ApiRequestError, deleteJson, getJson, patchJson, postJson } from "@/lib/api/http-client";
 import { loadQueryWithProgress, type QueryProgress } from "@/lib/api/query-progress";
 
 import type {
@@ -51,11 +51,47 @@ export function createCampaignDraft(
   leadIds: number[],
   accessToken: string,
 ): Promise<CampaignDraftResult> {
-  return postJson<CampaignDraftResult, { lead_ids: number[] }>(
-    `${CAMPAIGNS}/draft`,
-    { lead_ids: leadIds },
-    accessToken,
-  );
+  return createCampaignDraftInBackground(leadIds, accessToken);
+}
+
+async function createCampaignDraftInBackground(
+  leadIds: number[],
+  accessToken: string,
+): Promise<CampaignDraftResult> {
+  const payload = { lead_ids: leadIds };
+  let jobId: string;
+  try {
+    const started = await postJson<{ job_id: string }, typeof payload>(
+      `${CAMPAIGNS}/draft/load`,
+      payload,
+      accessToken,
+    );
+    jobId = started.job_id;
+  } catch (error) {
+    // Older deployments and a known Redis outage have definitely not queued a
+    // job, so the established synchronous endpoint remains a safe fallback.
+    if (error instanceof ApiRequestError && (error.status === 404 || error.status === 503)) {
+      return postJson<CampaignDraftResult, typeof payload>(
+        `${CAMPAIGNS}/draft`, payload, accessToken,
+      );
+    }
+    throw error;
+  }
+
+  for (;;) {
+    const progress = await getJson<QueryProgress<CampaignDraftResult>>(
+      `/query-progress/${jobId}`,
+      accessToken,
+    );
+    if (progress.status === "completed") {
+      if (progress.result !== null) return progress.result;
+      throw new ApiRequestError("Campaign validation completed without a result.");
+    }
+    if (progress.status === "failed") {
+      throw new ApiRequestError(progress.error || "Campaign validation failed.");
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 150));
+  }
 }
 
 /** Rename the campaign, rewrite its message or reason. Returns the fresh preview. */

@@ -999,6 +999,8 @@ def test_telnyx_mode_strips_simulation_only_fields(monkeypatch):
     monkeypatch.setitem(settings['telnyx'], 'api_key', 'KEY-test')
     monkeypatch.setitem(settings['telnyx'], 'from_number', '+12245798015')
     monkeypatch.setattr('app.sms.service.requests.post', fake_post)
+    # Live sends now pass the shared Redis rate limiter; no Redis in unit tests.
+    monkeypatch.setattr('app.sms.rate_limit.acquire_submission_slot', lambda: None)
 
     service.send_sms({
         'to': CONTACT, 'text': 'hello',

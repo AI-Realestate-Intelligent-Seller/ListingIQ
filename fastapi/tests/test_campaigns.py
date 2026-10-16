@@ -9,8 +9,13 @@ from datetime import datetime
 from app.leads import campaign as campaign_service
 from app.leads import template as message_template
 from app.leads.address import canonical
-from app.models import Campaign, Conversation, Lead, Message, User
+from app.models import Campaign, Conversation, Lead, LeadEvent, Message, User
 from app.sms import service
+from app.sms.number_lookup import NumberLookupResult
+
+# Send enqueues durable jobs; run the real worker inline so these tests keep
+# asserting what a completed campaign did.
+pytestmark = pytest.mark.usefixtures('drain_campaign_queue')
 
 BROKER_EMAIL = 'ather.shamim@linchpinglobal.net'
 LEADS_URL = '/api/v1/leads'
@@ -42,6 +47,19 @@ def no_ai_replies(monkeypatch):
     """Bobbie's reply pipeline needs DeepSeek; these tests only need the reply to land."""
     monkeypatch.setattr('app.routes.webhooks.service.process_ai_reply',
                         lambda conversation_id, text: None)
+
+
+@pytest.fixture(autouse=True)
+def mobile_number_lookups(monkeypatch):
+    """Campaign tests stay provider-free; dedicated tests exercise the live client."""
+    monkeypatch.setattr(
+        campaign_service.number_lookup,
+        'lookup_number',
+        lambda phone: NumberLookupResult(
+            phone_number=phone,
+            status='simulation_bypass',
+        ),
+    )
 
 
 def owner_replies(client, contact, text='Yes, tell me more.'):
@@ -197,6 +215,145 @@ def test_draft_preview_renders_only_the_requested_twenty_recipient_page(
     assert [item['owner_name'] for item in body['recipients']] == [
         'Owner 21', 'Owner 22', 'Owner 23', 'Owner 24', 'Owner 25',
     ]
+
+
+@pytest.mark.parametrize('selected_count', [500, 4_000])
+def test_large_draft_validates_and_sends_the_full_set_independent_of_preview_page(
+        selected_count, make_user, session, monkeypatch):
+    owner = make_user(BROKER_EMAIL, role='broker')
+    leads = [
+        Lead(
+            user_id=owner.id,
+            owner_name=f'Owner {index}',
+            phone=f'+1312{index:07d}',
+            property_address=f'{index} Scale Test Ave, Chicago, IL 60601',
+            score=70,
+            dnc=index % 100 == 0,
+        )
+        for index in range(1, selected_count + 1)
+    ]
+    session.add_all(leads)
+    session.commit()
+    selected_ids = [lead.id for lead in leads]
+    eligible_ids = [lead.id for lead in leads if not lead.dnc]
+    progress = []
+
+    campaign, not_added = campaign_service.create_draft(
+        session,
+        owner,
+        selected_ids + selected_ids[:10],  # duplicate selection IDs are processed once
+        progress=lambda total, loaded: progress.append((total, loaded)),
+    )
+
+    authoritative_ids = campaign_service.member_ids(session, owner, campaign)
+    assert set(authoritative_ids) == set(eligible_ids)
+    assert len(authoritative_ids) == selected_count - (selected_count // 100)
+    assert len(not_added) == selected_count // 100
+    assert {item['reason'] for item in not_added} == {'On the do-not-contact list.'}
+    assert progress[0] == (selected_count, 0)
+    assert progress[-1] == (selected_count, selected_count)
+    assert session.query(LeadEvent).filter(
+        LeadEvent.event_type == 'locked_to_campaign',
+    ).count() == len(eligible_ids)
+
+    first_page = campaign_service.preview(session, owner, campaign, page=1)
+    last_page = campaign_service.preview(
+        session, owner, campaign, page=first_page['total_pages'],
+    )
+    assert len(first_page['recipients']) == 20
+    assert len(last_page['recipients']) <= 20
+    assert first_page['total_items'] == len(eligible_ids)
+    assert last_page['total_items'] == len(eligible_ids)
+    assert campaign_service.member_ids(session, owner, campaign) == authoritative_ids
+
+    lead_by_phone = {lead.phone: lead.id for lead in leads}
+    sent_ids = []
+
+    def fake_send(payload):
+        sent_ids.append(lead_by_phone[payload['to']])
+        return {'data': {'id': f'sim-{len(sent_ids)}'}}
+
+    monkeypatch.setattr(service, 'send_sms', fake_send)
+    monkeypatch.setattr(campaign_service, 'schedule_initial_followup', lambda *_: None)
+    result = campaign_service.send(session, owner, campaign)
+
+    assert result['skipped'] == []
+    assert sent_ids == authoritative_ids
+    assert len(result['started']) == len(eligible_ids)
+
+
+def test_draft_removes_only_duplicate_property_phone_pairs(make_user, session):
+    owner = make_user(BROKER_EMAIL, role='broker')
+    leads = [
+        Lead(user_id=owner.id, owner_name='First', phone='+13125550100',
+             property_address='10 Main Street, Chicago, IL'),
+        Lead(user_id=owner.id, owner_name='Duplicate', phone='(312) 555-0100',
+             property_address='10 Main St Chicago IL'),
+        Lead(user_id=owner.id, owner_name='Co-owner', phone='+13125550101',
+             property_address='10 Main Street, Chicago, IL'),
+    ]
+    session.add_all(leads)
+    session.commit()
+
+    campaign, not_added = campaign_service.create_draft(
+        session, owner, [lead.id for lead in leads],
+    )
+
+    assert campaign_service.member_ids(session, owner, campaign) == [leads[0].id, leads[2].id]
+    assert not_added == [{
+        'lead_id': leads[1].id,
+        'owner_name': 'Duplicate',
+        'reason': 'Duplicate property and phone in this selection.',
+    }]
+
+
+def test_background_draft_job_returns_only_the_first_preview_page(
+        make_user, session, monkeypatch):
+    from app.routes import campaigns as campaign_routes
+
+    owner = make_user(BROKER_EMAIL, role='broker')
+    leads = [
+        Lead(
+            user_id=owner.id,
+            owner_name=f'Worker Owner {index}',
+            phone=f'+1773{index:07d}',
+            property_address=f'{index} Worker Ave, Chicago, IL 60601',
+        )
+        for index in range(1, 26)
+    ]
+    session.add_all(leads)
+    session.commit()
+    completed = {}
+    failures = []
+
+    monkeypatch.setattr(campaign_routes.query_progress, 'update', lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        campaign_routes.query_progress,
+        'complete',
+        lambda job_id, result, total: completed.update(
+            job_id=job_id, result=result, total=total,
+        ),
+    )
+    monkeypatch.setattr(
+        campaign_routes.query_progress,
+        'fail',
+        lambda job_id, error: failures.append((job_id, error)),
+    )
+
+    campaign_routes._create_draft_job('draft-job', owner.id, {
+        'lead_ids': [lead.id for lead in leads],
+        'name': None,
+        'message_template': None,
+    })
+
+    assert failures == []
+    assert completed['job_id'] == 'draft-job'
+    assert completed['total'] == 25
+    assert completed['result']['campaign']['recipients'] == 25
+    preview = completed['result']['campaign']['preview']
+    assert preview['total_items'] == 25
+    assert preview['total_pages'] == 2
+    assert len(preview['recipients']) == 20
 
 
 def test_creating_a_draft_holds_the_leads_and_sends_nothing(
@@ -437,6 +594,82 @@ def test_sending_texts_every_recipient_the_message_they_were_shown(
     assert all(item['ai_enabled'] is False for item in conversations)
     assert session.query(Conversation).filter(
         Conversation.campaign_id == campaign_id).count() == 3
+
+
+def test_campaign_sends_only_mobile_numbers_and_saves_lookup_results(
+        make_user, session, monkeypatch):
+    owner = make_user(BROKER_EMAIL, role='broker')
+    campaign = Campaign(
+        user_id=owner.id,
+        name='Mobile-only campaign',
+        message_template='Hi {{first_name}}, about {{address}}.',
+        status='draft',
+    )
+    session.add(campaign)
+    session.flush()
+    leads = [
+        Lead(
+            user_id=owner.id,
+            campaign_id=campaign.id,
+            owner_name=f'Owner {index}',
+            phone=f'+1312555014{index}',
+            property_address=f'{index} Main St, Chicago, IL 60601',
+            details=json.dumps({'_phone_numbers': [{
+                'phone': f'+1312555014{index}', 'dnc': False,
+                'owner_name': f'Owner {index}',
+            }]}),
+        )
+        for index in range(3)
+    ]
+    session.add_all(leads)
+    session.commit()
+    ids = [lead.id for lead in leads]
+    outcomes = {
+        leads[0].phone: NumberLookupResult(
+            phone_number=leads[0].phone, status='verified', line_type='mobile',
+            carrier_name='Mobile Carrier', checked_at='2026-10-16T01:00:00Z',
+        ),
+        leads[1].phone: NumberLookupResult(
+            phone_number=leads[1].phone, status='verified', line_type='landline',
+            carrier_name='Landline Carrier', checked_at='2026-10-16T01:00:01Z',
+        ),
+        leads[2].phone: NumberLookupResult(
+            phone_number=leads[2].phone, status='error',
+            checked_at='2026-10-16T01:00:02Z', error_code='request_failed',
+        ),
+    }
+    monkeypatch.setattr(
+        campaign_service.number_lookup, 'lookup_number', lambda phone: outcomes[phone],
+    )
+    lead_by_phone = {lead.phone: lead.id for lead in leads}
+    sent_ids = []
+
+    def fake_send(payload):
+        sent_ids.append(lead_by_phone[payload['to']])
+        return {'data': {'id': f'sim-{len(sent_ids)}'}}
+
+    monkeypatch.setattr(service, 'send_sms', fake_send)
+    monkeypatch.setattr(campaign_service, 'schedule_initial_followup', lambda *_: None)
+    # Live mode is what routes jobs through the Number Lookup stage.
+    monkeypatch.setitem(campaign_service.settings['telnyx'], 'mode', 'telnyx')
+
+    result = campaign_service.send(session, owner, campaign)
+
+    assert [item['lead_id'] for item in result['started']] == [leads[0].id]
+    assert sent_ids == [leads[0].id]
+    assert {item['reason'] for item in result['skipped']} == {
+        'Number is landline; campaigns send only to mobile numbers.',
+        'Number lookup failed, so no message was sent.',
+    }
+    session.expire_all()
+    saved = {lead.id: json.loads(lead.details)['_phone_numbers'][0]
+             for lead in session.query(Lead).filter(Lead.id.in_(ids)).all()}
+    assert saved[leads[0].id]['type'] == 'mobile'
+    assert saved[leads[0].id]['telnyx_lookup']['sms_eligible'] is True
+    assert saved[leads[1].id]['type'] == 'landline'
+    assert saved[leads[1].id]['telnyx_lookup']['sms_eligible'] is False
+    assert saved[leads[2].id]['lookup_status'] == 'error'
+    assert all(not row['dnc'] for row in saved.values())
 
 
 def test_a_campaign_cannot_be_sent_twice(client, make_user, auth_header, sent_sms):

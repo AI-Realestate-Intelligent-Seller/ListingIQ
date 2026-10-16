@@ -449,7 +449,16 @@ function OwnerContactIntelligence({
 }: {
   details: Record<string, unknown>;
   ownerName: string | null;
-  leadPhones: { phone: string; dnc: boolean; owner_name?: string }[];
+  leadPhones: {
+    phone: string;
+    dnc: boolean;
+    owner_name?: string;
+    type?: string | null;
+    carrier?: string | null;
+    reachable?: boolean | null;
+    lookup_status?: string;
+    lookup_checked_at?: string | null;
+  }[];
 }) {
   const provider = objectValue(details.provider_property_details);
   const owner = objectValue(provider.owner);

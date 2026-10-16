@@ -15,6 +15,10 @@ from app.leads.catalog import parse_signals
 from app.leads.importer import normalize_phone, parse_csv, parse_workbook, score_lead
 from app.models import Conversation, Lead, Message, User
 
+# Send enqueues durable jobs; run the real worker inline so these tests keep
+# asserting what a completed campaign did.
+pytestmark = pytest.mark.usefixtures('drain_campaign_queue')
+
 BROKER_EMAIL = 'ather.shamim@linchpinglobal.net'
 LEADS_URL = '/api/v1/leads'
 

@@ -65,16 +65,18 @@ export function CampaignComposer({
   const [detailId, setDetailId] = useState<number | null>(null);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
 
+  const isSendingCampaign = campaign.status === "sending";
   const isSent = campaign.status === "sent";
+  const isReadOnly = isSendingCampaign || isSent;
   const preview = campaign.preview;
   const recipients = preview.recipients;
   const recipientPages = preview.total_pages;
   const currentRecipientPage = preview.page;
 
-  // Re-render the preview a beat after typing stops rather than on every key:
-  // each save is a round trip that re-renders every recipient's message.
+  // Re-render the visible preview page a beat after typing stops rather than
+  // on every key; the stored template remains campaign-wide.
   useEffect(() => {
-    if (isSent) return;
+    if (isReadOnly) return;
     if (
       name === campaign.name &&
       template === campaign.message_template &&
@@ -110,7 +112,7 @@ export function CampaignComposer({
     campaign.message_template,
     campaign.outreach_reason,
     accessToken,
-    isSent,
+    isReadOnly,
     onChange,
     currentRecipientPage,
   ]);
@@ -164,7 +166,7 @@ export function CampaignComposer({
   }
 
   async function handleSend(): Promise<void> {
-    if (isSending || isSent) return;
+    if (isSending || isReadOnly) return;
     setIsSending(true);
     setErrorMessage("");
     try {
@@ -188,7 +190,7 @@ export function CampaignComposer({
     template !== campaign.message_template ||
     reason !== campaign.outreach_reason;
   const canSend =
-    !isSent && campaign.recipients > 0 && !preview.template_error &&
+    !isReadOnly && campaign.recipients > 0 && !preview.template_error &&
     !isSaving && !isLoadingPage && !isDirty;
 
   return (
@@ -198,17 +200,19 @@ export function CampaignComposer({
           <button type="button" className="campaigns-back" onClick={onBack}>
             ← All campaigns
           </button>
-          <span className="sms-eyebrow">{isSent ? "SENT CAMPAIGN" : "NEW CAMPAIGN"}</span>
-          <h2>{isSent ? campaign.name : "Write the opening message"}</h2>
+          <span className="sms-eyebrow">{isSendingCampaign ? "SENDING CAMPAIGN" : isSent ? "SENT CAMPAIGN" : "NEW CAMPAIGN"}</span>
+          <h2>{isReadOnly ? campaign.name : "Write the opening message"}</h2>
           <p>
-            {isSent
+            {isSendingCampaign
+              ? "Messages are queued and will continue sending in the background."
+              : isSent
               ? `${campaign.replied} of ${campaign.delivered} ${
                   campaign.delivered === 1 ? "owner has" : "owners have"
                 } replied. These leads live here now, not in the Lead Pool.`
               : "Every recipient gets this message with their own address and reason filled in."}
           </p>
         </div>
-        {!isSent ? (
+        {!isReadOnly ? (
           <div className="campaign-composer-actions">
             <button type="button" className="sms-button-secondary" onClick={onDiscard}>
               Discard draft
@@ -242,7 +246,7 @@ export function CampaignComposer({
             <input
               value={name}
               maxLength={200}
-              disabled={isSent}
+              disabled={isReadOnly}
               onChange={(event) => setName(event.target.value)}
               placeholder="Expired listings — Hoffman Estates"
             />
@@ -251,7 +255,7 @@ export function CampaignComposer({
           <div className="campaign-reason">
             <div className="campaign-reason-head">
               <label htmlFor="campaign-reason-input">Reason</label>
-              {!isSent ? (
+              {!isReadOnly ? (
                 <button
                   type="button"
                   className="sms-button-secondary campaign-suggest"
@@ -267,7 +271,7 @@ export function CampaignComposer({
               value={reason}
               rows={2}
               maxLength={300}
-              disabled={isSent}
+              disabled={isReadOnly}
               onChange={(event) => setReason(event.target.value)}
               placeholder="Leave blank to use each lead's own signal"
             />
@@ -308,12 +312,12 @@ export function CampaignComposer({
               value={template}
               rows={7}
               maxLength={1600}
-              disabled={isSent}
+              disabled={isReadOnly}
               onChange={(event) => setTemplate(event.target.value)}
             />
           </label>
 
-          {!isSent ? (
+          {!isReadOnly ? (
             <>
               <div className="campaign-tokens">
                 <span className="campaign-tokens-label">Insert:</span>
@@ -370,13 +374,15 @@ export function CampaignComposer({
 
       <div className="campaign-people">
         <div className="campaign-people-head">
-          <h3>{isSent ? "Who was contacted" : "Who this will reach"}</h3>
+          <h3>{isSendingCampaign ? "Who is queued" : isSent ? "Who was contacted" : "Who this will reach"}</h3>
           <span className="sms-count">{campaign.recipients}</span>
         </div>
 
         {recipients.length === 0 ? (
           <p className="sms-muted">
-            {isSent
+            {isSendingCampaign
+              ? "This campaign is still being processed."
+              : isSent
               ? "This campaign did not reach anyone."
               : "No lead in this draft can be texted. Go back to the Lead Pool and pick another selection."}
           </p>
@@ -388,8 +394,8 @@ export function CampaignComposer({
                   <th scope="col">Owner / Property</th>
                   <th scope="col">Signals</th>
                   <th scope="col" className="leads-numeric">Score</th>
-                  <th scope="col">{isSent ? "Message sent" : "Message"}</th>
-                  <th scope="col">{isSent ? "Reply" : "Length"}</th>
+                  <th scope="col">{isSendingCampaign ? "Message queued" : isSent ? "Message sent" : "Message"}</th>
+                  <th scope="col">{isSendingCampaign ? "Status" : isSent ? "Reply" : "Length"}</th>
                   <th scope="col"><span className="sr-only">Actions</span></th>
                 </tr>
               </thead>
@@ -414,7 +420,9 @@ export function CampaignComposer({
                     <td className="leads-numeric">{item.score}</td>
                     <td className="campaign-message-cell">{item.text}</td>
                     <td>
-                      {isSent ? (
+                      {isSendingCampaign ? (
+                        <span className="campaign-reply-badge">Queued</span>
+                      ) : isSent ? (
                         <span className={`campaign-reply-badge${item.replied ? " replied" : ""}`}>
                           {item.replied ? "Replied" : "No reply Yet"}
                         </span>

@@ -221,12 +221,47 @@ class Campaign(Base):
     # Blank falls back to each lead's own signal, which is the right default
     # for a mixed selection but wrong for a set that shares one story.
     outreach_reason = Column(String(300), nullable=True)
-    # 'draft' until the broker sends it, 'sent' afterwards. A sent campaign is
-    # a record: its name and template stay editable but it never sends twice.
+    # 'draft' before enqueue, 'sending' while durable jobs run, 'sent' once all
+    # jobs are terminal. A non-draft campaign never submits twice.
     status = Column(String(20), nullable=False, default='draft')
     sent_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     user = relationship('User')
+
+
+class OutboundSmsJob(Base):
+    """Durable hand-off between campaign validation and provider submission."""
+    __tablename__ = 'outbound_sms_jobs'
+    __table_args__ = (
+        Index('ix_outbound_sms_jobs_ready', 'status', 'available_at'),
+    )
+
+    id = Column(Integer, primary_key=True)
+    # One campaign may enqueue a lead only once, even if an HTTP request is
+    # repeated or two API instances race.
+    job_key = Column(String(160), nullable=False, unique=True, index=True)
+    campaign_id = Column(Integer, ForeignKey('campaigns.id'), nullable=False, index=True)
+    # Campaign finalization deletes generated provider-contact leads, and a
+    # broker may delete a thread's messages; PostgreSQL enforces both keys.
+    lead_id = Column(Integer, ForeignKey('leads.id', ondelete='CASCADE'),
+                     nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
+    message_id = Column(Integer, ForeignKey('messages.id', ondelete='SET NULL'),
+                        nullable=True, unique=True)
+    to_number = Column(String(50), nullable=False)
+    property_key = Column(String(500), nullable=True)
+    text = Column(Text, nullable=False, default='')
+    # awaiting_lookup -> queued -> submitting -> accepted. Terminal alternatives
+    # are skipped, failed, and uncertain (an ambiguous network timeout).
+    status = Column(String(32), nullable=False, default='queued', index=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    available_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    claimed_at = Column(DateTime, nullable=True)
+    worker_id = Column(String(80), nullable=True)
+    telnyx_id = Column(String(128), nullable=True, index=True)
+    last_error = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class Lead(Base):

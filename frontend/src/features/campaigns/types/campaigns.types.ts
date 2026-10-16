@@ -1,5 +1,5 @@
 /** A campaign is either still being written or already out the door. */
-export type CampaignStatus = "draft" | "sent";
+export type CampaignStatus = "draft" | "sending" | "sent";
 
 /** One campaign with the numbers the overview reports on. */
 export type Campaign = {
@@ -99,6 +99,7 @@ export type CampaignDraftResult = {
 
 export type CampaignSendResult = {
   campaign_id: number;
+  queued: number;
   started: { lead_id: number; owner_name: string | null; conversation_id: number; text: string }[];
   skipped: CampaignSkip[];
 };

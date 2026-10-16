@@ -19,7 +19,9 @@ from datetime import datetime
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ..models import Campaign, Conversation, Lead, Message, User
+from ..core.config import settings
+from ..models import Campaign, Conversation, Lead, Message, OutboundSmsJob, User
+from ..sms import number_lookup
 from ..sms import service as sms_service
 from ..sms.outreach import build_single_lead_context
 from ..sms.followup_scheduler import schedule_initial_followup
@@ -34,6 +36,13 @@ from .service import (conversation_property_details, derive_stage, outreach_reas
 
 PROVIDER_LEAD_SOURCE = 'provider_distribution'
 PROVIDER_CONTACT_SOURCE = 'provider_distribution_contact'
+CAMPAIGN_BATCH_SIZE = 250
+
+
+def _batches(values: list, size: int = CAMPAIGN_BATCH_SIZE):
+    """Yield bounded slices while retaining the caller's stable order."""
+    for start in range(0, len(values), size):
+        yield values[start:start + size]
 
 
 # Said the same way everywhere a property turns out to be spoken for, and
@@ -72,6 +81,12 @@ class Claims:
         return None
 
 
+def _recipient_key(lead: Lead) -> tuple[str, str] | None:
+    property_key = address_key.canonical(lead.property_address)
+    phone_key = normalize_phone(lead.phone or '')
+    return (property_key, phone_key) if property_key and phone_key else None
+
+
 NO_CLAIMS = Claims(set(), set())
 
 
@@ -108,22 +123,36 @@ def claims_on(session: Session, scope: list[int], leads: list[Lead]) -> Claims:
     returns only a blocking reason — never a brokerage, account, owner, or
     number belonging to another tenant.
     """
-    wanted = {
-        (address_key.canonical(lead.property_address), normalize_phone(lead.phone or ''))
-        for lead in leads
-    }
-    wanted = {(property_key, phone) for property_key, phone in wanted if property_key and phone}
+    wanted = {key for lead in leads if (key := _recipient_key(lead)) is not None}
     if not wanted:
         return NO_CLAIMS
 
     property_keys = sorted({property_key for property_key, _ in wanted})
-    rows = (session.query(Message.property_key, Conversation.contact,
+    rows = []
+    for property_batch in _batches(property_keys):
+        rows.extend(
+            session.query(Message.property_key, Conversation.contact,
                           Conversation.user_id.in_(scope))
             .join(Conversation, Conversation.id == Message.conversation_id)
-            .filter(Message.property_key.in_(property_keys),
+            .filter(Message.property_key.in_(property_batch),
                     Message.event_type == 'outreach.initial')
             .distinct()
-            .all())
+            .all()
+        )
+        # A durable queued submission owns the pair before its Message exists.
+        # This closes the interval where two brokerages could enqueue the same
+        # property/contact while the worker was still waiting for capacity.
+        rows.extend(
+            session.query(OutboundSmsJob.property_key, OutboundSmsJob.to_number,
+                          OutboundSmsJob.user_id.in_(scope))
+            .filter(OutboundSmsJob.property_key.in_(property_batch),
+                    OutboundSmsJob.status.in_((
+                        'awaiting_lookup', 'looking_up', 'queued', 'submitting',
+                        'retry_wait', 'accepted', 'uncertain',
+                    )))
+            .distinct()
+            .all()
+        )
     normalized_rows = [
         ((property_key, normalize_phone(contact or '')), is_ours)
         for property_key, contact, is_ours in rows
@@ -156,7 +185,8 @@ def _default_name(session: Session, user: User) -> str:
 
 def create_draft(session: Session, user: User, lead_ids: list[int],
                  name: str = '', template: str = '',
-                 allow_empty: bool = False) -> tuple[Campaign, list[dict]]:
+                 allow_empty: bool = False,
+                 progress=None) -> tuple[Campaign, list[dict]]:
     """Hold a selection of leads under a new draft. Nothing is sent yet.
 
     Returns the draft and the leads it could not take, so the pool can say why
@@ -167,7 +197,8 @@ def create_draft(session: Session, user: User, lead_ids: list[int],
     one-shot `launch` below passes it, because its callers expect every lead
     accounted for in `skipped` rather than one error for the whole batch.
     """
-    if not lead_ids:
+    unique_lead_ids = list(dict.fromkeys(lead_ids))
+    if not unique_lead_ids:
         raise ValueError('Select at least one lead to build a campaign.')
 
     campaign = Campaign(
@@ -181,8 +212,10 @@ def create_draft(session: Session, user: User, lead_ids: list[int],
     session.commit()
     session.refresh(campaign)
 
-    left_behind = attach(session, user, campaign, lead_ids)
-    if len(left_behind) == len(lead_ids) and not allow_empty:
+    left_behind = attach(
+        session, user, campaign, unique_lead_ids, progress=progress,
+    )
+    if len(left_behind) == len(unique_lead_ids) and not allow_empty:
         # Nothing could be taken, so there is no draft worth composing. Roll the
         # empty shell back rather than dropping the broker into a blank screen.
         session.delete(campaign)
@@ -285,6 +318,60 @@ def _restore_provider_master(lead: Lead) -> None:
         lead.details = json.dumps(details)
 
 
+def _save_number_lookup(lead: Lead, result: number_lookup.NumberLookupResult) -> None:
+    """Merge verified line data into the existing per-number details contract."""
+    metadata = result.saved_metadata()
+    if metadata is None:
+        return
+    details = _stored_details(lead)
+    candidates = details.get('_phone_numbers')
+    if not isinstance(candidates, list):
+        candidates = []
+    target = normalize_phone(lead.phone or result.phone_number)
+    matched = False
+    updated: list = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            updated.append(candidate)
+            continue
+        item = dict(candidate)
+        candidate_phone = normalize_phone(str(item.get('phone') or item.get('number') or ''))
+        if candidate_phone == target:
+            item['telnyx_lookup'] = metadata
+            item['lookup_status'] = result.status
+            item['lookup_checked_at'] = result.checked_at
+            if result.line_type:
+                item['type'] = result.line_type
+            if result.carrier_name:
+                item['carrier'] = result.carrier_name
+            matched = True
+        updated.append(item)
+    if not matched:
+        updated.append({
+            'phone': target or result.phone_number,
+            'dnc': bool(lead.dnc),
+            'owner_name': lead.owner_name or '',
+            'type': result.line_type,
+            'carrier': result.carrier_name,
+            'lookup_status': result.status,
+            'lookup_checked_at': result.checked_at,
+            'telnyx_lookup': metadata,
+        })
+    details['_phone_numbers'] = updated
+    lead.details = json.dumps(details)
+
+
+def _lookup_skip_reason(result: number_lookup.NumberLookupResult) -> str | None:
+    if not result.enforces_mobile_gate or result.is_mobile:
+        return None
+    if result.status == 'verified' and result.line_type:
+        label = result.line_type.replace('_', ' ').replace('-', ' ')
+        return f'Number is {label}; campaigns send only to mobile numbers.'
+    if result.status == 'unknown':
+        return 'Number type could not be verified as mobile; no message was sent.'
+    return 'Number lookup failed, so no message was sent.'
+
+
 def release_draft_members(session: Session, user: User, campaign: Campaign) -> None:
     """Return real leads to the pool and discard generated contact rows."""
     for lead in members(session, user, campaign):
@@ -301,7 +388,8 @@ def release_draft_members(session: Session, user: User, campaign: Campaign) -> N
         )
 
 
-def attach(session: Session, user: User, campaign: Campaign, lead_ids: list[int]) -> list[dict]:
+def attach(session: Session, user: User, campaign: Campaign, lead_ids: list[int],
+           progress=None) -> list[dict]:
     """Move the broker's own leads into this draft. Returns the ones left behind.
 
     A lead belongs to one campaign and one only. Two rules enforce it, and both
@@ -321,77 +409,114 @@ def attach(session: Session, user: User, campaign: Campaign, lead_ids: list[int]
     if campaign.status != 'draft':
         raise ValueError('This campaign has already been sent, so its leads are fixed.')
 
+    lead_ids = list(dict.fromkeys(lead_ids))
+    total = len(lead_ids)
+    if progress:
+        progress(total, 0)
+
     scope = brokerage_user_ids(session, user)
-    found = {lead.id: lead for lead in session.query(Lead)
-             .filter(Lead.user_id.in_(scope), Lead.id.in_(lead_ids))
-             .all()}
+    found: dict[int, Lead] = {}
     from ..integration_data.service import backfill_distributed_leads
+    for lead_id_batch in _batches(lead_ids):
+        batch = (session.query(Lead)
+                 .filter(Lead.user_id.in_(scope), Lead.id.in_(lead_id_batch))
+                 .all())
+        found.update({lead.id: lead for lead in batch})
+    # The backfill may rebuild combined provider data, so invoke it once for
+    # the complete selection rather than repeating that work for every batch.
     backfill_distributed_leads(session, list(found.values()))
     # Naming the campaign that holds a lead is more useful than "already taken".
     held_by = {row[0]: row[1] for row in session.query(Campaign.id, Campaign.name)
                .filter(Campaign.user_id.in_(scope)).all()}
 
-    claims = claims_on(session, scope, list(found.values()))
-
     left_behind: list[dict] = []
-    eligible: list[int] = []
-    for lead_id in lead_ids:
-        lead = found.get(lead_id)
-        if lead is None:
-            left_behind.append({'lead_id': lead_id, 'owner_name': None, 'reason': 'Lead not found.'})
-        elif selection_reason(lead):
-            # Not ready: it stays in the pool, where the broker can see the
-            # stage and act on it. A lead held by a campaign is hidden from the
-            # pool, so one that can never be sent would be hidden with no way
-            # to fix it.
-            left_behind.append({'lead_id': lead.id, 'owner_name': lead.owner_name,
-                                'reason': selection_reason(lead)})
-        elif claims.reason_for(lead) and lead.source != PROVIDER_LEAD_SOURCE:
-            left_behind.append({'lead_id': lead.id, 'owner_name': lead.owner_name,
-                                'reason': claims.reason_for(lead)})
-        elif lead.campaign_id is not None and lead.campaign_id != campaign.id:
-            name = held_by.get(lead.campaign_id, 'another campaign')
-            left_behind.append({'lead_id': lead.id, 'owner_name': lead.owner_name,
-                                'reason': f'Already in the draft “{name}”.'})
-        else:
-            eligible.append(lead.id)
+    processed = 0
+    selected_pairs: set[tuple[str, str]] = set()
+    for lead_id_batch in _batches(lead_ids):
+        batch_leads = [found[lead_id] for lead_id in lead_id_batch if lead_id in found]
+        claims = claims_on(session, scope, batch_leads)
+        eligible: list[int] = []
+        for lead_id in lead_id_batch:
+            lead = found.get(lead_id)
+            if lead is None:
+                left_behind.append({
+                    'lead_id': lead_id, 'owner_name': None, 'reason': 'Lead not found.',
+                })
+                continue
+            reason = selection_reason(lead)
+            if reason:
+                # Not ready: it stays in the pool, where the broker can see the
+                # stage and act on it. A lead held by a campaign is hidden from
+                # the pool, so one that can never be sent would be hidden with
+                # no way to fix it.
+                left_behind.append({
+                    'lead_id': lead.id, 'owner_name': lead.owner_name, 'reason': reason,
+                })
+            elif claims.reason_for(lead) and lead.source != PROVIDER_LEAD_SOURCE:
+                left_behind.append({
+                    'lead_id': lead.id, 'owner_name': lead.owner_name,
+                    'reason': claims.reason_for(lead),
+                })
+            elif lead.campaign_id is not None and lead.campaign_id != campaign.id:
+                name = held_by.get(lead.campaign_id, 'another campaign')
+                left_behind.append({
+                    'lead_id': lead.id, 'owner_name': lead.owner_name,
+                    'reason': f'Already in the draft “{name}”.',
+                })
+            else:
+                pair = _recipient_key(lead)
+                if pair is not None and pair in selected_pairs:
+                    left_behind.append({
+                        'lead_id': lead.id, 'owner_name': lead.owner_name,
+                        'reason': 'Duplicate property and phone in this selection.',
+                    })
+                else:
+                    if pair is not None:
+                        selected_pairs.add(pair)
+                    eligible.append(lead.id)
 
-    if eligible:
-        # One guarded statement rather than a field assignment per lead: the
-        # WHERE clause re-checks the invariant at write time, so two drafts
-        # built from overlapping selections at the same moment cannot both
-        # claim the same lead.
-        session.query(Lead).filter(
-            Lead.user_id.in_(scope),
-            Lead.id.in_(eligible),
-            Lead.campaign_id.is_(None),
-            Lead.conversation_id.is_(None),
-        ).update({Lead.campaign_id: campaign.id}, synchronize_session=False)
-        session.commit()
-        session.expire_all()
+        if eligible:
+            # The guarded update re-checks the lock invariant at write time.
+            session.query(Lead).filter(
+                Lead.user_id.in_(scope),
+                Lead.id.in_(eligible),
+                Lead.campaign_id.is_(None),
+                Lead.conversation_id.is_(None),
+            ).update({Lead.campaign_id: campaign.id}, synchronize_session=False)
+            session.commit()
+            session.expire_all()
 
-        # Anything the guard rejected lost a race with another draft.
-        claimed = {row[0] for row in session.query(Lead.id)
-                   .filter(Lead.id.in_(eligible), Lead.campaign_id == campaign.id).all()}
-        for lead_id in eligible:
-            if lead_id not in claimed:
-                lead = found[lead_id]
-                left_behind.append({'lead_id': lead_id, 'owner_name': lead.owner_name,
-                                    'reason': 'Just claimed by another campaign.'})
-        for lead_id in claimed:
-            # The lead is locked to this campaign from here — it can't join
-            # another draft until this one is discarded (see docstring above).
-            lead_events.log_event(
-                session, lead_id, lead_events.STAGE, 'locked_to_campaign',
-                actor_type='broker', actor_id=user.id,
-                to_value=campaign.name, meta={'campaign_id': campaign.id},
-            )
-            lead = session.get(Lead, lead_id)
-            if lead and lead.source == PROVIDER_LEAD_SOURCE:
-                _expand_provider_lead(session, lead, campaign)
-        session.commit()
-    else:
-        session.commit()
+            claimed = {row[0] for row in session.query(Lead.id)
+                       .filter(Lead.id.in_(eligible),
+                               Lead.campaign_id == campaign.id).all()}
+            for lead_id in eligible:
+                if lead_id not in claimed:
+                    lead = found[lead_id]
+                    left_behind.append({
+                        'lead_id': lead_id, 'owner_name': lead.owner_name,
+                        'reason': 'Just claimed by another campaign.',
+                    })
+            for lead_id in eligible:
+                if lead_id not in claimed:
+                    continue
+                # Record one history row per lock, but commit once per batch.
+                lead_events.log_event(
+                    session, lead_id, lead_events.STAGE, 'locked_to_campaign',
+                    actor_type='broker', actor_id=user.id,
+                    to_value=campaign.name, meta={'campaign_id': campaign.id},
+                    commit=False,
+                )
+                lead = session.get(Lead, lead_id)
+                if lead and lead.source == PROVIDER_LEAD_SOURCE:
+                    _expand_provider_lead(session, lead, campaign)
+            session.commit()
+
+        processed += len(lead_id_batch)
+        if progress:
+            progress(total, processed)
+
+    # Preserve any provider backfill even when every selected row was refused.
+    session.commit()
     return left_behind
 
 
@@ -438,6 +563,24 @@ def members(session: Session, user: User, campaign: Campaign,
     if limit is not None:
         query = query.limit(limit)
     return query.all()
+
+
+def member_ids(session: Session, user: User, campaign: Campaign) -> list[int]:
+    """Stable full recipient identity; previews never define membership."""
+    return [row[0] for row in _members_query(session, user, campaign)
+            .order_by(Lead.score.desc(), Lead.id)
+            .with_entities(Lead.id)
+            .all()]
+
+
+def members_by_ids(session: Session, user: User, campaign: Campaign,
+                   lead_ids: list[int]) -> list[Lead]:
+    """Load one bounded part of an authoritative campaign recipient set."""
+    if not lead_ids:
+        return []
+    by_id = {lead.id: lead for lead in _members_query(session, user, campaign)
+             .filter(Lead.id.in_(lead_ids)).all()}
+    return [by_id[lead_id] for lead_id in lead_ids if lead_id in by_id]
 
 
 def _row(lead: Lead, text: str, **extra) -> dict:
@@ -578,6 +721,35 @@ def preview(session: Session, user: User, campaign: Campaign,
             'tokens': message_template.TOKEN_HELP,
         }
 
+    if campaign.status == 'sending':
+        jobs = (session.query(OutboundSmsJob)
+                .filter(OutboundSmsJob.campaign_id == campaign.id,
+                        OutboundSmsJob.lead_id.in_([lead.id for lead in people]))
+                .all()) if people else []
+        by_lead = {job.lead_id: job for job in jobs}
+        rendered = []
+        skipped = []
+        for lead in people:
+            job = by_lead.get(lead.id)
+            if job is None:
+                continue
+            if job.status == 'skipped':
+                skipped.append({'lead_id': lead.id, 'owner_name': lead.owner_name,
+                                'reason': job.last_error or 'Was not queued.'})
+            else:
+                rendered.append(_row(lead, job.text))
+        return {
+            'campaign_id': campaign.id,
+            'recipients': rendered,
+            'skipped': skipped,
+            'page': current_page,
+            'page_size': page_size,
+            'total_items': total_items,
+            'total_pages': total_pages,
+            'template_error': '',
+            'tokens': message_template.TOKEN_HELP,
+        }
+
     rendered: list[dict] = []
     skipped: list[dict] = []
     from ..integration_data.service import backfill_distributed_leads
@@ -643,6 +815,18 @@ def _send_to_lead(session: Session, user: User, campaign: Campaign, lead: Lead,
     wrong house. So a landlord's second property is a second message in the
     same conversation, and the thread's grounding moves to that property.
     """
+    conversation, key = _prepare_conversation(session, user, campaign, lead)
+    try:
+        message = sms_service.send_and_store_message(
+            session, conversation, text, 'outreach.initial')
+    except sms_service.SmsDeliveryError as error:
+        return None, {'lead_id': lead.id, 'owner_name': lead.owner_name, 'reason': str(error)}
+    return _record_sent(session, user, campaign, lead, conversation, message, key, text), None
+
+
+def _prepare_conversation(session: Session, user: User, campaign: Campaign,
+                          lead: Lead) -> tuple[Conversation, str]:
+    """Prepare the existing owner thread without submitting an SMS."""
     key = address_key.canonical(lead.property_address)
     conversation = (session.query(Conversation)
                     .filter(Conversation.contact == lead.phone,
@@ -687,12 +871,13 @@ def _send_to_lead(session: Session, user: User, campaign: Campaign, lead: Lead,
     session.add(conversation)
     session.commit()
     session.refresh(conversation)
+    return conversation, key
 
-    try:
-        message = sms_service.send_and_store_message(
-            session, conversation, text, 'outreach.initial')
-    except sms_service.SmsDeliveryError as error:
-        return None, {'lead_id': lead.id, 'owner_name': lead.owner_name, 'reason': str(error)}
+
+def _record_sent(session: Session, user: User, campaign: Campaign, lead: Lead,
+                 conversation: Conversation, message: Message, key: str,
+                 text: str) -> dict:
+    """Apply the existing post-acceptance campaign side effects exactly once."""
     # Attribution lives on the message, because the thread may end up carrying
     # outreach from more than one campaign and more than one property.
     message.campaign_id = campaign.id
@@ -717,64 +902,74 @@ def _send_to_lead(session: Session, user: User, campaign: Campaign, lead: Lead,
         'owner_name': lead.owner_name,
         'conversation_id': conversation.id,
         'text': text,
-    }, None
+    }
 
 
 def send(session: Session, user: User, campaign: Campaign) -> dict:
-    """Render and send the draft to every eligible member. Per-lead outcomes."""
+    """Validate and durably enqueue the complete campaign recipient set."""
     if campaign.status != 'draft':
         raise ValueError('This campaign has already been sent.')
     message_template.validate(campaign.message_template)
 
-    started: list[dict] = []
     skipped: list[dict] = []
 
     scope = brokerage_user_ids(session, user)
-    people = members(session, user, campaign)
+    # This ordered ID snapshot is the authoritative set for the whole run.
+    # Preview pagination never enters the send path, and membership changes
+    # during processing cannot duplicate or silently omit a recipient.
+    recipient_ids = member_ids(session, user, campaign)
+    validated_pairs: set[tuple[str, str]] = set()
+    jobs: list[OutboundSmsJob] = []
     from ..integration_data.service import backfill_distributed_leads
-    if backfill_distributed_leads(session, people):
-        session.commit()
-        people = members(session, user, campaign)
-    for lead in people:
-        # Checked per lead rather than once for the batch: a long send gives
-        # another brokerage time to claim a number partway through it.
-        blocked = _blocking_reason(lead, claims_on(session, scope, [lead]))
-        if blocked:
-            skipped.append({'lead_id': lead.id, 'owner_name': lead.owner_name, 'reason': blocked})
-            continue
-        text = message_template.render(campaign.message_template, lead, user,
-                                       campaign.outreach_reason or '')
-        sent, failed = _send_to_lead(session, user, campaign, lead, text)
-        if sent:
-            started.append(sent)
-        elif failed:
-            skipped.append(failed)
+    for recipient_batch in _batches(recipient_ids):
+        people = members_by_ids(session, user, campaign, recipient_batch)
+        if backfill_distributed_leads(session, people):
+            session.commit()
+            people = members_by_ids(session, user, campaign, recipient_batch)
+        claims = claims_on(session, scope, people)
+        for lead in people:
+            blocked = _blocking_reason(lead, claims)
+            pair = _recipient_key(lead)
+            if blocked is None and pair is not None and pair in validated_pairs:
+                blocked = 'Duplicate property and phone in this campaign.'
+            if blocked:
+                skipped.append({
+                    'lead_id': lead.id, 'owner_name': lead.owner_name, 'reason': blocked,
+                })
+                status = 'skipped'
+                text = ''
+                error = blocked
+            else:
+                if pair is not None:
+                    validated_pairs.add(pair)
+                text = message_template.render(
+                    campaign.message_template, lead, user, campaign.outreach_reason or '')
+                # Lookup stays a separate, sequential worker stage for now.
+                status = ('awaiting_lookup'
+                          if str(settings['telnyx'].get('mode')).lower() == 'telnyx'
+                          else 'queued')
+                error = None
+            jobs.append(OutboundSmsJob(
+                job_key=f'campaign:{campaign.id}:lead:{lead.id}',
+                campaign_id=campaign.id,
+                lead_id=lead.id,
+                user_id=user.id,
+                to_number=normalize_phone(lead.phone or ''),
+                property_key=address_key.canonical(lead.property_address),
+                text=text,
+                status=status,
+                last_error=error,
+            ))
 
-    # A campaign holds the leads it texted. Anything it could not reach returns
-    # to the pool rather than sitting under a campaign that never contacted it,
-    # invisible in both places.
-    texted = {row['lead_id'] for row in started}
-    people = members(session, user, campaign)
-    successful_parents: set[int] = set()
-    for lead in people:
-        if lead.id not in texted:
-            continue
-        details = _stored_details(lead)
-        successful_parents.add(int(details.get('_parent_lead_id') or lead.id))
-    for lead in people:
-        if lead.id not in texted:
-            if lead.source == PROVIDER_CONTACT_SOURCE:
-                session.delete(lead)
-            elif lead.source == PROVIDER_LEAD_SOURCE and lead.id not in successful_parents:
-                _restore_provider_master(lead)
-                lead.campaign_id = None
-            elif lead.source != PROVIDER_LEAD_SOURCE:
-                lead.campaign_id = None
-
-    campaign.status = 'sent'
-    campaign.sent_at = datetime.utcnow()
+    session.add_all(jobs)
+    campaign.status = 'sending'
     session.commit()
-    return {'campaign_id': campaign.id, 'started': started, 'skipped': skipped}
+    return {
+        'campaign_id': campaign.id,
+        'queued': sum(job.status in ('queued', 'awaiting_lookup') for job in jobs),
+        'started': [],
+        'skipped': skipped,
+    }
 
 
 def launch(session: Session, user: User, lead_ids: list[int], reason: str = '') -> dict:
@@ -820,18 +1015,19 @@ def _counts_by_campaign(session: Session, user: User) -> tuple[dict, dict, dict]
         for campaign_id, properties in member_properties.items()
     }
 
-    # Pending/sent messages count as reached until a final failure arrives.
-    # A carrier-rejected message must not remain in "delivered" or "no reply".
-    failure_statuses = (
+    # Only provider-accepted messages count as reached. Submission placeholders
+    # and retries stay out, as do later carrier-rejected messages.
+    non_delivered_statuses = (
         'failed', 'gw_timeout', 'dlr_timeout', 'delivery_failed',
         'sending_failed', 'delivery_unconfirmed', 'rejected', 'undelivered',
+        'submission_queued', 'submission_retry',
     )
     delivered_properties: dict[int, set[str]] = {}
     delivered_rows = (session.query(Message.id, Message.campaign_id, Message.property_key)
                       .join(Conversation, Conversation.id == Message.conversation_id)
                       .filter(Message.campaign_id.isnot(None),
                               Message.event_type == 'outreach.initial',
-                              ~Message.status.in_(failure_statuses),
+                              ~Message.status.in_(non_delivered_statuses),
                               Conversation.user_id.in_(scope))
                       .all())
     for message_id, campaign_id, property_key in delivered_rows:

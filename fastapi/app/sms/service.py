@@ -57,6 +57,13 @@ CLOSING_PATTERNS = (
 class SmsDeliveryError(RuntimeError):
     """Outbound SMS could not be handed to the simulator or Telnyx."""
 
+    def __init__(self, message: str, *, retryable: bool = False,
+                 ambiguous: bool = False, retry_after: float | None = None):
+        super().__init__(message)
+        self.retryable = retryable
+        self.ambiguous = ambiguous
+        self.retry_after = retry_after
+
 
 # ---------------------------------------------------------------------------
 # Delivery
@@ -140,26 +147,58 @@ def send_sms(payload: dict) -> dict:
             raise SmsDeliveryError('TELNYX_API_KEY is required when SMS_MODE=telnyx')
         headers['Authorization'] = f'Bearer {api_key}'
 
+        # Simulation never consumes provider capacity. Every real submission,
+        # including manual and automated SMS outside campaigns, shares this one
+        # Redis window so parallel campaigns cannot each claim 50/s.
+        from .rate_limit import RateLimiterUnavailable, acquire_submission_slot
+        try:
+            acquire_submission_slot()
+        except RateLimiterUnavailable as error:
+            raise SmsDeliveryError(str(error), retryable=True) from error
+
     try:
-        response = requests.post(url, json=body, headers=headers, timeout=15)
+        response = requests.post(
+            url, json=body, headers=headers,
+            timeout=settings['sms_submission']['request_timeout_seconds'],
+        )
+    except requests.Timeout as exc:
+        # The provider may have accepted the request before the client timed
+        # out. Retrying could create a duplicate SMS, so this is terminal and
+        # deliberately distinct from an explicit rejection.
+        raise SmsDeliveryError(str(exc), ambiguous=True) from exc
     except requests.RequestException as exc:
         if is_simulation:
             raise SmsDeliveryError(
                 f'Outbound simulator is unavailable at {url}. Start it with: python3 Simulation/outbound.py'
             ) from exc
-        raise SmsDeliveryError(str(exc)) from exc
+        raise SmsDeliveryError(str(exc), ambiguous=True) from exc
 
     try:
         parsed = response.json()
     except ValueError:
         raise SmsDeliveryError(
-            f"{'Outbound simulator' if is_simulation else 'Telnyx'} responded with non-JSON: {response.text[:200]}"
+            f"{'Outbound simulator' if is_simulation else 'Telnyx'} responded with non-JSON: {response.text[:200]}",
+            ambiguous=bool(response.ok),
         )
     if not response.ok:
         errors = parsed.get('errors') or [{}]
         detail = errors[0].get('detail') if isinstance(errors, list) and errors else json.dumps(parsed)
-        raise SmsDeliveryError(f"{'Outbound simulator' if is_simulation else 'Telnyx'} error: {detail}")
+        retry_after = None
+        try:
+            retry_after = float(response.headers.get('Retry-After', ''))
+        except (TypeError, ValueError):
+            pass
+        raise SmsDeliveryError(
+            f"{'Outbound simulator' if is_simulation else 'Telnyx'} error: {detail}",
+            retryable=response.status_code == 429 or 500 <= response.status_code < 600,
+            retry_after=retry_after,
+        )
     data = parsed.get('data') or {}
+    if not data.get('id'):
+        raise SmsDeliveryError(
+            f"{'Outbound simulator' if is_simulation else 'Telnyx'} accepted the request without a message id.",
+            ambiguous=True,
+        )
     log_event(
         logger, 'sms.delivery.accepted', mode=mode,
         provider_message_id=data.get('id'), provider_status=data.get('status'),

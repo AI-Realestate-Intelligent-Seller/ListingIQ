@@ -152,6 +152,17 @@ def load_config():
         )).strip().lower() not in ('0', 'false', 'no', 'off'),
     }
     cfg['redis_url'] = os.getenv('REDIS_URL', 'redis://127.0.0.1:6379')
+    configured_sms_rate = int(os.getenv('SMS_MAX_SUBMISSIONS_PER_SECOND', '50'))
+    sender_sms_rate = int(os.getenv('SMS_SENDER_SUBMISSIONS_PER_SECOND', str(configured_sms_rate)))
+    cfg['sms_submission'] = {
+        # 50 is an application safety ceiling. Sender/10DLC throughput may be
+        # lower and is enforced by selecting the smaller configured value.
+        'per_second': max(1, min(50, configured_sms_rate, sender_sms_rate)),
+        'max_attempts': max(1, int(os.getenv('SMS_SUBMISSION_MAX_ATTEMPTS', '4'))),
+        'retry_base_seconds': max(0.1, float(os.getenv('SMS_SUBMISSION_RETRY_BASE_SECONDS', '1'))),
+        'request_timeout_seconds': max(1.0, float(os.getenv('SMS_REQUEST_TIMEOUT_SECONDS', '15'))),
+        'stale_after_seconds': max(30, int(os.getenv('SMS_JOB_STALE_AFTER_SECONDS', '120'))),
+    }
     cfg['frontend_url'] = os.getenv('FRONTEND_URL', cfg.get('frontend_url', 'http://localhost:3000'))
     smtp_port = os.getenv('SMTP_PORT', cfg.get('smtp', {}).get('port') if isinstance(cfg.get('smtp', {}), dict) else None)
     if smtp_port is None or smtp_port == '':

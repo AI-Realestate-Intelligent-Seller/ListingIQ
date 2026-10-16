@@ -72,6 +72,44 @@ def _load_campaigns_job(job_id: str, user_id: int) -> None:
         session.close()
 
 
+def _create_draft_job(job_id: str, user_id: int, payload: dict) -> None:
+    """Build one complete draft off-request using the existing progress worker."""
+    session = SessionLocal()
+    try:
+        user = session.get(User, user_id)
+        if user is None:
+            raise LookupError('The account no longer exists.')
+        _require_access(user)
+        campaign, not_added = campaign_service.create_draft(
+            session,
+            user,
+            payload['lead_ids'],
+            payload.get('name') or '',
+            payload.get('message_template') or '',
+            progress=lambda total, loaded: query_progress.update(
+                job_id, total=total, loaded=loaded,
+            ),
+        )
+        result = {
+            'campaign': campaign_service.detail(
+                session, user, campaign, preview_page=1,
+            ),
+            'not_added': not_added,
+        }
+        query_progress.complete(
+            job_id, result, total=len(set(payload['lead_ids'])),
+        )
+        logger.info(
+            'Campaign draft %s for user %s: %s locked recipients',
+            campaign.id, user_id, campaign_service.member_count(session, user, campaign),
+        )
+    except Exception as error:  # noqa: BLE001 - every job failure must be visible
+        session.rollback()
+        query_progress.fail(job_id, error)
+    finally:
+        session.close()
+
+
 @router.post('/load', status_code=202)
 def start_campaign_load(
     background: BackgroundTasks,
@@ -100,9 +138,30 @@ def create_draft(payload: CampaignDraftRequest,
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
     logger.info('Campaign draft %s for user %s: %s leads',
-                campaign.id, current_user.id, len(payload.lead_ids) - len(not_added))
+                campaign.id, current_user.id,
+                campaign_service.member_count(session, current_user, campaign))
     return {'campaign': campaign_service.detail(session, current_user, campaign, preview_page=1),
             'not_added': not_added}
+
+
+@router.post('/draft/load', status_code=202)
+def start_draft_creation(
+    payload: CampaignDraftRequest,
+    background: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+):
+    """Queue full-selection validation; preview pagination is not job input."""
+    _require_access(current_user)
+    try:
+        job = query_progress.create(current_user.id, 'campaign-draft')
+    except query_progress.ProgressStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error))
+    background.add_task(_create_draft_job, job['job_id'], current_user.id, {
+        'lead_ids': payload.lead_ids,
+        'name': payload.name,
+        'message_template': payload.message_template,
+    })
+    return {'job_id': job['job_id']}
 
 
 @router.get('/{campaign_id}', response_model=CampaignDetail)
@@ -165,15 +224,15 @@ def preview_campaign(campaign_id: int,
 @router.post('/{campaign_id}/send')
 def send_campaign(campaign_id: int, current_user: User = Depends(get_current_user),
                   session: Session = Depends(get_db)):
-    """Send the draft. Bobbie opens a thread per lead and answers the replies."""
+    """Validate and durably enqueue the complete draft, then return immediately."""
     _require_access(current_user)
     campaign = _load(session, current_user, campaign_id)
     try:
         result = campaign_service.send(session, current_user, campaign)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
-    logger.info('Campaign %s sent by user %s: %s started, %s skipped',
-                campaign.id, current_user.id, len(result['started']), len(result['skipped']))
+    logger.info('Campaign %s queued by user %s: %s queued, %s skipped',
+                campaign.id, current_user.id, result['queued'], len(result['skipped']))
     return result
 
 

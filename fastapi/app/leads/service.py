@@ -144,6 +144,10 @@ def lead_phone_numbers(lead: Lead) -> list[dict]:
                     row = {'phone': phone, 'dnc': bool(item.get('dnc'))}
                     if item.get('owner_name'):
                         row['owner_name'] = str(item['owner_name'])
+                    for key in ('type', 'carrier', 'reachable',
+                                'lookup_status', 'lookup_checked_at'):
+                        if key in item:
+                            row[key] = item[key]
                     stored.append(row)
 
     if lead.phone and all(row['phone'] != lead.phone for row in stored):
