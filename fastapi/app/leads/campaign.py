@@ -419,12 +419,25 @@ def update_draft(session: Session, user: User, campaign: Campaign,
     return campaign
 
 
-def members(session: Session, user: User, campaign: Campaign) -> list[Lead]:
-    return (session.query(Lead)
-            .filter(Lead.user_id.in_(brokerage_user_ids(session, user)),
-                    Lead.campaign_id == campaign.id)
-            .order_by(Lead.score.desc(), Lead.id)
-            .all())
+def _members_query(session: Session, user: User, campaign: Campaign):
+    return session.query(Lead).filter(
+        Lead.user_id.in_(brokerage_user_ids(session, user)),
+        Lead.campaign_id == campaign.id,
+    )
+
+
+def member_count(session: Session, user: User, campaign: Campaign) -> int:
+    return _members_query(session, user, campaign).count()
+
+
+def members(session: Session, user: User, campaign: Campaign,
+            offset: int = 0, limit: int | None = None) -> list[Lead]:
+    query = _members_query(session, user, campaign).order_by(Lead.score.desc(), Lead.id)
+    if offset:
+        query = query.offset(offset)
+    if limit is not None:
+        query = query.limit(limit)
+    return query.all()
 
 
 def _row(lead: Lead, text: str, **extra) -> dict:
@@ -444,20 +457,23 @@ def _row(lead: Lead, text: str, **extra) -> dict:
     return row
 
 
-def _sent_view(session: Session, user: User, campaign: Campaign) -> tuple[list[dict], list[dict]]:
+def _sent_view(session: Session, user: User, campaign: Campaign,
+               people: list[Lead]) -> tuple[list[dict], list[dict]]:
     """What a sent campaign actually sent, read back from the messages.
 
     Re-rendering the template would be a guess: the template may have been
     edited, and the lead's own reason may since have changed. The stored message
     is what the owner received, so that is what the campaign's record shows.
     """
-    people = members(session, user, campaign)
     conversation_ids = [lead.conversation_id for lead in people if lead.conversation_id]
 
-    outreach = (session.query(Message)
-                .filter(Message.campaign_id == campaign.id,
-                        Message.event_type == 'outreach.initial')
-                .all())
+    outreach = []
+    if conversation_ids:
+        outreach = (session.query(Message)
+                    .filter(Message.campaign_id == campaign.id,
+                            Message.event_type == 'outreach.initial',
+                            Message.conversation_id.in_(conversation_ids))
+                    .all())
     # Keyed by property as well as thread: one campaign can text the same owner
     # about two of their listings, which is two messages on one thread.
     by_property = {(row.conversation_id, row.property_key): row for row in outreach}
@@ -531,30 +547,47 @@ def selection_reason(lead: Lead) -> str | None:
     return None
 
 
-def preview(session: Session, user: User, campaign: Campaign) -> dict:
+def preview(session: Session, user: User, campaign: Campaign,
+            page: int = 1, page_size: int = 20) -> dict:
     """The campaign's leads: what each would read, or what each actually read.
 
-    Every recipient is rendered rather than only the first: the whole point of a
-    template is that the address and the reason change, and a broker should be
-    able to scroll the real messages before two hundred of them go out.
+    Only the requested page is rendered. Campaign membership remains complete,
+    while the composer loads each 20-recipient window as it is viewed.
     """
+    page_size = max(1, min(page_size, 100))
+    total_items = member_count(session, user, campaign)
+    total_pages = max(1, (total_items + page_size - 1) // page_size)
+    current_page = min(max(page, 1), total_pages)
+    people = members(
+        session, user, campaign,
+        offset=(current_page - 1) * page_size,
+        limit=page_size,
+    )
+
     if campaign.status == 'sent':
-        sent_rows, missed_rows = _sent_view(session, user, campaign)
+        sent_rows, missed_rows = _sent_view(session, user, campaign, people)
         return {
             'campaign_id': campaign.id,
             'recipients': sent_rows,
             'skipped': missed_rows,
+            'page': current_page,
+            'page_size': page_size,
+            'total_items': total_items,
+            'total_pages': total_pages,
             'template_error': '',
             'tokens': message_template.TOKEN_HELP,
         }
 
     rendered: list[dict] = []
     skipped: list[dict] = []
-    people = members(session, user, campaign)
     from ..integration_data.service import backfill_distributed_leads
     if backfill_distributed_leads(session, people):
         session.commit()
-        people = members(session, user, campaign)
+        people = members(
+            session, user, campaign,
+            offset=(current_page - 1) * page_size,
+            limit=page_size,
+        )
     claims = claims_on(session, brokerage_user_ids(session, user), people)
     template = campaign.message_template or ''
     error = ''
@@ -576,6 +609,10 @@ def preview(session: Session, user: User, campaign: Campaign) -> dict:
         'campaign_id': campaign.id,
         'recipients': rendered,
         'skipped': skipped,
+        'page': current_page,
+        'page_size': page_size,
+        'total_items': total_items,
+        'total_pages': total_pages,
         'template_error': error,
         'tokens': message_template.TOKEN_HELP,
     }
@@ -882,7 +919,8 @@ def suggest_reasons(session: Session, user: User, campaign: Campaign) -> dict:
     return reason_suggest.suggest(session, user, campaign)
 
 
-def detail(session: Session, user: User, campaign: Campaign) -> dict:
+def detail(session: Session, user: User, campaign: Campaign,
+           preview_page: int = 1) -> dict:
     member_counts, delivered, replied = _counts_by_campaign(session, user)
     stats = _stats(campaign, member_counts.get(campaign.id, 0),
                    delivered.get(campaign.id, 0), replied.get(campaign.id, 0))
@@ -893,5 +931,5 @@ def detail(session: Session, user: User, campaign: Campaign) -> dict:
         broker_email=owner.email if owner else None,
         broker_role=owner.role if owner else None,
     )
-    stats['preview'] = preview(session, user, campaign)
+    stats['preview'] = preview(session, user, campaign, page=preview_page)
     return stats

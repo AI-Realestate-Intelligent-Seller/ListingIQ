@@ -385,6 +385,10 @@ class CampaignPreview(BaseModel):
     campaign_id: int
     recipients: List[CampaignRecipient]
     skipped: List[CampaignSkip]
+    page: int = 1
+    page_size: int = 20
+    total_items: int = 0
+    total_pages: int = 1
     # Set when the template will not render; the composer shows it and blocks Send.
     template_error: str = ''
     tokens: dict = {}
@@ -412,7 +416,7 @@ class CampaignDetail(CampaignOut):
     preview: CampaignPreview
 
 class CampaignDraftResult(BaseModel):
-    # The full detail, so the composer opens without a second round trip.
+    # Campaign detail with the first 20-recipient preview page.
     campaign: CampaignDetail
     # Selected leads the draft could not take, each with the reason.
     not_added: List[CampaignSkip] = []

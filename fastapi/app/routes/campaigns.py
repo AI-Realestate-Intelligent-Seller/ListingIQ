@@ -6,7 +6,7 @@ or send another's. The lead pool decides *who* is contacted; this module owns
 *what they are sent* and *how it went*.
 """
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from ..db import SessionLocal
@@ -101,21 +101,26 @@ def create_draft(payload: CampaignDraftRequest,
         raise HTTPException(status_code=400, detail=str(error))
     logger.info('Campaign draft %s for user %s: %s leads',
                 campaign.id, current_user.id, len(payload.lead_ids) - len(not_added))
-    return {'campaign': campaign_service.detail(session, current_user, campaign),
+    return {'campaign': campaign_service.detail(session, current_user, campaign, preview_page=1),
             'not_added': not_added}
 
 
 @router.get('/{campaign_id}', response_model=CampaignDetail)
-def campaign_detail(campaign_id: int, current_user: User = Depends(get_current_user),
+def campaign_detail(campaign_id: int,
+                    preview_page: int = Query(1, ge=1),
+                    current_user: User = Depends(get_current_user),
                     session: Session = Depends(get_db)):
-    """One campaign in full, including the rendered message for every recipient."""
+    """One campaign with the requested 20-recipient preview page."""
     _require_access(current_user)
     campaign = _load(session, current_user, campaign_id)
-    return campaign_service.detail(session, current_user, campaign)
+    return campaign_service.detail(
+        session, current_user, campaign, preview_page=preview_page,
+    )
 
 
 @router.patch('/{campaign_id}', response_model=CampaignDetail)
 def update_campaign(campaign_id: int, payload: CampaignUpdateRequest,
+                    preview_page: int = Query(1, ge=1),
                     current_user: User = Depends(get_current_user),
                     session: Session = Depends(get_db)):
     """Rename the campaign or rewrite its message. Only a draft may be rewritten."""
@@ -126,7 +131,9 @@ def update_campaign(campaign_id: int, payload: CampaignUpdateRequest,
                                       payload.message_template, payload.outreach_reason)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
-    return campaign_service.detail(session, current_user, campaign)
+    return campaign_service.detail(
+        session, current_user, campaign, preview_page=preview_page,
+    )
 
 
 @router.post('/{campaign_id}/reason-suggestions', response_model=CampaignReasonSuggestions)
@@ -143,12 +150,16 @@ def suggest_reasons(campaign_id: int, current_user: User = Depends(get_current_u
 
 
 @router.get('/{campaign_id}/preview', response_model=CampaignPreview)
-def preview_campaign(campaign_id: int, current_user: User = Depends(get_current_user),
+def preview_campaign(campaign_id: int,
+                     preview_page: int = Query(1, ge=1),
+                     current_user: User = Depends(get_current_user),
                      session: Session = Depends(get_db)):
     """What each recipient would read, without sending anything."""
     _require_access(current_user)
     campaign = _load(session, current_user, campaign_id)
-    return campaign_service.preview(session, current_user, campaign)
+    return campaign_service.preview(
+        session, current_user, campaign, page=preview_page,
+    )
 
 
 @router.post('/{campaign_id}/send')

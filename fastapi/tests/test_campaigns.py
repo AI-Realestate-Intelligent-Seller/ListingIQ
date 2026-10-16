@@ -162,6 +162,43 @@ def test_an_invented_placeholder_is_refused_before_anything_is_sent():
 # -- drafting --------------------------------------------------------------
 
 
+def test_draft_preview_renders_only_the_requested_twenty_recipient_page(
+        make_user, session):
+    owner = make_user(BROKER_EMAIL, role='broker')
+    campaign = Campaign(
+        user_id=owner.id,
+        name='Large draft',
+        message_template='Hi {{first_name}}, about {{address}}.',
+        status='draft',
+    )
+    session.add(campaign)
+    session.flush()
+    leads = [
+        Lead(
+            user_id=owner.id,
+            campaign_id=campaign.id,
+            owner_name=f'Owner {index}',
+            phone=f'+1312555{index:04d}',
+            property_address=f'{index} Main St, Chicago, IL 60601',
+            score=70,
+        )
+        for index in range(1, 26)
+    ]
+    session.add_all(leads)
+    session.commit()
+
+    body = campaign_service.preview(session, owner, campaign, page=2)
+
+    assert body['page'] == 2
+    assert body['page_size'] == 20
+    assert body['total_items'] == 25
+    assert body['total_pages'] == 2
+    assert len(body['recipients']) == 5
+    assert [item['owner_name'] for item in body['recipients']] == [
+        'Owner 21', 'Owner 22', 'Owner 23', 'Owner 24', 'Owner 25',
+    ]
+
+
 def test_creating_a_draft_holds_the_leads_and_sends_nothing(
         client, make_user, auth_header, sent_sms):
     make_user(BROKER_EMAIL, role='broker')
