@@ -243,6 +243,7 @@
 .campaign-people { display: grid; gap: 11px; }
 .campaign-people-head { display: flex; align-items: center; gap: 10px; }
 .campaign-people-head h3 { margin: 0; font-size: 14px; }
+.campaign-recipients-pagination { margin-top: 0; }
 
 .campaign-table th[scope="row"] small { display: block; color: var(--muted); font-size: 11.5px; font-weight: 400; }
 /* The message is the widest thing here and the reason the table exists. */

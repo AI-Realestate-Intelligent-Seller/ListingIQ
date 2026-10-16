@@ -59,6 +59,10 @@ export type CampaignPreview = {
   campaign_id: number;
   recipients: CampaignRecipient[];
   skipped: CampaignSkip[];
+  page: number;
+  page_size: number;
+  total_items: number;
+  total_pages: number;
   /** Set when the template will not render; Send stays disabled while it is. */
   template_error: string;
   /** Placeholder name → what it becomes, for the token help beside the editor. */

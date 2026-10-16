@@ -9,7 +9,7 @@ import type {
   CampaignReasonSuggestions,
   CampaignSendResult,
 } from "../types/campaigns.types";
-import { sendCampaign, suggestReasons, updateCampaign } from "../api/campaigns-api";
+import { fetchCampaign, sendCampaign, suggestReasons, updateCampaign } from "../api/campaigns-api";
 
 type CampaignComposerProps = {
   campaign: CampaignDetail;
@@ -39,9 +39,9 @@ const TOKEN_ORDER = [
  * what that message becomes.
  *
  * The preview is rendered by the server rather than in the browser. The same
- * code then does the sending, so what the broker reads here is exactly what
- * two hundred owners receive — a second, client-side renderer would be a second
- * chance to disagree.
+ * code then does the sending, so each visible preview page exactly matches the
+ * stored template — a second, client-side renderer would be a second chance to
+ * disagree.
  */
 export function CampaignComposer({
   campaign,
@@ -59,6 +59,7 @@ export function CampaignComposer({
   const [isSuggesting, setIsSuggesting] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isLoadingPage, setIsLoadingPage] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   /** The recipient whose property details are open, as in the Lead Pool. */
   const [detailId, setDetailId] = useState<number | null>(null);
@@ -67,6 +68,8 @@ export function CampaignComposer({
   const isSent = campaign.status === "sent";
   const preview = campaign.preview;
   const recipients = preview.recipients;
+  const recipientPages = preview.total_pages;
+  const currentRecipientPage = preview.page;
 
   // Re-render the preview a beat after typing stops rather than on every key:
   // each save is a round trip that re-renders every recipient's message.
@@ -87,6 +90,7 @@ export function CampaignComposer({
         campaign.id,
         { name, message_template: template, outreach_reason: reason },
         accessToken,
+        currentRecipientPage,
       )
         .then(onChange)
         .catch((error: unknown) => {
@@ -108,7 +112,21 @@ export function CampaignComposer({
     accessToken,
     isSent,
     onChange,
+    currentRecipientPage,
   ]);
+
+  async function loadRecipientPage(page: number): Promise<void> {
+    if (isLoadingPage || page === currentRecipientPage) return;
+    setIsLoadingPage(true);
+    setErrorMessage("");
+    try {
+      onChange(await fetchCampaign(campaign.id, accessToken, undefined, page));
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Could not load that preview page.");
+    } finally {
+      setIsLoadingPage(false);
+    }
+  }
 
   /** Asks the server what this set of leads has in common and how to say it. */
   async function fetchIdeas(): Promise<void> {
@@ -170,7 +188,8 @@ export function CampaignComposer({
     template !== campaign.message_template ||
     reason !== campaign.outreach_reason;
   const canSend =
-    !isSent && recipients.length > 0 && !preview.template_error && !isSaving && !isDirty;
+    !isSent && campaign.recipients > 0 && !preview.template_error &&
+    !isSaving && !isLoadingPage && !isDirty;
 
   return (
     <section className="campaign-composer">
@@ -324,7 +343,7 @@ export function CampaignComposer({
           ) : null}
           {longCount > 0 ? (
             <p className="campaigns-warning">
-              {longCount} {longCount === 1 ? "message runs" : "messages run"} past two SMS
+              {longCount} {longCount === 1 ? "message on this page runs" : "messages on this page run"} past two SMS
               segments and will be billed as three.
             </p>
           ) : null}
@@ -332,8 +351,8 @@ export function CampaignComposer({
           {preview.skipped.length > 0 ? (
             <div className="campaign-skipped">
               <strong>
-                {preview.skipped.length} {preview.skipped.length === 1 ? "lead" : "leads"} will not
-                be texted
+                {preview.skipped.length} {preview.skipped.length === 1 ? "lead" : "leads"} on this
+                page will not be texted
               </strong>
               <ul>
                 {preview.skipped.map((item) => (
@@ -423,6 +442,27 @@ export function CampaignComposer({
             </table>
           </div>
         )}
+        {recipientPages > 1 ? (
+          <nav className="campaigns-pagination campaign-recipients-pagination" aria-label="Campaign recipient pages">
+            <button
+              type="button"
+              onClick={() => void loadRecipientPage(Math.max(1, currentRecipientPage - 1))}
+              disabled={currentRecipientPage === 1 || isLoadingPage || isSaving || isDirty}
+            >
+              Previous
+            </button>
+            <span>
+              Page {currentRecipientPage} of {recipientPages} · {preview.total_items.toLocaleString()} leads
+            </span>
+            <button
+              type="button"
+              onClick={() => void loadRecipientPage(Math.min(recipientPages, currentRecipientPage + 1))}
+              disabled={currentRecipientPage === recipientPages || isLoadingPage || isSaving || isDirty}
+            >
+              Next
+            </button>
+          </nav>
+        ) : null}
       </div>
 
       {/* The same panel the Lead Pool opens: a lead handed to a campaign leaves

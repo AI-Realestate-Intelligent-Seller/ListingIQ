@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { LeadPool } from "./lead-pool";
 import { fetchLeadPool } from "../api/leads-api";
+import type { Lead } from "../types/leads.types";
 import {
   getByCity,
   getByZip,
@@ -51,6 +52,32 @@ const emptyPool = {
   signal_catalog: [],
   stage_catalog: [],
 };
+
+function leadRow(id: number): Lead {
+  return {
+    id,
+    owner_name: `Owner ${id}`,
+    phone: `+1312555${String(id).padStart(4, "0")}`,
+    phone_numbers: [],
+    property_address: `${id} Main St, Chicago, IL 60601`,
+    area: "Chicago",
+    latitude: null,
+    longitude: null,
+    geocoding_status: "pending",
+    geocoding_provider: null,
+    source: "csv_import",
+    property_type: null,
+    estimated_value: null,
+    listing_price: null,
+    signals: [],
+    score: 70,
+    outreach_reason: null,
+    stage: "ready",
+    last_activity_at: null,
+    conversation_id: null,
+    created_at: null,
+  };
+}
 
 const californiaCities = [
   ...Array.from({ length: 55 }, (_, index) => `A City ${String(index + 1).padStart(2, "0")}`),
@@ -149,6 +176,50 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("LeadPool dependent location filters", () => {
+  it("shows 20 loaded leads per page while bulk selection uses the full loaded list", async () => {
+    const leads = Array.from({ length: 25 }, (_, index) => leadRow(index + 1));
+    vi.mocked(fetchLeadPool).mockResolvedValue({
+      ...emptyPool,
+      leads,
+      facets: { total: leads.length, signals: {}, stages: { ready: leads.length } },
+    });
+
+    render(<LeadPool />);
+
+    expect(await screen.findByRole("button", { name: "Owner 1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Owner 20" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Owner 21" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select all loaded leads" }));
+    expect(screen.getByText("25 leads selected")).toBeTruthy();
+
+    const requestsBeforePaging = vi.mocked(fetchLeadPool).mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(screen.getByRole("button", { name: "Owner 21" })).toBeTruthy();
+    expect(vi.mocked(fetchLeadPool).mock.calls.length).toBe(requestsBeforePaging);
+
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Number of leads to select" }), {
+      target: { value: "3" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "Where to select leads from" }), {
+      target: { value: "last" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply selection" }));
+
+    expect(screen.getByText("3 leads selected")).toBeTruthy();
+    expect((screen.getByRole("checkbox", { name: "Select Owner 23" }) as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole("checkbox", { name: "Select Owner 25" }) as HTMLInputElement).checked).toBe(true);
+
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Number of leads to select" }), {
+      target: { value: "4" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "Where to select leads from" }), {
+      target: { value: "random" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply selection" }));
+    expect(screen.getByText("4 leads selected")).toBeTruthy();
+  });
+
   it("shows the database query loader until the lead pool response arrives", async () => {
     let finishLoad: ((value: typeof emptyPool) => void) | undefined;
     vi.mocked(fetchLeadPool).mockImplementationOnce(

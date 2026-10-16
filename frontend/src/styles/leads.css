@@ -397,6 +397,19 @@
 .leads-selection-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 .leads-selection-bar .button { min-height: 38px; font-size: 13px; }
 .leads-selection-bar .sms-button-secondary { padding: 10px 15px; font-size: 13px; }
+.leads-bulk-select {
+  margin-bottom: 12px; display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+  color: var(--muted); font-size: 12px;
+}
+.leads-bulk-select input,
+.leads-bulk-select select {
+  height: 36px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--white); color: var(--ink); font: inherit;
+}
+.leads-bulk-select input { width: 88px; padding: 0 10px; }
+.leads-bulk-select select { min-width: 130px; padding: 0 30px 0 10px; }
+.leads-bulk-select .sms-button-secondary { min-height: 36px; padding: 7px 12px; }
+.leads-bulk-select small { margin-left: auto; }
 
 /* -- table ----------------------------------------------------------------- */
 .leads-table-wrap {
@@ -408,6 +421,18 @@
   opacity: .36; pointer-events: none; user-select: none;
   transition: opacity .18s ease;
 }
+.leads-pagination {
+  display: flex; align-items: center; justify-content: flex-end; gap: 10px;
+  padding: 12px 14px; border-top: 1px solid var(--line);
+}
+.leads-pagination span { color: var(--muted); font-size: 12px; }
+.leads-pagination button {
+  padding: 7px 11px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--white); color: var(--ink); font: inherit; font-size: 12px;
+  font-weight: 600; cursor: pointer;
+}
+.leads-pagination button:hover:not(:disabled) { border-color: #a9bcb5; }
+.leads-pagination button:disabled { opacity: .45; cursor: not-allowed; }
 .retrieval-progress {
   position: fixed; z-index: 90; inset: 0;
   display: grid; place-items: center; padding: 28px;
@@ -635,6 +660,8 @@
   .leads-selection-bar { flex-wrap: wrap; gap: 10px; }
   .leads-selection-actions { width: 100%; margin-left: 0; }
   .leads-selection-actions .button { flex: 1; }
+  .leads-bulk-select small { width: 100%; margin-left: 0; }
+  .leads-pagination { justify-content: space-between; }
   .leads-table th { padding: 11px 14px; }
   .leads-table td { padding: 12px 14px; }
   .leads-pool .leads-table th,

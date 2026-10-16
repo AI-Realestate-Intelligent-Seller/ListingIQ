@@ -66,6 +66,9 @@ const EMPTY_POOL: LeadPoolResponse = {
   stage_catalog: [],
 };
 
+const LEADS_PER_PAGE = 20;
+type BulkSelectionOrder = "first" | "last" | "random";
+
 const LeadMap = dynamic(
   () => import("./lead-map").then((module) => module.LeadMap),
   { ssr: false, loading: () => <div className="leads-map-loading">Loading map…</div> },
@@ -192,6 +195,9 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
   /** State / town / ZIP chips. Read out of each address, not stored per lead. */
   const [location, setLocation] = useState<LocationSelection>(NO_LOCATION);
   const [selected, setSelected] = useState<number[]>([]);
+  const [page, setPage] = useState(1);
+  const [selectionCount, setSelectionCount] = useState("100");
+  const [selectionOrder, setSelectionOrder] = useState<BulkSelectionOrder>("first");
   const [isLoading, setIsLoading] = useState(true);
   const [loadProgress, setLoadProgress] = useState<QueryProgress<LeadPoolResponse> | null>(null);
   const [hasLoadedPool, setHasLoadedPool] = useState(false);
@@ -368,6 +374,16 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
   const visibleIds = leadsToShow.map((lead) => lead.id);
   const selectedVisible = selected.filter((id) => visibleIds.includes(id));
   const allSelected = visibleIds.length > 0 && selectedVisible.length === visibleIds.length;
+  const totalPages = Math.max(1, Math.ceil(leadsToShow.length / LEADS_PER_PAGE));
+  const currentPage = Math.min(page, totalPages);
+  const pageStart = (currentPage - 1) * LEADS_PER_PAGE;
+  const paginatedLeads = leadsToShow.slice(pageStart, pageStart + LEADS_PER_PAGE);
+
+  useEffect(() => {
+    // A new in-memory result set starts at its first page; paging itself never refetches.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPage(1);
+  }, [leadsToShow]);
 
   function toggleLead(id: number): void {
     setSelected((current) =>
@@ -404,6 +420,31 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
     setSelected((current) =>
       allSelected ? current.filter((id) => !visibleIds.includes(id)) : [...new Set([...current, ...visibleIds])],
     );
+  }
+
+  function selectFixedCount(): void {
+    const requested = Math.max(0, Math.floor(Number(selectionCount) || 0));
+    const count = Math.min(requested, visibleIds.length);
+    if (count === 0) {
+      setSelected([]);
+      return;
+    }
+    let candidates = visibleIds;
+
+    if (selectionOrder === "last") {
+      candidates = visibleIds.slice(-count);
+    } else if (selectionOrder === "random") {
+      candidates = [...visibleIds];
+      for (let index = candidates.length - 1; index > 0; index -= 1) {
+        const swapIndex = Math.floor(Math.random() * (index + 1));
+        [candidates[index], candidates[swapIndex]] = [candidates[swapIndex], candidates[index]];
+      }
+      candidates = candidates.slice(0, count);
+    } else {
+      candidates = visibleIds.slice(0, count);
+    }
+
+    setSelected(candidates);
   }
 
   function toggleSignal(key: string): void {
@@ -1226,6 +1267,38 @@ useEffect(() => {
         </div>
       ) : null}
 
+      <div className="leads-bulk-select" aria-label="Select a fixed number of leads">
+        <span>Select</span>
+        <input
+          type="number"
+          min="1"
+          max={Math.max(visibleIds.length, 1)}
+          inputMode="numeric"
+          value={selectionCount}
+          onChange={(event) => setSelectionCount(event.target.value)}
+          aria-label="Number of leads to select"
+        />
+        <span>from</span>
+        <select
+          value={selectionOrder}
+          onChange={(event) => setSelectionOrder(event.target.value as BulkSelectionOrder)}
+          aria-label="Where to select leads from"
+        >
+          <option value="first">First leads</option>
+          <option value="last">Last leads</option>
+          <option value="random">Random leads</option>
+        </select>
+        <button
+          type="button"
+          className="sms-button-secondary"
+          onClick={selectFixedCount}
+          disabled={visibleIds.length === 0 || Number(selectionCount) <= 0}
+        >
+          Apply selection
+        </button>
+        <small>Uses the {visibleIds.length.toLocaleString()} leads already loaded.</small>
+      </div>
+
       <div
         className={`leads-table-wrap${isLoading ? " is-loading" : ""}${
           isLoading && !hasLoadedPool ? " initial-load" : ""
@@ -1256,7 +1329,7 @@ useEffect(() => {
                   checked={allSelected}
                   onChange={toggleAll}
                   disabled={visibleIds.length === 0}
-                  aria-label="Select all leads shown"
+                  aria-label="Select all loaded leads"
                 />
               </th>
               <th scope="col">Owner / Property</th>
@@ -1283,7 +1356,7 @@ useEffect(() => {
             </tr>
           </thead>
           <tbody>
-           {leadsToShow.map((lead) => {
+           {paginatedLeads.map((lead) => {
               const isChecked = selected.includes(lead.id);
               return (
                 <tr
@@ -1361,6 +1434,28 @@ useEffect(() => {
             })}
           </tbody>
         </table>
+
+        {!isLoading && totalPages > 1 ? (
+          <nav className="leads-pagination" aria-label="Lead Pool pages">
+            <button
+              type="button"
+              onClick={() => setPage(Math.max(1, currentPage - 1))}
+              disabled={currentPage === 1}
+            >
+              Previous
+            </button>
+            <span>
+              Page {currentPage} of {totalPages} · {leadsToShow.length.toLocaleString()} leads
+            </span>
+            <button
+              type="button"
+              onClick={() => setPage(Math.min(totalPages, currentPage + 1))}
+              disabled={currentPage === totalPages}
+            >
+              Next
+            </button>
+          </nav>
+        ) : null}
 
         {!isLoading && leadsToShow.length === 0 ? (
           <div className="leads-empty">

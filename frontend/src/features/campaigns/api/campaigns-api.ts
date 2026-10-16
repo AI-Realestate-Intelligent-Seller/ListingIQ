@@ -34,8 +34,13 @@ export function fetchCampaign(
   campaignId: number,
   accessToken: string,
   signal?: AbortSignal,
+  previewPage = 1,
 ): Promise<CampaignDetail> {
-  return getJson<CampaignDetail>(`${CAMPAIGNS}/${campaignId}`, accessToken, signal);
+  return getJson<CampaignDetail>(
+    `${CAMPAIGNS}/${campaignId}?preview_page=${previewPage}`,
+    accessToken,
+    signal,
+  );
 }
 
 /**
@@ -58,9 +63,10 @@ export function updateCampaign(
   campaignId: number,
   changes: { name?: string; message_template?: string; outreach_reason?: string },
   accessToken: string,
+  previewPage = 1,
 ): Promise<CampaignDetail> {
   return patchJson<CampaignDetail, typeof changes>(
-    `${CAMPAIGNS}/${campaignId}`,
+    `${CAMPAIGNS}/${campaignId}?preview_page=${previewPage}`,
     changes,
     accessToken,
   );
