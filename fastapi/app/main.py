@@ -173,6 +173,17 @@ def startup_event():
     _warm_knowledge_base()
     start_reminder_worker()
     start_geocoding_worker()
+    from .sms.outbound_worker import start_embedded_worker
+
+    start_embedded_worker()
+
+
+@app.on_event("shutdown")
+def shutdown_event():
+    """Give the embedded SMS supervisor and its ten threads a clean stop."""
+    from .sms.outbound_worker import stop_embedded_worker
+
+    stop_embedded_worker()
 
 
 def _warm_knowledge_base():

@@ -162,6 +162,9 @@ def load_config():
         'retry_base_seconds': max(0.1, float(os.getenv('SMS_SUBMISSION_RETRY_BASE_SECONDS', '1'))),
         'request_timeout_seconds': max(1.0, float(os.getenv('SMS_REQUEST_TIMEOUT_SECONDS', '15'))),
         'stale_after_seconds': max(30, int(os.getenv('SMS_JOB_STALE_AFTER_SECONDS', '120'))),
+        'embedded_worker_enabled': str(os.getenv(
+            'SMS_WORKER_EMBEDDED_ENABLED', 'false')).strip().lower() in (
+                '1', 'true', 'yes', 'on'),
     }
     cfg['frontend_url'] = os.getenv('FRONTEND_URL', cfg.get('frontend_url', 'http://localhost:3000'))
     smtp_port = os.getenv('SMTP_PORT', cfg.get('smtp', {}).get('port') if isinstance(cfg.get('smtp', {}), dict) else None)

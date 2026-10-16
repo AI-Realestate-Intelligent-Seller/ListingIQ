@@ -4,16 +4,22 @@ Campaign Send validates and renders the complete locked recipient set, writes
 one `outbound_sms_jobs` row per recipient, marks the campaign `sending`, and
 returns immediately. Preview pagination is not an input to this operation.
 
-Run a single Render background-worker service from the FastAPI directory:
+The worker runs inside the existing FastAPI Render Web Service. Keep the
+existing Uvicorn start command unchanged and set:
 
 ```text
-python -m app.sms.outbound_worker
+SMS_WORKER_EMBEDDED_ENABLED=true
 ```
 
-Keep that service at exactly one instance. The process always starts ten SMS
-submission threads. It uses the same `POSTGRES_URL`, `REDIS_URL`, Telnyx, and
-application environment as the API. Apply Alembic revision
-`0030_outbound_sms_jobs` before starting it.
+FastAPI startup creates a non-blocking supervisor thread. A Redis lease elects
+one supervisor across Uvicorn processes and overlapping Render deploy
+instances; only the lease owner starts the ten SMS submission threads. The
+replacement instance waits until the prior instance stops and releases (or
+loses) the lease. FastAPI shutdown signals the worker, joins all ten threads,
+and releases the lease. No Render Background Worker or second server is
+required.
+
+Apply Alembic revision `0030_outbound_sms_jobs` before enabling the flag.
 
 Redis assigns globally paced submission slots across every live SMS submission.
 `SMS_MAX_SUBMISSIONS_PER_SECOND` is capped at 50. Set

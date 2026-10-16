@@ -1,10 +1,8 @@
-"""Durable campaign SMS worker.
+"""Durable campaign SMS worker embedded by the FastAPI lifecycle.
 
-Run exactly one Render background-worker service with:
-    python -m app.sms.outbound_worker
-
-Ten submission threads are fixed here. Redis supplies the cross-process send
-rate; PostgreSQL/SQLite supplies durable jobs and atomic claims.
+FastAPI starts one process-local supervisor without blocking HTTP startup. A
+Redis lease elects one active supervisor across overlapping Render instances;
+that owner runs the fixed ten submission threads.
 """
 
 from __future__ import annotations
@@ -16,6 +14,9 @@ import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from uuid import uuid4
+
+import redis
 
 from ..core.config import settings
 from ..db import SessionLocal
@@ -28,10 +29,58 @@ logger = logging.getLogger(__name__)
 SMS_WORKER_COUNT = 10
 TERMINAL = ('accepted', 'skipped', 'failed', 'uncertain')
 _recipient_locks = tuple(threading.Lock() for _ in range(256))
+_embedded_guard = threading.Lock()
+_embedded_thread: threading.Thread | None = None
+_embedded_stop: threading.Event | None = None
+SUPERVISOR_LEASE_KEY = 'listingiq:sms:worker-supervisor'
+SUPERVISOR_LEASE_SECONDS = 30
+SUPERVISOR_RENEW_SECONDS = 10
+
+_RENEW_LEASE_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+"""
+
+_RELEASE_LEASE_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
 
 
 class RecipientNoLongerEligible(RuntimeError):
     pass
+
+
+class SupervisorLease:
+    """Redis ownership for one embedded supervisor across overlapping deploys."""
+
+    def __init__(self, client=None, token: str | None = None):
+        self.client = client or redis.Redis.from_url(
+            settings['redis_url'], socket_connect_timeout=2, socket_timeout=2,
+            decode_responses=True,
+        )
+        self.token = token or f'{socket.gethostname()}:{os.getpid()}:{uuid4().hex}'
+
+    def acquire(self) -> bool:
+        return bool(self.client.set(
+            SUPERVISOR_LEASE_KEY, self.token,
+            nx=True, ex=SUPERVISOR_LEASE_SECONDS,
+        ))
+
+    def renew(self) -> bool:
+        return bool(self.client.eval(
+            _RENEW_LEASE_LUA, 1, SUPERVISOR_LEASE_KEY,
+            self.token, SUPERVISOR_LEASE_SECONDS,
+        ))
+
+    def release(self) -> None:
+        self.client.eval(
+            _RELEASE_LEASE_LUA, 1, SUPERVISOR_LEASE_KEY, self.token,
+        )
 
 
 def _worker_name(slot: int) -> str:
@@ -439,6 +488,97 @@ def run_forever(stop: threading.Event | None = None) -> None:
             stop.set()
             for future in futures:
                 future.result()
+
+
+def _run_embedded_supervisor(stop: threading.Event) -> None:
+    """Wait for global ownership, then supervise the durable worker locally."""
+    lease = SupervisorLease()
+    while not stop.is_set():
+        try:
+            acquired = lease.acquire()
+        except redis.RedisError as error:
+            logger.warning('Embedded SMS worker is waiting for Redis: %s', error)
+            stop.wait(2)
+            continue
+        if not acquired:
+            # During a rolling Render deploy, the replacement web process waits
+            # while the old process drains and releases ownership.
+            stop.wait(2)
+            continue
+
+        worker_stop = threading.Event()
+        worker = threading.Thread(
+            target=run_forever,
+            args=(worker_stop,),
+            name='sms-outbound-worker',
+            daemon=True,
+        )
+        worker.start()
+        logger.info('Embedded outbound SMS worker acquired the global lease')
+        lease_owned = True
+        try:
+            while not stop.wait(SUPERVISOR_RENEW_SECONDS):
+                if not worker.is_alive():
+                    logger.error('Embedded outbound SMS worker stopped unexpectedly')
+                    break
+                try:
+                    if not lease.renew():
+                        logger.warning('Embedded outbound SMS worker lost its global lease')
+                        lease_owned = False
+                        break
+                except redis.RedisError as error:
+                    # Stop rather than risk two supervisors after the lease
+                    # expires during a Redis/network interruption.
+                    logger.warning('Embedded SMS lease renewal failed: %s', error)
+                    lease_owned = False
+                    break
+        finally:
+            worker_stop.set()
+            worker.join()
+            if lease_owned:
+                try:
+                    lease.release()
+                except redis.RedisError as error:
+                    logger.warning('Could not release embedded SMS worker lease: %s', error)
+        if not stop.is_set():
+            stop.wait(2)
+
+
+def start_embedded_worker() -> bool:
+    """Start one non-blocking supervisor thread for this FastAPI process."""
+    global _embedded_thread, _embedded_stop
+    if not settings['sms_submission']['embedded_worker_enabled']:
+        logger.info('Embedded outbound SMS worker is disabled')
+        return False
+    with _embedded_guard:
+        if _embedded_thread is not None and _embedded_thread.is_alive():
+            return False
+        _embedded_stop = threading.Event()
+        _embedded_thread = threading.Thread(
+            target=_run_embedded_supervisor,
+            args=(_embedded_stop,),
+            name='sms-worker-supervisor',
+            daemon=True,
+        )
+        _embedded_thread.start()
+        return True
+
+
+def stop_embedded_worker() -> bool:
+    """Stop and join the process-local supervisor during FastAPI shutdown."""
+    global _embedded_thread, _embedded_stop
+    with _embedded_guard:
+        thread = _embedded_thread
+        stop = _embedded_stop
+        if thread is None or stop is None:
+            return False
+        stop.set()
+    thread.join()
+    with _embedded_guard:
+        if _embedded_thread is thread:
+            _embedded_thread = None
+            _embedded_stop = None
+    return True
 
 
 if __name__ == '__main__':

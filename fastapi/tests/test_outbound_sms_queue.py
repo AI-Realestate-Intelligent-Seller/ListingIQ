@@ -343,3 +343,69 @@ def test_live_timeout_is_ambiguous_and_not_retryable(monkeypatch):
         sms_service.send_sms({'to': '+12000000000', 'text': 'mock'})
     assert raised.value.ambiguous is True
     assert raised.value.retryable is False
+
+
+class _LeaseRedis:
+    def __init__(self):
+        self.value = None
+        self.lock = threading.Lock()
+
+    def set(self, _key, value, nx=False, ex=None):
+        assert nx is True and ex == outbound_worker.SUPERVISOR_LEASE_SECONDS
+        with self.lock:
+            if self.value is not None:
+                return False
+            self.value = value
+            return True
+
+    def eval(self, script, _keys, _key, token, *args):
+        with self.lock:
+            if script == outbound_worker._RENEW_LEASE_LUA:
+                return int(self.value == token)
+            if self.value == token:
+                self.value = None
+                return 1
+            return 0
+
+
+def test_redis_supervisor_lease_excludes_overlapping_render_instances():
+    redis_store = _LeaseRedis()
+    old_instance = outbound_worker.SupervisorLease(redis_store, token='old')
+    replacement = outbound_worker.SupervisorLease(redis_store, token='new')
+
+    assert old_instance.acquire() is True
+    assert replacement.acquire() is False
+    assert old_instance.renew() is True
+    old_instance.release()
+    assert replacement.acquire() is True
+
+
+def test_embedded_start_is_nonblocking_singleton_and_shutdown_joins(monkeypatch):
+    outbound_worker.stop_embedded_worker()
+    started = threading.Event()
+    stopped = threading.Event()
+
+    def fake_supervisor(stop):
+        started.set()
+        stop.wait()
+        stopped.set()
+
+    monkeypatch.setitem(
+        outbound_worker.settings['sms_submission'], 'embedded_worker_enabled', True)
+    monkeypatch.setattr(outbound_worker, '_run_embedded_supervisor', fake_supervisor)
+
+    before = time.monotonic()
+    assert outbound_worker.start_embedded_worker() is True
+    assert time.monotonic() - before < 0.25
+    assert started.wait(1)
+    assert outbound_worker.start_embedded_worker() is False
+    assert outbound_worker.stop_embedded_worker() is True
+    assert stopped.is_set()
+    assert outbound_worker.stop_embedded_worker() is False
+
+
+def test_embedded_worker_flag_disables_start(monkeypatch):
+    outbound_worker.stop_embedded_worker()
+    monkeypatch.setitem(
+        outbound_worker.settings['sms_submission'], 'embedded_worker_enabled', False)
+    assert outbound_worker.start_embedded_worker() is False
