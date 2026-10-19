@@ -621,6 +621,21 @@ def _sent_view(session: Session, user: User, campaign: Campaign,
     # about two of their listings, which is two messages on one thread.
     by_property = {(row.conversation_id, row.property_key): row for row in outreach}
 
+    # A recipient rejected before provider submission has no Message row, but
+    # its durable job records the authoritative reason (for example, Telnyx
+    # verified that the destination is a landline). Keep that reason in the
+    # completed-campaign view instead of reducing it to "Was not sent."
+    lead_ids = [lead.id for lead in people]
+    job_reasons = dict(
+        session.query(OutboundSmsJob.lead_id, OutboundSmsJob.last_error)
+        .filter(
+            OutboundSmsJob.campaign_id == campaign.id,
+            OutboundSmsJob.lead_id.in_(lead_ids),
+            OutboundSmsJob.last_error.isnot(None),
+        )
+        .all()
+    ) if lead_ids else {}
+
     latest_reply: dict[int, datetime] = {}
     if conversation_ids:
         latest_reply = dict(session.query(Message.conversation_id,
@@ -637,11 +652,11 @@ def _sent_view(session: Session, user: User, campaign: Campaign,
         message = by_property.get((lead.conversation_id, key))
         if message is None:
             # No outreach carries this lead's property, so it never went out.
-            # The reason it was held back was not recorded, so only the reasons
-            # still visible on the lead can be given.
+            # Prefer the reason recorded at send time; current lead state is
+            # only a fallback for older campaigns without durable jobs.
             standing = _blocking_reason_for_record(lead)
             missed_rows.append({'lead_id': lead.id, 'owner_name': lead.owner_name,
-                                'reason': standing or 'Was not sent.'})
+                                'reason': job_reasons.get(lead.id) or standing or 'Was not sent.'})
             continue
         answered = latest_reply.get(lead.conversation_id)
         sent_rows.append(_row(

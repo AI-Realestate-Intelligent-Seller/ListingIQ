@@ -34,6 +34,13 @@ const TOKEN_ORDER = [
   "agent_name",
 ];
 
+function displaySkipReason(reason: string): string {
+  const normalized = reason.toLowerCase().replaceAll(/[-_]/g, " ");
+  return normalized.includes("landline") || normalized.includes("fixed line")
+    ? "Landline"
+    : reason;
+}
+
 /**
  * Writes one campaign: its name, its message, and the per-recipient preview of
  * what that message becomes.
@@ -353,20 +360,26 @@ export function CampaignComposer({
           ) : null}
 
           {preview.skipped.length > 0 ? (
-            <div className="campaign-skipped">
-              <strong>
-                {preview.skipped.length} {preview.skipped.length === 1 ? "lead" : "leads"} on this
-                page will not be texted
-              </strong>
+            <details className="campaign-skipped">
+              <summary>
+                <strong>
+                  {preview.skipped.length} {preview.skipped.length === 1 ? "lead" : "leads"} on this
+                  page will not be texted
+                </strong>
+                <span className="campaign-skipped-toggle" aria-hidden="true">
+                  <span className="campaign-skipped-show">Show reasons</span>
+                  <span className="campaign-skipped-hide">Hide reasons</span>
+                </span>
+              </summary>
               <ul>
                 {preview.skipped.map((item) => (
                   <li key={item.lead_id}>
                     <span>{item.owner_name ?? `Lead ${item.lead_id}`}</span>
-                    <em>{item.reason}</em>
+                    <em><span className="sr-only">Reason: </span>{displaySkipReason(item.reason)}</em>
                   </li>
                 ))}
               </ul>
-            </div>
+            </details>
           ) : null}
         </div>
 

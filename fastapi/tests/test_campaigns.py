@@ -9,7 +9,7 @@ from datetime import datetime
 from app.leads import campaign as campaign_service
 from app.leads import template as message_template
 from app.leads.address import canonical
-from app.models import Campaign, Conversation, Lead, LeadEvent, Message, User
+from app.models import Campaign, Conversation, Lead, LeadEvent, Message, OutboundSmsJob, User
 from app.sms import service
 from app.sms.number_lookup import NumberLookupResult
 
@@ -744,6 +744,49 @@ def test_failed_delivery_is_not_counted_as_waiting_for_a_reply(
     assert campaign['delivered'] == 2
     assert campaign['no_reply'] == 3
     assert campaign['not_sent'] == 1
+
+
+def test_completed_campaign_shows_the_recorded_reason_for_an_unsent_lead(
+        session, make_user):
+    owner = make_user(BROKER_EMAIL, role='broker')
+    campaign = Campaign(
+        user_id=owner.id,
+        name='Landline results',
+        message_template='Hi {{first_name}}.',
+        status='sent',
+    )
+    session.add(campaign)
+    session.flush()
+    lead = Lead(
+        user_id=owner.id,
+        campaign_id=campaign.id,
+        owner_name='Moriah Theobald',
+        phone='+13125550141',
+        property_address='141 Main St, Chicago, IL 60601',
+    )
+    session.add(lead)
+    session.flush()
+    session.add(OutboundSmsJob(
+        job_key=f'campaign:{campaign.id}:lead:{lead.id}',
+        campaign_id=campaign.id,
+        lead_id=lead.id,
+        user_id=owner.id,
+        to_number=lead.phone,
+        property_key=canonical(lead.property_address),
+        text='',
+        status='skipped',
+        last_error='Number is landline; campaigns send only to mobile numbers.',
+    ))
+    session.commit()
+
+    result = campaign_service.preview(session, owner, campaign)
+
+    assert result['recipients'] == []
+    assert result['skipped'] == [{
+        'lead_id': lead.id,
+        'owner_name': 'Moriah Theobald',
+        'reason': 'Number is landline; campaigns send only to mobile numbers.',
+    }]
 
 
 def test_campaign_reporting_counts_unique_property_addresses(session):

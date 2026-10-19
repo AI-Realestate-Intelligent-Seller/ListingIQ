@@ -107,4 +107,64 @@ describe("CampaignComposer recipient pagination", () => {
     expect(screen.getByText("Page 2 of 2 · 25 leads")).toBeTruthy();
     expect(fetchCampaign).toHaveBeenCalledWith(7, "token", undefined, 2);
   });
+
+  it("keeps skipped leads collapsed and shows the exact reason on request", () => {
+    const campaign: CampaignDetail = {
+      id: 8,
+      name: "Landline check",
+      message_template: "Hello {{owner_name}}",
+      outreach_reason: "",
+      status: "sending",
+      sent_at: null,
+      created_at: "2026-10-16T00:00:00Z",
+      recipients: 1,
+      delivered: 0,
+      replied: 0,
+      no_reply: 1,
+      not_sent: 0,
+      broker_id: 1,
+      broker_name: "Broker",
+      broker_email: "broker@example.com",
+      broker_role: "broker",
+      preview: {
+        campaign_id: 8,
+        recipients: [],
+        skipped: [{
+          lead_id: 41,
+          owner_name: "Moriah Theobald",
+          reason: "Number is fixed line; campaigns send only to mobile numbers.",
+        }],
+        page: 1,
+        page_size: 20,
+        total_items: 1,
+        total_pages: 1,
+        template_error: "",
+        tokens: { owner_name: "Owner" },
+      },
+    };
+
+    render(
+      <CampaignComposer
+        campaign={campaign}
+        accessToken="token"
+        onChange={vi.fn()}
+        onSent={vi.fn()}
+        onDiscard={vi.fn()}
+        onBack={vi.fn()}
+        onOpenConversation={vi.fn()}
+      />,
+    );
+
+    const summary = screen.getByText("Show reasons").closest("summary");
+    const details = summary?.closest("details");
+    expect(details?.open).toBe(false);
+    expect(screen.getByText("Moriah Theobald")).toBeTruthy();
+    expect(screen.getByText("Landline")).toBeTruthy();
+    expect(screen.queryByText("Number is fixed line; campaigns send only to mobile numbers.")).toBeNull();
+
+    fireEvent.click(summary!);
+
+    expect(details?.open).toBe(true);
+    expect(screen.getByText("Hide reasons")).toBeTruthy();
+  });
 });

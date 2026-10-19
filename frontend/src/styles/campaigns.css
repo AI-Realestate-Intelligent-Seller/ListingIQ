@@ -163,7 +163,17 @@
 .campaign-skipped {
   padding: 12px 14px; border: 1px solid var(--line); border-radius: 11px; background: #fbfbfa;
 }
-.campaign-skipped strong { display: block; font-size: 13px; margin-bottom: 7px; }
+.campaign-skipped summary {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  cursor: pointer; list-style: none;
+}
+.campaign-skipped summary::-webkit-details-marker { display: none; }
+.campaign-skipped strong { display: block; font-size: 13px; }
+.campaign-skipped-toggle { flex-shrink: 0; color: var(--accent); font-size: 12px; font-weight: 700; }
+.campaign-skipped-hide { display: none; }
+.campaign-skipped[open] .campaign-skipped-show { display: none; }
+.campaign-skipped[open] .campaign-skipped-hide { display: inline; }
+.campaign-skipped[open] summary { margin-bottom: 9px; }
 .campaign-skipped ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 5px; }
 .campaign-skipped li { display: flex; justify-content: space-between; gap: 12px; font-size: 12.5px; }
 .campaign-skipped em { font-style: normal; color: var(--muted); text-align: right; }
