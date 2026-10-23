@@ -13,6 +13,7 @@ from ..batchdata import models as bd
 from ..batchdata.service import property_table_row
 from ..dealmachine import models as dm
 from ..leads.address import canonical
+from ..leads.catalog import SIGNALS
 from ..leads.importer import normalize_phone, score_lead
 from ..models import Lead, User
 from ..propertyradar import models as pr
@@ -666,6 +667,20 @@ def distribute(db, payload, actor_id):
         if payload.mode == "sandbox":
             continue
         data = row.data_json
+        rule = plan["rules"][allocation["rule_index"]]
+        matched_categories = sorted(
+            category for category in set(rule.get("categories") or [])
+            .intersection(row.categories_json or [])
+            if category in SIGNALS
+        )
+        verified_main_signal = (
+            matched_categories[0] if len(matched_categories) == 1 else None
+        )
+        single_main_signal = (
+            row.categories_json[0]
+            if (len(row.categories_json or []) == 1 and row.categories_json[0] in SIGNALS)
+            else None
+        )
         allowed = [
             phone
             for phone in data.get("phones", [])
@@ -678,6 +693,9 @@ def distribute(db, payload, actor_id):
             property_address=data["address"],
             area=data.get("city"),
             signals=",".join(row.categories_json),
+            main_signal=verified_main_signal or single_main_signal,
+            main_signal_basis=("source_verified" if verified_main_signal
+                               else "single_signal" if single_main_signal else None),
             source="provider_distribution",
             dnc=row.lead_status == "dnc" or bool(data.get("phones") and not allowed),
             details=json.dumps(lead_details_payload(data, row.sources_json, run_id)),

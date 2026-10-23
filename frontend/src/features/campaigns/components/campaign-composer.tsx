@@ -3,13 +3,22 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { LeadDetailDrawer } from "@/features/leads/components/lead-detail-drawer";
+import { Toast, type ToastTone } from "@/components/toast/toast";
 
 import type {
   CampaignDetail,
+  CampaignFilters,
   CampaignReasonSuggestions,
+  CampaignSelection,
   CampaignSendResult,
 } from "../types/campaigns.types";
-import { fetchCampaign, sendCampaign, suggestReasons, updateCampaign } from "../api/campaigns-api";
+import {
+  fetchCampaign,
+  removeCampaignRecipients,
+  sendCampaign,
+  suggestReasons,
+  updateCampaign,
+} from "../api/campaigns-api";
 
 type CampaignComposerProps = {
   campaign: CampaignDetail;
@@ -68,6 +77,20 @@ export function CampaignComposer({
   const [isSaving, setIsSaving] = useState(false);
   const [isLoadingPage, setIsLoadingPage] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const [filters, setFilters] = useState<CampaignFilters>({});
+  const [filterDraft, setFilterDraft] = useState<CampaignFilters>({});
+  const [showFilters, setShowFilters] = useState(false);
+  const [filterAction, setFilterAction] = useState<"apply" | "clear" | null>(null);
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [selectAllFiltered, setSelectAllFiltered] = useState(false);
+  const [isBulkSaving, setIsBulkSaving] = useState(false);
+  const [isRemovingUnresolved, setIsRemovingUnresolved] = useState(false);
+  const [toast, setToast] = useState<{ message: string; tone: ToastTone } | null>(null);
+  const [reasonSignalSearch, setReasonSignalSearch] = useState("");
+  const [groupReasonEdits, setGroupReasonEdits] = useState<Record<string, string>>({});
+  const [groupSuggestionResults, setGroupSuggestionResults] = useState<Record<string, CampaignReasonSuggestions>>({});
+  const [suggestingGroup, setSuggestingGroup] = useState<string | null>(null);
+  const [savingGroup, setSavingGroup] = useState<string | null>(null);
   /** The recipient whose property details are open, as in the Lead Pool. */
   const [detailId, setDetailId] = useState<number | null>(null);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
@@ -79,6 +102,7 @@ export function CampaignComposer({
   const recipients = preview.recipients;
   const recipientPages = preview.total_pages;
   const currentRecipientPage = preview.page;
+  const dirtyGroups = Object.keys(groupReasonEdits);
 
   // Re-render the visible preview page a beat after typing stops rather than
   // on every key; the stored template remains campaign-wide.
@@ -129,10 +153,33 @@ export function CampaignComposer({
     setIsLoadingPage(true);
     setErrorMessage("");
     try {
-      onChange(await fetchCampaign(campaign.id, accessToken, undefined, page));
+      onChange(await fetchCampaign(campaign.id, accessToken, undefined, page, filters));
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Could not load that preview page.");
     } finally {
+      setIsLoadingPage(false);
+    }
+  }
+
+  async function applyFilters(
+    next: CampaignFilters,
+    action: "apply" | "clear" = "apply",
+  ): Promise<void> {
+    if (filterAction) return;
+    setFilterAction(action);
+    setIsLoadingPage(true);
+    setErrorMessage("");
+    try {
+      const loaded = await fetchCampaign(campaign.id, accessToken, undefined, 1, next);
+      setFilters(next);
+      setSelectedIds([]);
+      setSelectAllFiltered(false);
+      setShowFilters(false);
+      onChange(loaded);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Could not filter recipients.");
+    } finally {
+      setFilterAction(null);
       setIsLoadingPage(false);
     }
   }
@@ -150,6 +197,104 @@ export function CampaignComposer({
       );
     } finally {
       setIsSuggesting(false);
+    }
+  }
+
+  async function suggestGroupReason(signal: string): Promise<void> {
+    if (suggestingGroup) return;
+    setSuggestingGroup(signal);
+    setErrorMessage("");
+    try {
+      const result = await suggestReasons(campaign.id, accessToken, signal);
+      setGroupSuggestionResults((current) => ({ ...current, [signal]: result }));
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Could not suggest a reason.");
+    } finally {
+      setSuggestingGroup(null);
+    }
+  }
+
+  async function saveGroup(signal: string): Promise<void> {
+    const persisted = preview.reason_groups.find((group) => group.key === signal)?.reason ?? "";
+    const nextReason = (groupReasonEdits[signal] ?? persisted).trim();
+    if (!nextReason || savingGroup) return;
+    setSavingGroup(signal);
+    setIsSaving(true);
+    setErrorMessage("");
+    try {
+      const updated = await updateCampaign(
+        campaign.id,
+        { reason_group: { signal, reason: nextReason, confirmed: true } },
+        accessToken,
+        currentRecipientPage,
+      );
+      onChange(updated);
+      setGroupReasonEdits((current) => {
+        const next = { ...current };
+        delete next[signal];
+        return next;
+      });
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Could not save that reason.");
+    } finally {
+      setSavingGroup(null);
+      setIsSaving(false);
+    }
+  }
+
+  function selection(): CampaignSelection {
+    return selectAllFiltered
+      ? { mode: "filtered", filters }
+      : { mode: "ids", lead_ids: selectedIds };
+  }
+
+  async function removeSelected(): Promise<void> {
+    if (isBulkSaving || isRemovingUnresolved || (!selectAllFiltered && selectedIds.length === 0) ||
+        !window.confirm("Return only the selected contacts to the Lead Pool?")) return;
+    setIsBulkSaving(true);
+    setErrorMessage("");
+    try {
+      const updated = await removeCampaignRecipients(
+        campaign.id, selection(), accessToken, currentRecipientPage, filters,
+      );
+      onChange(updated.campaign);
+      setSelectedIds([]);
+      setSelectAllFiltered(false);
+      setToast({
+        tone: "success",
+        message: `${updated.result.removed_contacts} recipients returned to Lead Pool. ${updated.result.remaining_contacts} recipients remain.`,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not remove those contacts.";
+      setErrorMessage(message);
+      setToast({ tone: "error", message });
+    } finally {
+      setIsBulkSaving(false);
+    }
+  }
+
+  async function removeUnresolved(): Promise<void> {
+    if (isRemovingUnresolved || isBulkSaving || preview.needs_review_count === 0 ||
+        !window.confirm("Return every genuinely unresolved recipient to the Lead Pool?")) return;
+    setIsRemovingUnresolved(true);
+    setErrorMessage("");
+    try {
+      const updated = await removeCampaignRecipients(
+        campaign.id, { mode: "unresolved" }, accessToken, currentRecipientPage, filters,
+      );
+      onChange(updated.campaign);
+      setSelectedIds([]);
+      setSelectAllFiltered(false);
+      setToast({
+        tone: "success",
+        message: `${updated.result.removed_contacts} recipients returned to Lead Pool. ${updated.result.remaining_contacts} recipients remain.`,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not return unresolved recipients.";
+      setErrorMessage(message);
+      setToast({ tone: "error", message });
+    } finally {
+      setIsRemovingUnresolved(false);
     }
   }
 
@@ -198,10 +343,24 @@ export function CampaignComposer({
     reason !== campaign.outreach_reason;
   const canSend =
     !isReadOnly && campaign.recipients > 0 && !preview.template_error &&
-    !isSaving && !isLoadingPage && !isDirty;
+    preview.needs_review_count === 0 && dirtyGroups.length === 0 &&
+    !isSaving && !isLoadingPage && !isDirty && !isBulkSaving &&
+    !isRemovingUnresolved && !suggestingGroup && !savingGroup && !filterAction;
+
+  const signalOptions = preview.signal_options;
+  const visibleReasonGroups = useMemo(() => {
+    const query = reasonSignalSearch.trim().toLowerCase();
+    if (!query) return preview.reason_groups;
+    return preview.reason_groups.filter((group) =>
+      group.label.toLowerCase().includes(query) || group.key.toLowerCase().includes(query),
+    );
+  }, [preview.reason_groups, reasonSignalSearch]);
 
   return (
     <section className="campaign-composer">
+      {toast ? (
+        <Toast message={toast.message} tone={toast.tone} onDone={() => setToast(null)} />
+      ) : null}
       <header className="campaigns-header">
         <div>
           <button type="button" className="campaigns-back" onClick={onBack}>
@@ -231,7 +390,10 @@ export function CampaignComposer({
               disabled={!canSend || isSending}
               title={
                 preview.template_error ||
-                (recipients.length === 0
+                (preview.needs_review_count > 0
+                  ? `${preview.needs_review_count} properties need a grounded reason.`
+                  : undefined) ||
+                (campaign.recipients === 0
                   ? "No lead in this draft can be texted."
                   : isDirty
                     ? "Saving your changes…"
@@ -259,7 +421,132 @@ export function CampaignComposer({
             />
           </label>
 
-          <div className="campaign-reason">
+          {campaign.group_reason_mode ? (
+            <section className="campaign-reason-groups" aria-labelledby="campaign-reason-heading">
+              <div className="campaign-reason-heading">
+                <div>
+                  <strong id="campaign-reason-heading">Reason suggestions</strong>
+                  <small>{preview.reason_groups.length} signals in this campaign</small>
+                </div>
+                <label>
+                  <span>Signal Filter</span>
+                  <input
+                    type="search"
+                    value={reasonSignalSearch}
+                    onChange={(event) => setReasonSignalSearch(event.target.value)}
+                    placeholder="All Signals"
+                    aria-label="Filter reason signals"
+                  />
+                </label>
+              </div>
+              {preview.needs_review_count > 0 ? (
+                <div className="campaigns-warning">
+                  <span>{preview.needs_review_count} properties need a grounded reason before Send.</span>
+                  {!isReadOnly ? (
+                    <button
+                      type="button"
+                      className="sms-button-secondary"
+                      disabled={Boolean(
+                        isRemovingUnresolved || isBulkSaving || isLoadingPage || filterAction ||
+                        isSaving || suggestingGroup || savingGroup || dirtyGroups.length || isDirty || isSending
+                      )}
+                      onClick={() => void removeUnresolved()}
+                    >{isRemovingUnresolved ? "Returning…" : "Return unresolved to Lead Pool"}</button>
+                  ) : null}
+                </div>
+              ) : null}
+              <div className="campaign-reason-table-scroll">
+                <table className="campaign-reason-table">
+                  <thead>
+                    <tr><th scope="col">Lead Signal</th><th scope="col">Suggested Reason</th></tr>
+                  </thead>
+                  <tbody>
+                    {visibleReasonGroups.map((group) => {
+                      const draftReason = groupReasonEdits[group.key] ?? group.reason;
+                      const isDirtyGroup = Object.hasOwn(groupReasonEdits, group.key);
+                      const suggestionResult = groupSuggestionResults[group.key];
+                      const suggestionOptions = suggestionResult?.options?.length
+                        ? suggestionResult.options
+                        : (suggestionResult?.suggestions ?? []).map((text) => ({
+                            text,
+                            source: suggestionResult?.source === "ai" ? "ai" as const : "catalog" as const,
+                          }));
+                      return (
+                        <tr key={group.key}>
+                          <th scope="row"><strong>{group.label}</strong><small>{group.count} {group.count === 1 ? "lead" : "leads"}</small></th>
+                          <td>
+                            <textarea
+                              aria-label={`${group.label} suggested reason`}
+                              value={draftReason}
+                              rows={2}
+                              maxLength={300}
+                              readOnly={isReadOnly}
+                              placeholder="Add or suggest a reason"
+                              onChange={(event) => {
+                                const value = event.target.value;
+                                setGroupReasonEdits((current) => {
+                                  const next = { ...current };
+                                  if (value === group.reason) delete next[group.key];
+                                  else next[group.key] = value;
+                                  return next;
+                                });
+                              }}
+                            />
+                            {suggestionResult ? (
+                              <div className="campaign-reason-options">
+                                {suggestionOptions.length > 0 ? (
+                                  <ol>
+                                    {suggestionOptions.slice(0, 3).map((option, index) => (
+                                      <li key={`${option.source}-${option.text}`}>
+                                        <button
+                                          type="button"
+                                          onClick={() => setGroupReasonEdits((current) => ({
+                                            ...current, [group.key]: option.text,
+                                          }))}
+                                        >
+                                          <span>{index + 1}</span>
+                                          <em>{option.text}</em>
+                                        </button>
+                                      </li>
+                                    ))}
+                                  </ol>
+                                ) : null}
+                                {suggestionResult.note ? <p role="status">{suggestionResult.note}</p> : null}
+                              </div>
+                            ) : null}
+                            <div className="campaign-reason-row-actions">
+                              <span className={isDirtyGroup ? "needs-confirmation" : group.confirmed ? "confirmed" : undefined}>
+                                {isDirtyGroup ? "Needs confirmation" : group.confirmed ? "Confirmed" : "Not confirmed"}
+                              </span>
+                              {!isReadOnly ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="sms-button-secondary"
+                                    disabled={suggestingGroup !== null || savingGroup !== null}
+                                    onClick={() => void suggestGroupReason(group.key)}
+                                  >{suggestingGroup === group.key ? "Thinking…" : "✦ Suggest with AI"}</button>
+                                  <button
+                                    type="button"
+                                    className="campaign-reason-confirm"
+                                    disabled={!draftReason.trim() || savingGroup !== null || suggestingGroup !== null}
+                                    onClick={() => void saveGroup(group.key)}
+                                  >{savingGroup === group.key ? "Saving…" : "✓ Save & Confirm"}</button>
+                                </>
+                              ) : null}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {visibleReasonGroups.length === 0 ? (
+                      <tr><td colSpan={2} className="campaign-reason-empty">No signals match this filter.</td></tr>
+                    ) : null}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ) : <div className="campaign-reason">
             <div className="campaign-reason-head">
               <label htmlFor="campaign-reason-input">Reason</label>
               {!isReadOnly ? (
@@ -310,7 +597,7 @@ export function CampaignComposer({
                 </ul>
               </div>
             ) : null}
-          </div>
+          </div>}
 
           <label className="sms-field">
             <span>Message</span>
@@ -374,7 +661,20 @@ export function CampaignComposer({
               <ul>
                 {preview.skipped.map((item) => (
                   <li key={item.lead_id}>
-                    <span>{item.owner_name ?? `Lead ${item.lead_id}`}</span>
+                    <span>
+                      {!isReadOnly ? (
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${item.owner_name ?? `Lead ${item.lead_id}`}`}
+                          checked={selectedIds.includes(item.lead_id)}
+                          onChange={() => setSelectedIds((current) =>
+                            current.includes(item.lead_id)
+                              ? current.filter((id) => id !== item.lead_id)
+                              : [...current, item.lead_id])}
+                        />
+                      ) : null}
+                      {item.owner_name ?? `Lead ${item.lead_id}`}
+                    </span>
                     <em><span className="sr-only">Reason: </span>{displaySkipReason(item.reason)}</em>
                   </li>
                 ))}
@@ -389,7 +689,83 @@ export function CampaignComposer({
         <div className="campaign-people-head">
           <h3>{isSendingCampaign ? "Who is queued" : isSent ? "Who was contacted" : "Who this will reach"}</h3>
           <span className="sms-count">{campaign.recipients}</span>
+          {!isReadOnly ? (
+            <div className="campaign-filter-wrap">
+              <button
+                type="button"
+                className="sms-icon-button campaign-filter-button"
+                aria-label="Filter campaign recipients"
+                title="Filter recipients"
+                onClick={() => setShowFilters((value) => !value)}
+              >
+                <svg viewBox="0 0 18 18" aria-hidden="true">
+                  <path d="M3 5h12M5 9h8M7 13h4" />
+                </svg>
+              </button>
+              {showFilters ? (
+                <div className="campaign-filter-popover" aria-busy={filterAction !== null}>
+                  <input
+                    aria-label="Search owners or properties"
+                    placeholder="Owner or property"
+                    value={filterDraft.search ?? ""}
+                    disabled={filterAction !== null}
+                    onChange={(event) => setFilterDraft({ ...filterDraft, search: event.target.value })}
+                  />
+                  <input
+                    aria-label="Filter area or ZIP"
+                    placeholder="Area or ZIP"
+                    value={filterDraft.area ?? ""}
+                    disabled={filterAction !== null}
+                    onChange={(event) => setFilterDraft({ ...filterDraft, area: event.target.value })}
+                  />
+                  <select
+                    aria-label="Filter by signal"
+                    value={filterDraft.signals?.[0] ?? ""}
+                    disabled={filterAction !== null}
+                    onChange={(event) => setFilterDraft({
+                      ...filterDraft,
+                      signals: event.target.value ? [event.target.value] : [],
+                    })}
+                  >
+                    <option value="">All signals</option>
+                    {signalOptions.map((signal) => <option key={signal.key} value={signal.key}>{signal.label}</option>)}
+                  </select>
+                  <label><input type="checkbox" checked={Boolean(filterDraft.no_signal)} disabled={filterAction !== null} onChange={(event) => setFilterDraft({ ...filterDraft, no_signal: event.target.checked })} /> No signal</label>
+                  <div className="campaign-filter-actions">
+                    {filterAction ? (
+                      <span className="campaign-filter-loading" role="status">
+                        <span aria-hidden="true" />
+                        {filterAction === "clear" ? "Clearing…" : "Applying…"}
+                      </span>
+                    ) : <span />}
+                    <button
+                      type="button"
+                      className="campaign-filter-clear"
+                      disabled={filterAction !== null}
+                      onClick={() => {
+                        setFilterDraft({});
+                        void applyFilters({}, "clear");
+                      }}
+                    >Clear</button>
+                    <button
+                      type="button"
+                      className="campaign-filter-apply"
+                      disabled={filterAction !== null}
+                      onClick={() => void applyFilters(filterDraft)}
+                    >Apply</button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </div>
+
+        {!isReadOnly && (selectedIds.length > 0 || selectAllFiltered) ? (
+          <div className="campaign-bulk-bar">
+            <strong>{selectAllFiltered ? `${preview.total_items} filtered contacts` : `${selectedIds.length} selected`}</strong>
+            <button type="button" className="sms-button-secondary" disabled={Boolean(isBulkSaving || isRemovingUnresolved || isLoadingPage || filterAction || isSaving || suggestingGroup || savingGroup || isSending)} onClick={() => void removeSelected()}>Return to Lead Pool</button>
+          </div>
+        ) : null}
 
         {recipients.length === 0 ? (
           <p className="sms-muted">
@@ -397,13 +773,16 @@ export function CampaignComposer({
               ? "This campaign is still being processed."
               : isSent
               ? "This campaign did not reach anyone."
-              : "No lead in this draft can be texted. Go back to the Lead Pool and pick another selection."}
+              : campaign.recipients > 0
+                ? "No recipients match the current filters."
+                : "This draft has zero recipients. You can keep editing it or discard it."}
           </p>
         ) : (
           <div className="leads-table-wrap">
             <table className="leads-table campaign-table">
               <thead>
                 <tr>
+                  {!isReadOnly ? <th scope="col"><input type="checkbox" aria-label="Select all contacts on this page" checked={recipients.length > 0 && recipients.every((item) => selectedIds.includes(item.lead_id))} onChange={(event) => setSelectedIds(event.target.checked ? [...new Set([...selectedIds, ...recipients.map((item) => item.lead_id)])] : selectedIds.filter((id) => !recipients.some((item) => item.lead_id === id)))} /></th> : null}
                   <th scope="col">Owner / Property</th>
                   <th scope="col">Signals</th>
                   <th scope="col" className="leads-numeric">Score</th>
@@ -415,6 +794,7 @@ export function CampaignComposer({
               <tbody>
                 {recipients.map((item) => (
                   <tr key={item.lead_id}>
+                    {!isReadOnly ? <td><input type="checkbox" aria-label={`Select ${item.owner_name ?? "contact"}`} checked={selectedIds.includes(item.lead_id)} onChange={() => setSelectedIds((current) => current.includes(item.lead_id) ? current.filter((id) => id !== item.lead_id) : [...current, item.lead_id])} /></td> : null}
                     <th scope="row">
                       <strong>{item.owner_name ?? "Unnamed owner"}</strong>
                       <small>{[item.property_address, item.area].filter(Boolean).join(" · ")}</small>
@@ -431,7 +811,10 @@ export function CampaignComposer({
                       </span>
                     </td>
                     <td className="leads-numeric">{item.score}</td>
-                    <td className="campaign-message-cell">{item.text}</td>
+                    <td className="campaign-message-cell">
+                      {item.text}
+                      {!isReadOnly && item.needs_review ? <small className="campaign-reason-needed">Reason review required</small> : null}
+                    </td>
                     <td>
                       {isSendingCampaign ? (
                         <span className="campaign-reply-badge">Queued</span>
@@ -463,6 +846,12 @@ export function CampaignComposer({
             </table>
           </div>
         )}
+        {!isReadOnly && preview.total_items > recipients.length ? (
+          <label className="campaign-select-filtered">
+            <input type="checkbox" checked={selectAllFiltered} onChange={(event) => setSelectAllFiltered(event.target.checked)} />
+            Select all {preview.total_items.toLocaleString()} filtered contacts across every page
+          </label>
+        ) : null}
         {recipientPages > 1 ? (
           <nav className="campaigns-pagination campaign-recipients-pagination" aria-label="Campaign recipient pages">
             <button

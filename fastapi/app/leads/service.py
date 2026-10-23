@@ -203,6 +203,8 @@ def serialize(lead: Lead, now: datetime | None = None) -> dict:
         'estimated_value': detail_value('estimated_value', 'estimatedValue', 'Estimated Value'),
         'listing_price': detail_value('listing_price', 'listingPrice', 'Listing Price'),
         'signals': [{'key': key, 'label': signal_label(key)} for key in signals],
+        'main_signal': lead.main_signal,
+        'main_signal_basis': lead.main_signal_basis,
         'score': lead.score,
         'outreach_reason': lead.outreach_reason,
         'stage': derive_stage(lead, now),
@@ -735,6 +737,8 @@ def import_file(session: Session, user: User, content: bytes, filename: str,
                 'property_address': row['property_address'],
                 'area': row['area'],
                 'signals': ','.join(row['signals']),
+                'main_signal': row['signals'][0] if len(row['signals']) == 1 else None,
+                'main_signal_basis': 'single_signal' if len(row['signals']) == 1 else None,
                 'outreach_reason': row.get('outreach_reason'),
                 'details': json.dumps(row['details']) if row.get('details') else None,
                 'score': row['score'],
@@ -768,6 +772,11 @@ _REASON_BY_SIGNAL: dict[str, str] = {
 }
 
 FALLBACK_REASON = 'I came across the property while reviewing records in the area'
+
+
+def predefined_reason(signal: str | None) -> str:
+    """Grounded catalog wording for one canonical signal, or blank."""
+    return _REASON_BY_SIGNAL.get(signal or '', '')
 
 
 def outreach_reason(lead: Lead, override: str = '') -> str:

@@ -32,7 +32,8 @@ TOKEN_HELP: dict[str, str] = {
 
 DEFAULT_TEMPLATE = (
     'Hi {{first_name}}, this is the team lead at {{brokerage}}, I’m reaching out '
-    'about {{address}}. {{reason}}'
+    'about {{address}}. {{reason}}\n\n'
+    'Reply STOP to Opt-out'
 )
 
 # Two SMS segments of GSM-7. Past this a campaign starts costing three messages

@@ -226,6 +226,13 @@ def test_live_distribution_is_atomic_tenant_scoped_and_idempotent(db):
     assert result["leads_created"] == 2
     assert {lead.user_id for lead in db.query(Lead)} == {2, 3}
     assert all(lead.source == "provider_distribution" for lead in db.query(Lead))
+    by_user = {lead.user_id: lead for lead in db.query(Lead)}
+    assert (by_user[2].main_signal, by_user[2].main_signal_basis) == (
+        "fsbo", "source_verified"
+    )
+    assert (by_user[3].main_signal, by_user[3].main_signal_basis) == (
+        "fsbo", "single_signal"
+    )
     assert service.distribute(db, payload, 1)["replayed"]
     assert db.query(Lead).count() == 2
     assert db.query(DistributionRun).count() == 1

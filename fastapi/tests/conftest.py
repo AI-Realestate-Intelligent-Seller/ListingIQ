@@ -74,8 +74,11 @@ def session():
 @pytest.fixture
 def client():
     # The app's startup event runs Alembic; the schema is already created above,
-    # so drive the app without lifespan handlers.
-    return TestClient(app)
+    # so drive the app without lifespan handlers. This environment's prerelease
+    # CPython 3.11 asyncio loop cannot wake a loop running in TestClient's portal
+    # thread; uvloop (already installed by uvicorn[standard]) provides the same
+    # ASGI semantics without that interpreter-level cross-thread deadlock.
+    return TestClient(app, backend_options={'use_uvloop': True})
 
 
 @pytest.fixture(autouse=True)

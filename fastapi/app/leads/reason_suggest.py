@@ -16,13 +16,16 @@ from __future__ import annotations
 
 import json
 import re
+from difflib import SequenceMatcher
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..logger import get_logger
 from ..models import Campaign, Lead, User
 from ..sms import deepseek
 from ..tenancy import brokerage_user_ids
+from . import address as address_key
 from .catalog import SIGNALS
 from .service import split_signals
 
@@ -33,6 +36,17 @@ DOMINANT_SHARE = 0.5
 
 MAX_SUGGESTIONS = 3
 MAX_REASON_CHARS = 300
+NO_SIGNAL_REASON_KEY = '__no_signal__'
+
+_PREFERRED_SIGNAL_REASONS = {
+    'absentee_owner': (
+        'I see you own the property but live elsewhere, have you thought about selling it?'
+    ),
+    'expired': (
+        'I see that your property is no longer listed, have you thought about putting it '
+        'back on the market?'
+    ),
+}
 
 # Written the way a broker actually opens: it names the public fact, then asks a
 # question the owner can answer in one line. The per-lead wording in
@@ -140,7 +154,9 @@ def _catalog_suggestions(dominant: list[dict]) -> list[str]:
     return out[:MAX_SUGGESTIONS]
 
 
-def _prompt(dominant: list[dict], profile: list[dict], total: int, area: str) -> list[dict]:
+def _prompt(dominant: list[dict], profile: list[dict], total: int, area: str,
+            requested: int = MAX_SUGGESTIONS,
+            preferred: str = '') -> list[dict]:
     facts = '\n'.join(
         f"- {row['label']}: {row['count']} of {total} leads" for row in profile)
     headline = ', '.join(row['label'] for row in dominant)
@@ -157,6 +173,7 @@ def _prompt(dominant: list[dict], profile: list[dict], total: int, area: str) ->
                 'greeting and no sign-off — it is dropped into the middle of a text.\n'
                 '3. State what the record shows, then ask one easy question about selling.\n'
                 '4. Never promise a valuation, a buyer or a price.\n'
+                '5. Make every option meaningfully different in wording and structure.\n'
                 'Reply with JSON only: {"suggestions": ["...", "...", "..."]}'
             ),
         },
@@ -167,10 +184,79 @@ def _prompt(dominant: list[dict], profile: list[dict], total: int, area: str) ->
                 f"{f' in {area}' if area else ''}.\n"
                 f'What the records show across the set:\n{facts}\n\n'
                 f'The set is mainly about: {headline}.\n'
-                f'Write {MAX_SUGGESTIONS} alternative reasons.'
+                f'Write {requested} alternative reasons.'
+                + (f' Do not repeat or closely paraphrase this preferred wording: '
+                   f'{preferred}' if preferred else '')
             ),
         },
     ]
+
+
+def _neutral_prompt(count: int) -> list[dict]:
+    return [
+        {
+            'role': 'system',
+            'content': (
+                'Write neutral SMS reason fragments for a real-estate broker. No lead '
+                'signal or verified property fact is available. Never claim or imply '
+                'listing status, absentee ownership or residence, foreclosure, probate, '
+                'equity, vacancy, taxes, financial hardship, price, condition, or any '
+                'other fact about the owner or property. Each option must simply say the '
+                'broker is reaching out about the property and ask whether the recipient '
+                'would consider selling. No greeting or sign-off. Under 200 characters. '
+                'Reply with JSON only: {"suggestions": ["...", "...", "..."]}'
+            ),
+        },
+        {
+            'role': 'user',
+            'content': (
+                f'Write three distinct neutral reason fragments for {count} recipients. '
+                'There are no verified signals or property facts to cite.'
+            ),
+        },
+    ]
+
+
+_UNSUPPORTED_NEUTRAL_CLAIM = re.compile(
+    r'\b(list(?:ed|ing)?|expired|absentee|live elsewhere|foreclos|probate|equity|'
+    r'vacan|tax(?:es)?|delinquen|distress|hardship|financial|estate|inherited|'
+    r'for sale|off market|market record|public record)\b', re.I,
+)
+
+
+def _neutral_suggestions(count: int) -> dict:
+    """Only real AI output is offered for No Signal; unsafe claims are discarded."""
+    profile = [{'key': NO_SIGNAL_REASON_KEY, 'label': 'No Signal',
+                'count': count, 'share': 1.0}]
+    if not deepseek.is_configured():
+        return {
+            'signals': profile, 'suggestions': [], 'options': [], 'source': 'catalog',
+            'note': 'AI is unavailable. Retry Suggest with AI when the provider is configured.',
+        }
+    try:
+        message = deepseek.completion(_neutral_prompt(count), temperature=0.7)
+        generated = [
+            text for text in _parse(message.get('content') or '')
+            if not _UNSUPPORTED_NEUTRAL_CLAIM.search(text)
+        ][:MAX_SUGGESTIONS]
+    except deepseek.AiUnavailableError as error:
+        logger.warning('Neutral reason suggestions could not reach AI: %s', error)
+        return {
+            'signals': profile, 'suggestions': [], 'options': [], 'source': 'catalog',
+            'note': 'AI could not be reached. Retry Suggest with AI.',
+        }
+    options = [{'text': text, 'source': 'ai'} for text in generated]
+    note = '' if len(options) == MAX_SUGGESTIONS else (
+        f'AI returned only {len(options)} safe usable '
+        f'{"suggestion" if len(options) == 1 else "suggestions"}. Retry for more options.'
+    )
+    return {
+        'signals': profile,
+        'suggestions': generated,
+        'options': options,
+        'source': 'ai',
+        'note': note,
+    }
 
 
 def _parse(content: str) -> list[str]:
@@ -208,25 +294,132 @@ def _parse(content: str) -> list[str]:
     return out[:MAX_SUGGESTIONS]
 
 
-def suggest(session: Session, user: User, campaign: Campaign) -> dict:
+def _meaningfully_distinct(candidates: list[str], existing: list[str], limit: int) -> list[str]:
+    """Keep genuinely separate phrasings without manufacturing missing options."""
+    accepted: list[str] = []
+    for candidate in candidates:
+        normalized = ' '.join(re.findall(r'[a-z0-9]+', candidate.lower()))
+        if not normalized:
+            continue
+        comparisons = existing + accepted
+        if any(SequenceMatcher(
+                None, normalized,
+                ' '.join(re.findall(r'[a-z0-9]+', text.lower())),
+        ).ratio() >= 0.9 for text in comparisons):
+            continue
+        accepted.append(candidate)
+        if len(accepted) == limit:
+            break
+    return accepted
+
+
+def _signal_suggestions(profile: list[dict], signal: str) -> dict:
+    """Preferred fragment plus real AI alternatives for one canonical signal."""
+    preferred = _PREFERRED_SIGNAL_REASONS.get(signal, '')
+    options = ([{'text': preferred, 'source': 'preferred'}] if preferred else [])
+    needed = MAX_SUGGESTIONS - len(options)
+
+    if not deepseek.is_configured():
+        return {
+            'signals': profile,
+            'suggestions': [option['text'] for option in options],
+            'options': options,
+            'source': 'catalog',
+            'note': 'AI is unavailable. Retry Suggest with AI when the provider is configured.',
+        }
+
+    try:
+        message = deepseek.completion(
+            _prompt(profile, profile, profile[0]['count'], '',
+                    requested=needed, preferred=preferred),
+            temperature=0.7,
+        )
+        generated = _meaningfully_distinct(
+            _parse(message.get('content') or ''),
+            [option['text'] for option in options],
+            needed,
+        )
+    except deepseek.AiUnavailableError as error:
+        logger.warning('Signal reason suggestions could not reach AI: %s', error)
+        return {
+            'signals': profile,
+            'suggestions': [option['text'] for option in options],
+            'options': options,
+            'source': 'catalog',
+            'note': 'AI could not be reached. Retry Suggest with AI.',
+        }
+
+    options.extend({'text': text, 'source': 'ai'} for text in generated)
+    note = '' if len(options) == MAX_SUGGESTIONS else (
+        f'AI returned only {len(generated)} distinct usable '
+        f'{"suggestion" if len(generated) == 1 else "suggestions"}. Retry for more options.'
+    )
+    return {
+        'signals': profile,
+        'suggestions': [option['text'] for option in options],
+        'options': options,
+        'source': 'ai' if generated else 'catalog',
+        'note': note,
+    }
+
+
+def suggest(session: Session, user: User, campaign: Campaign,
+            signal: str | None = None) -> dict:
     """Reason options for this campaign, plus the signal counts behind them."""
-    profile = signal_profile(session, user, campaign)
+    if signal is not None:
+        if signal == NO_SIGNAL_REASON_KEY:
+            rows = (session.query(Lead.id, Lead.property_address, Lead.signals)
+                    .filter(Lead.user_id.in_(brokerage_user_ids(session, user)),
+                            Lead.campaign_id == campaign.id).all())
+            properties = {
+                address_key.canonical(address) or f'__lead_{lead_id}'
+                for lead_id, address, raw_signals in rows
+                if not any(key in SIGNALS for key in str(raw_signals or '').split(','))
+            }
+            if not properties:
+                return {'signals': [], 'suggestions': [], 'options': [],
+                        'source': 'catalog',
+                        'note': 'No recipients are in the No Signal group.'}
+            return _neutral_suggestions(len(properties))
+        if signal not in SIGNALS:
+            raise ValueError('Choose a valid signal for suggestions.')
+        count = (session.query(Lead.id)
+                 .filter(Lead.user_id.in_(brokerage_user_ids(session, user)),
+                         Lead.campaign_id == campaign.id,
+                         (',' + func.coalesce(Lead.signals, '') + ',').like(
+                             f'%,{signal},%'),
+                         Lead.source != 'provider_distribution_contact')
+                 .count())
+        profile = ([{'key': signal, 'label': SIGNALS[signal][0],
+                     'count': count, 'share': 1.0}] if count else [])
+    else:
+        profile = signal_profile(session, user, campaign)
     if not profile:
-        return {'signals': [], 'suggestions': _GENERIC_SUGGESTIONS[:MAX_SUGGESTIONS],
-                'source': 'catalog', 'note': 'No signals on these leads to go on.'}
+        suggestions = [] if signal is not None else _GENERIC_SUGGESTIONS[:MAX_SUGGESTIONS]
+        return {'signals': [], 'suggestions': suggestions,
+                'source': 'catalog',
+                'note': ('No assigned leads in this signal group.' if signal is not None
+                         else 'No signals on these leads to go on.')}
+
+    if signal is not None:
+        return _signal_suggestions(profile, signal)
 
     dominant = _dominant(profile)
     fallback = _catalog_suggestions(dominant)
 
-    total = (session.query(Lead)
-             .filter(Lead.user_id.in_(brokerage_user_ids(session, user)),
-                     Lead.campaign_id == campaign.id)
-             .count())
-    area = (session.query(Lead.area)
-            .filter(Lead.user_id.in_(brokerage_user_ids(session, user)),
-                    Lead.campaign_id == campaign.id,
-                    Lead.area.isnot(None), Lead.area != '')
-            .limit(1).scalar()) or ''
+    total = (
+        session.query(Lead)
+        .filter(Lead.user_id.in_(brokerage_user_ids(session, user)),
+                Lead.campaign_id == campaign.id)
+        .count()
+    )
+    area = (
+        session.query(Lead.area)
+        .filter(Lead.user_id.in_(brokerage_user_ids(session, user)),
+                Lead.campaign_id == campaign.id,
+                Lead.area.isnot(None), Lead.area != '')
+        .limit(1).scalar()
+    ) or ''
 
     if not deepseek.is_configured():
         return {'signals': profile, 'suggestions': fallback, 'source': 'catalog',

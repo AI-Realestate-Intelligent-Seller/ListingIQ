@@ -20,7 +20,10 @@ from ..schemas import (
     CampaignDraftResult,
     CampaignOut,
     CampaignPreview,
+    CampaignMainSignalRequest,
+    CampaignReasonSuggestionRequest,
     CampaignReasonSuggestions,
+    CampaignRemoveRecipientsRequest,
     CampaignUpdateRequest,
 )
 from .auth import get_current_user, get_db
@@ -86,6 +89,7 @@ def _create_draft_job(job_id: str, user_id: int, payload: dict) -> None:
             payload['lead_ids'],
             payload.get('name') or '',
             payload.get('message_template') or '',
+            group_mode=True,
             progress=lambda total, loaded: query_progress.update(
                 job_id, total=total, loaded=loaded,
             ),
@@ -134,7 +138,7 @@ def create_draft(payload: CampaignDraftRequest,
     try:
         campaign, not_added = campaign_service.create_draft(
             session, current_user, payload.lead_ids,
-            payload.name or '', payload.message_template or '')
+            payload.name or '', payload.message_template or '', group_mode=True)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
     logger.info('Campaign draft %s for user %s: %s leads',
@@ -167,14 +171,24 @@ def start_draft_creation(
 @router.get('/{campaign_id}', response_model=CampaignDetail)
 def campaign_detail(campaign_id: int,
                     preview_page: int = Query(1, ge=1),
+                    signal: list[str] = Query(default=[]),
+                    no_signal: bool = False,
+                    main_signal: str | None = None,
+                    area: str | None = None,
+                    search: str | None = None,
                     current_user: User = Depends(get_current_user),
                     session: Session = Depends(get_db)):
     """One campaign with the requested 20-recipient preview page."""
     _require_access(current_user)
     campaign = _load(session, current_user, campaign_id)
-    return campaign_service.detail(
-        session, current_user, campaign, preview_page=preview_page,
-    )
+    try:
+        return campaign_service.detail(
+            session, current_user, campaign, preview_page=preview_page,
+            filters={'signals': signal, 'no_signal': no_signal,
+                     'main_signal': main_signal, 'area': area, 'search': search},
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
 
 
 @router.patch('/{campaign_id}', response_model=CampaignDetail)
@@ -187,7 +201,8 @@ def update_campaign(campaign_id: int, payload: CampaignUpdateRequest,
     campaign = _load(session, current_user, campaign_id)
     try:
         campaign_service.update_draft(session, current_user, campaign, payload.name,
-                                      payload.message_template, payload.outreach_reason)
+                                      payload.message_template, payload.outreach_reason,
+                                      payload.reason_group.dict() if payload.reason_group else None)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
     return campaign_service.detail(
@@ -196,7 +211,8 @@ def update_campaign(campaign_id: int, payload: CampaignUpdateRequest,
 
 
 @router.post('/{campaign_id}/reason-suggestions', response_model=CampaignReasonSuggestions)
-def suggest_reasons(campaign_id: int, current_user: User = Depends(get_current_user),
+def suggest_reasons(campaign_id: int, payload: CampaignReasonSuggestionRequest | None = None,
+                    current_user: User = Depends(get_current_user),
                     session: Session = Depends(get_db)):
     """Reason wordings that fit the signals this set of leads has in common.
 
@@ -205,20 +221,88 @@ def suggest_reasons(campaign_id: int, current_user: User = Depends(get_current_u
     """
     _require_access(current_user)
     campaign = _load(session, current_user, campaign_id)
-    return campaign_service.suggest_reasons(session, current_user, campaign)
+    try:
+        return campaign_service.suggest_reasons(
+            session, current_user, campaign, signal=payload.signal if payload else None,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
 
 
 @router.get('/{campaign_id}/preview', response_model=CampaignPreview)
 def preview_campaign(campaign_id: int,
                      preview_page: int = Query(1, ge=1),
+                     signal: list[str] = Query(default=[]),
+                     no_signal: bool = False,
+                     main_signal: str | None = None,
+                     area: str | None = None,
+                     search: str | None = None,
                      current_user: User = Depends(get_current_user),
                      session: Session = Depends(get_db)):
     """What each recipient would read, without sending anything."""
     _require_access(current_user)
     campaign = _load(session, current_user, campaign_id)
-    return campaign_service.preview(
-        session, current_user, campaign, page=preview_page,
-    )
+    try:
+        return campaign_service.preview(
+            session, current_user, campaign, page=preview_page,
+            filters={'signals': signal, 'no_signal': no_signal,
+                     'main_signal': main_signal, 'area': area, 'search': search},
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+
+@router.post('/{campaign_id}/recipients/main-signal')
+def assign_main_signal(campaign_id: int, payload: CampaignMainSignalRequest,
+                       preview_page: int = Query(1, ge=1),
+                       signal: list[str] = Query(default=[]),
+                       no_signal: bool = False,
+                       main_signal: str | None = None,
+                       area: str | None = None,
+                       search: str | None = None,
+                       current_user: User = Depends(get_current_user),
+                       session: Session = Depends(get_db)):
+    _require_access(current_user)
+    campaign = _load(session, current_user, campaign_id)
+    try:
+        result = campaign_service.assign_main_signal(
+            session, current_user, campaign, payload.main_signal,
+            payload.selection.dict(),
+        )
+    except ValueError as error:
+        session.rollback()
+        raise HTTPException(status_code=400, detail=str(error))
+    return {'result': result, 'campaign': campaign_service.detail(
+        session, current_user, campaign, preview_page=preview_page,
+        filters={'signals': signal, 'no_signal': no_signal,
+                 'main_signal': main_signal, 'area': area, 'search': search},
+    )}
+
+
+@router.post('/{campaign_id}/recipients/remove')
+def remove_recipients(campaign_id: int, payload: CampaignRemoveRecipientsRequest,
+                      preview_page: int = Query(1, ge=1),
+                      signal: list[str] = Query(default=[]),
+                      no_signal: bool = False,
+                      main_signal: str | None = None,
+                      area: str | None = None,
+                      search: str | None = None,
+                      current_user: User = Depends(get_current_user),
+                      session: Session = Depends(get_db)):
+    _require_access(current_user)
+    campaign = _load(session, current_user, campaign_id)
+    try:
+        result = campaign_service.remove_recipients(
+            session, current_user, campaign, payload.selection.dict(),
+        )
+    except ValueError as error:
+        session.rollback()
+        raise HTTPException(status_code=400, detail=str(error))
+    return {'result': result, 'campaign': campaign_service.detail(
+        session, current_user, campaign, preview_page=preview_page,
+        filters={'signals': signal, 'no_signal': no_signal,
+                 'main_signal': main_signal, 'area': area, 'search': search},
+    )}
 
 
 @router.post('/{campaign_id}/send')

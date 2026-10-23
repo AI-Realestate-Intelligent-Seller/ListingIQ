@@ -5,11 +5,23 @@ import type {
   Campaign,
   CampaignDetail,
   CampaignDraftResult,
+  CampaignFilters,
+  CampaignSelection,
   CampaignReasonSuggestions,
   CampaignSendResult,
 } from "../types/campaigns.types";
 
 const CAMPAIGNS = "/campaigns";
+
+function campaignPreviewParams(previewPage: number, filters: CampaignFilters): URLSearchParams {
+  const params = new URLSearchParams({ preview_page: String(previewPage) });
+  for (const value of filters.signals ?? []) params.append("signal", value);
+  if (filters.no_signal) params.set("no_signal", "true");
+  if (filters.main_signal) params.set("main_signal", filters.main_signal);
+  if (filters.area) params.set("area", filters.area);
+  if (filters.search) params.set("search", filters.search);
+  return params;
+}
 
 /** Every campaign with its delivered / replied / no-reply counts. */
 export function listCampaigns(accessToken: string, signal?: AbortSignal): Promise<Campaign[]> {
@@ -35,9 +47,11 @@ export function fetchCampaign(
   accessToken: string,
   signal?: AbortSignal,
   previewPage = 1,
+  filters: CampaignFilters = {},
 ): Promise<CampaignDetail> {
+  const params = campaignPreviewParams(previewPage, filters);
   return getJson<CampaignDetail>(
-    `${CAMPAIGNS}/${campaignId}?preview_page=${previewPage}`,
+    `${CAMPAIGNS}/${campaignId}?${params.toString()}`,
     accessToken,
     signal,
   );
@@ -97,7 +111,12 @@ async function createCampaignDraftInBackground(
 /** Rename the campaign, rewrite its message or reason. Returns the fresh preview. */
 export function updateCampaign(
   campaignId: number,
-  changes: { name?: string; message_template?: string; outreach_reason?: string },
+  changes: {
+    name?: string;
+    message_template?: string;
+    outreach_reason?: string;
+    reason_group?: { signal: string; reason: string; confirmed: boolean };
+  },
   accessToken: string,
   previewPage = 1,
 ): Promise<CampaignDetail> {
@@ -117,10 +136,47 @@ export function updateCampaign(
 export function suggestReasons(
   campaignId: number,
   accessToken: string,
+  signal?: string,
 ): Promise<CampaignReasonSuggestions> {
-  return postJson<CampaignReasonSuggestions, Record<string, never>>(
+  return postJson<CampaignReasonSuggestions, { signal?: string }>(
     `${CAMPAIGNS}/${campaignId}/reason-suggestions`,
-    {},
+    signal ? { signal } : {},
+    accessToken,
+  );
+}
+
+type CampaignMutationResult = {
+  result: Record<string, number>;
+  campaign: CampaignDetail;
+};
+
+export function assignCampaignMainSignal(
+  campaignId: number,
+  mainSignal: string,
+  selection: CampaignSelection,
+  accessToken: string,
+  previewPage = 1,
+  filters: CampaignFilters = {},
+): Promise<CampaignMutationResult> {
+  const params = campaignPreviewParams(previewPage, filters);
+  return postJson<CampaignMutationResult, { main_signal: string; selection: CampaignSelection }>(
+    `${CAMPAIGNS}/${campaignId}/recipients/main-signal?${params.toString()}`,
+    { main_signal: mainSignal, selection },
+    accessToken,
+  );
+}
+
+export function removeCampaignRecipients(
+  campaignId: number,
+  selection: CampaignSelection,
+  accessToken: string,
+  previewPage = 1,
+  filters: CampaignFilters = {},
+): Promise<CampaignMutationResult> {
+  const params = campaignPreviewParams(previewPage, filters);
+  return postJson<CampaignMutationResult, { selection: CampaignSelection }>(
+    `${CAMPAIGNS}/${campaignId}/recipients/remove?${params.toString()}`,
+    { selection },
     accessToken,
   );
 }

@@ -221,6 +221,9 @@ class Campaign(Base):
     # Blank falls back to each lead's own signal, which is the right default
     # for a mixed selection but wrong for a set that shares one story.
     outreach_reason = Column(String(300), nullable=True)
+    # Versioned JSON text for per-main-signal draft reasons. NULL identifies a
+    # legacy campaign and preserves its established campaign-wide precedence.
+    reason_groups = Column(Text, nullable=True)
     # 'draft' before enqueue, 'sending' while durable jobs run, 'sent' once all
     # jobs are terminal. A non-draft campaign never submits twice.
     status = Column(String(20), nullable=False, default='draft')
@@ -272,7 +275,10 @@ class Lead(Base):
     the broker adds it to a campaign, and `conversation_id` links the two.
     """
     __tablename__ = 'leads'
-    __table_args__ = (Index('ix_leads_coordinates', 'latitude', 'longitude'),)
+    __table_args__ = (
+        Index('ix_leads_coordinates', 'latitude', 'longitude'),
+        Index('ix_leads_campaign_main_signal', 'campaign_id', 'main_signal'),
+    )
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
     owner_name = Column(String(255))
@@ -292,6 +298,11 @@ class Lead(Base):
     normalized_address = Column(String(700), nullable=True)
     # Canonical signal keys, comma separated (see app.leads.catalog).
     signals = Column(String(500), nullable=False, default='')
+    # One explicitly justified signal for campaign grouping. It never replaces
+    # or reorders `signals`, which remains the Lead Pool's category contract.
+    main_signal = Column(String(64), nullable=True)
+    # single_signal, source_verified, or broker_selected.
+    main_signal_basis = Column(String(24), nullable=True)
     # The vendor's own words for why this owner is being contacted. Bobbie uses
     # it verbatim rather than inventing a reason.
     outreach_reason = Column(String(300), nullable=True)
