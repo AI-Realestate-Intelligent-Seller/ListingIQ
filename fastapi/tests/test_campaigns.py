@@ -7,6 +7,7 @@ import pytest
 from datetime import datetime
 
 from app.leads import campaign as campaign_service
+from app.leads import reason_suggest
 from app.leads import template as message_template
 from app.leads.address import canonical
 from app.models import Campaign, Conversation, Lead, LeadEvent, Message, OutboundSmsJob, User
@@ -22,10 +23,10 @@ LEADS_URL = '/api/v1/leads'
 CAMPAIGNS_URL = '/api/v1/campaigns'
 
 CSV = (
-    'Owner Name,Phone,Property Address,City,Signals\n'
-    'Marcus Webb,(312) 555-0142,4517 W Adams St,Austin,"Absentee Owner, High Equity"\n'
-    'Priya Nguyen,+13125550188,2210 S Sacramento Dr,Little Village,Pre-Foreclosure\n'
-    'Emeka Obi,3125550199,7745 S Coles Ave,South Shore,Probate\n'
+    'Owner Name,Phone,Property Address,City,Signals,Outreach Reason\n'
+    'Marcus Webb,(312) 555-0142,4517 W Adams St,Austin,"Absentee Owner, High Equity",Records show the owner lives elsewhere\n'
+    'Priya Nguyen,+13125550188,2210 S Sacramento Dr,Little Village,Pre-Foreclosure,\n'
+    'Emeka Obi,3125550199,7745 S Coles Ave,South Shore,Probate,\n'
 )
 
 
@@ -148,8 +149,10 @@ def test_the_template_fills_each_owner_s_own_address_and_reason():
     assert text == (
         'Hi Dana, this is the team lead at RE/MAX Premier, I’m reaching out about '
         '415 Northview Lane, Hoffman Estates, IL. I see that your property is no longer '
-        'listed, have you thought about putting it back on the market?'
+        'listed, have you thought about putting it back on the market?\n\n'
+        'Reply STOP to Opt-out'
     )
+    assert text.count('Reply STOP to Opt-out') == 1
 
 
 def test_a_nameless_owner_is_greeted_without_a_dangling_comma():
@@ -166,6 +169,7 @@ def test_a_nameless_owner_is_greeted_without_a_dangling_comma():
 
     text = message_template.render('Hi {{first_name}}, about {{address}}.', FakeLead(), FakeUser())
     assert text.startswith('Hi there, about 9 Oak St.')
+    assert 'Reply STOP to Opt-out' not in text
 
 
 def test_an_invented_placeholder_is_refused_before_anything_is_sent():
@@ -474,7 +478,8 @@ def test_rewriting_the_message_re_renders_every_recipient(
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
     upload(client, headers)
-    campaign_id = draft(client, headers, lead_ids(client, headers))['campaign']['id']
+    ids = lead_ids(client, headers)
+    campaign_id = draft(client, headers, ids)['campaign']['id']
 
     response = client.patch(f'{CAMPAIGNS_URL}/{campaign_id}', headers=headers, json={
         'name': 'Expired listings — Austin',
@@ -492,7 +497,8 @@ def test_a_template_with_an_unknown_placeholder_is_rejected(
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
     upload(client, headers)
-    campaign_id = draft(client, headers, lead_ids(client, headers))['campaign']['id']
+    ids = lead_ids(client, headers)
+    campaign_id = draft(client, headers, ids)['campaign']['id']
 
     response = client.patch(f'{CAMPAIGNS_URL}/{campaign_id}', headers=headers,
                             json={'message_template': 'Hi {{first_name}} about {{property}}'})
@@ -579,6 +585,12 @@ def test_sending_texts_every_recipient_the_message_they_were_shown(
     body = draft(client, headers, lead_ids(client, headers))
     campaign_id = body['campaign']['id']
     previewed = {item['lead_id']: item['text'] for item in body['campaign']['preview']['recipients']}
+    assert all(text.endswith('Reply STOP to Opt-out') for text in previewed.values())
+    assert all(text.count('Reply STOP to Opt-out') == 1 for text in previewed.values())
+    assert all(
+        item['is_long'] == (len(item['text']) > message_template.LONG_MESSAGE_CHARS)
+        for item in body['campaign']['preview']['recipients']
+    )
 
     response = client.post(f'{CAMPAIGNS_URL}/{campaign_id}/send', headers=headers)
     assert response.status_code == 200, response.text
@@ -587,6 +599,7 @@ def test_sending_texts_every_recipient_the_message_they_were_shown(
     # What the broker read in the preview is exactly what went out.
     assert {item['lead_id']: item['text'] for item in result['started']} == previewed
     assert len(sent_sms) == 3
+    assert all(item['text'].endswith('Reply STOP to Opt-out') for item in sent_sms)
 
     # Campaign threads start user-handled; Bobbie can be handed the thread later.
     conversations = client.get('/api/v1/sms/conversations', headers=headers).json()
@@ -884,12 +897,15 @@ def test_campaigns_are_scoped_to_the_owning_broker(
 
 
 def test_a_campaign_reason_overrides_every_lead_s_own_signal(
-        client, make_user, auth_header, sent_sms):
+        client, make_user, auth_header, sent_sms, session):
     """One set, one story: the broker's sentence replaces the per-signal wording."""
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
     upload(client, headers)
     campaign_id = draft(client, headers, lead_ids(client, headers))['campaign']['id']
+    # A pre-group-mode campaign retains its historical shared override.
+    session.get(Campaign, campaign_id).reason_groups = None
+    session.commit()
 
     shared = ('I see that your property is no longer listed, have you thought about '
               'putting it back on the market?')
@@ -897,7 +913,8 @@ def test_a_campaign_reason_overrides_every_lead_s_own_signal(
                         json={'outreach_reason': shared}).json()
     assert body['outreach_reason'] == shared
     # Every recipient now ends on the same sentence, with their own address before it.
-    assert all(item['text'].endswith(shared) for item in body['preview']['recipients'])
+    assert all(item['text'].endswith(f'{shared}\n\nReply STOP to Opt-out')
+               for item in body['preview']['recipients'])
     assert len({item['text'] for item in body['preview']['recipients']}) == 3
 
 
@@ -919,24 +936,26 @@ def test_clearing_the_reason_hands_it_back_to_each_lead(
 
 
 def test_the_reason_that_was_previewed_is_the_one_that_is_sent(
-        client, make_user, auth_header, sent_sms):
+        client, make_user, auth_header, sent_sms, session):
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
     upload(client, headers)
     campaign_id = draft(client, headers, lead_ids(client, headers))['campaign']['id']
+    session.get(Campaign, campaign_id).reason_groups = None
+    session.commit()
     shared = 'I noticed the listing came off the market — are you still open to selling?'
     client.patch(f'{CAMPAIGNS_URL}/{campaign_id}', headers=headers,
                  json={'outreach_reason': shared})
 
     started = client.post(f'{CAMPAIGNS_URL}/{campaign_id}/send', headers=headers).json()['started']
-    assert all(row['text'].endswith(shared) for row in started)
-    assert all(text['text'].endswith(shared) for text in sent_sms)
+    assert all(row['text'].endswith(f'{shared}\n\nReply STOP to Opt-out') for row in started)
+    assert all(text['text'].endswith(f'{shared}\n\nReply STOP to Opt-out') for text in sent_sms)
 
 
 def test_suggestions_come_from_the_signals_the_set_shares(
         client, make_user, auth_header, sent_sms, monkeypatch):
     """Every lead here is expired, so the suggestion must be about an expired listing."""
-    monkeypatch.setattr('app.leads.reason_suggest.deepseek.is_configured', lambda: False)
+    monkeypatch.setattr('app.leads.reason_suggest.ai_client.is_configured', lambda: False)
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
     upload(client, headers,
@@ -952,6 +971,142 @@ def test_suggestions_come_from_the_signals_the_set_shares(
     assert body['signals'][0] == {'key': 'expired', 'label': 'Expired', 'count': 3, 'share': 1.0}
     assert 'no longer listed' in body['suggestions'][0]
 
+    secondary = client.post(
+        f'{CAMPAIGNS_URL}/{campaign_id}/reason-suggestions',
+        headers=headers, json={'signal': 'high_equity'},
+    ).json()
+    assert secondary['signals'] == [{
+        'key': 'high_equity', 'label': 'High Equity', 'count': 1, 'share': 1.0,
+    }]
+    assert secondary['suggestions'] == []
+    assert secondary['options'] == []
+    assert 'Retry Suggest with AI' in secondary['note']
+
+
+def test_per_signal_suggestions_combine_preferred_and_mocked_ai_without_full_sms(
+        client, make_user, auth_header, sent_sms, monkeypatch):
+    def fake_completion(messages, **options):
+        prompt = messages[1]['content']
+        if 'Absentee Owner' in prompt:
+            return {'content': json.dumps({'suggestions': [
+                'The ownership record shows a different mailing address; would you consider selling?',
+                'I work with owners managing property from elsewhere; is a sale worth discussing?',
+                'An unused third option.',
+            ]})}
+        if 'Expired' in prompt:
+            return {'content': json.dumps({'suggestions': [
+                'The listing ended without a sale; are you still considering selling?',
+                'Would you be open to discussing another approach after the listing expired?',
+                'A third expired alternative.',
+            ]})}
+        return {'content': json.dumps({'suggestions': [
+            'I came across the probate record and wanted to ask if selling is being considered.',
+            'I help with estate properties; would discussing a sale be useful?',
+            'Would selling the property help with the estate plans?',
+        ]})}
+
+    monkeypatch.setattr('app.leads.reason_suggest.ai_client.is_configured', lambda: True)
+    monkeypatch.setattr('app.leads.reason_suggest.ai_client.completion', fake_completion)
+    make_user(BROKER_EMAIL, role='broker')
+    headers = auth_header(BROKER_EMAIL)
+    upload(client, headers,
+           'Owner Name,Phone,Property Address,City,Signals\n'
+           'Marcus Webb,+13125550142,4517 W Adams St,Austin,Absentee Owner\n'
+           'Evan Stone,+13125550143,18 Market St,Austin,Expired\n'
+           'Priya Nguyen,+13125550188,2210 S Sacramento Dr,Austin,Probate\n')
+    ids = lead_ids(client, headers)
+    marcus_id = lead_id_for(client, headers, '4517 W Adams')
+    campaign_id = draft(client, headers, ids)['campaign']['id']
+
+    absentee = client.post(
+        f'{CAMPAIGNS_URL}/{campaign_id}/reason-suggestions', headers=headers,
+        json={'signal': 'absentee_owner'},
+    ).json()
+    assert len(absentee['options']) == 3
+    assert absentee['options'][0] == {
+        'text': 'I see you own the property but live elsewhere, have you thought about selling it?',
+        'source': 'preferred',
+    }
+    assert [option['source'] for option in absentee['options']] == [
+        'preferred', 'ai', 'ai',
+    ]
+    assert absentee['suggestions'] == [option['text'] for option in absentee['options']]
+    assert not absentee['options'][0]['text'].startswith('Hi ')
+    assert '4517 W Adams' not in absentee['options'][0]['text']
+
+    client.post(
+        f'{CAMPAIGNS_URL}/{campaign_id}/recipients/main-signal', headers=headers,
+        json={'main_signal': 'absentee_owner',
+              'selection': {'mode': 'ids', 'lead_ids': [marcus_id]}},
+    )
+    rendered = client.patch(
+        f'{CAMPAIGNS_URL}/{campaign_id}', headers=headers,
+        json={'reason_group': {
+            'signal': 'absentee_owner',
+            'reason': absentee['options'][0]['text'],
+            'confirmed': True,
+        }},
+    ).json()
+    text = next(row['text'] for row in rendered['preview']['recipients']
+                if row['lead_id'] == marcus_id)
+    assert text.count('Hi Marcus') == 1
+    assert text.count('4517 W Adams St') == 1
+    assert text.endswith(f"{absentee['options'][0]['text']}\n\nReply STOP to Opt-out")
+    assert sent_sms == []
+
+    expired = client.post(
+        f'{CAMPAIGNS_URL}/{campaign_id}/reason-suggestions', headers=headers,
+        json={'signal': 'expired'},
+    ).json()
+    assert expired['options'][0] == {
+        'text': ('I see that your property is no longer listed, have you thought about '
+                 'putting it back on the market?'),
+        'source': 'preferred',
+    }
+    assert [option['source'] for option in expired['options']] == [
+        'preferred', 'ai', 'ai',
+    ]
+
+    probate = client.post(
+        f'{CAMPAIGNS_URL}/{campaign_id}/reason-suggestions', headers=headers,
+        json={'signal': 'probate'},
+    ).json()
+    assert len(probate['options']) == 3
+    assert {option['source'] for option in probate['options']} == {'ai'}
+    assert len({option['text'] for option in probate['options']}) == 3
+
+
+def test_per_signal_ai_failure_returns_only_legitimate_preferred_option(
+        client, make_user, auth_header, sent_sms, monkeypatch):
+    from app.ai import client as ai_client
+
+    def boom(messages, **options):
+        raise ai_client.AiUnavailableError('offline test outage')
+
+    monkeypatch.setattr('app.leads.reason_suggest.ai_client.is_configured', lambda: True)
+    monkeypatch.setattr('app.leads.reason_suggest.ai_client.completion', boom)
+    make_user(BROKER_EMAIL, role='broker')
+    headers = auth_header(BROKER_EMAIL)
+    upload(client, headers)
+    campaign_id = draft(client, headers, lead_ids(client, headers))['campaign']['id']
+
+    absentee = client.post(
+        f'{CAMPAIGNS_URL}/{campaign_id}/reason-suggestions', headers=headers,
+        json={'signal': 'absentee_owner'},
+    ).json()
+    assert len(absentee['options']) == 1
+    assert absentee['options'][0]['source'] == 'preferred'
+    assert absentee['suggestions'] == [absentee['options'][0]['text']]
+    assert 'Retry Suggest with AI' in absentee['note']
+
+    probate = client.post(
+        f'{CAMPAIGNS_URL}/{campaign_id}/reason-suggestions', headers=headers,
+        json={'signal': 'probate'},
+    ).json()
+    assert probate['options'] == []
+    assert probate['suggestions'] == []
+    assert 'Retry Suggest with AI' in probate['note']
+
 
 def test_suggestions_use_deepseek_when_it_is_configured(
         client, make_user, auth_header, sent_sms, monkeypatch):
@@ -961,8 +1116,8 @@ def test_suggestions_use_deepseek_when_it_is_configured(
         seen['messages'] = messages
         return {'content': '```json\n{"suggestions": ["Phrased by the model."]}\n```'}
 
-    monkeypatch.setattr('app.leads.reason_suggest.deepseek.is_configured', lambda: True)
-    monkeypatch.setattr('app.leads.reason_suggest.deepseek.completion', fake_completion)
+    monkeypatch.setattr('app.leads.reason_suggest.ai_client.is_configured', lambda: True)
+    monkeypatch.setattr('app.leads.reason_suggest.ai_client.completion', fake_completion)
 
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
@@ -981,13 +1136,13 @@ def test_suggestions_use_deepseek_when_it_is_configured(
 def test_a_deepseek_outage_falls_back_to_the_catalog_wordings(
         client, make_user, auth_header, sent_sms, monkeypatch):
     """The composer must still offer something when the provider is down."""
-    from app.sms import deepseek
+    from app.ai import client as ai_client
 
     def boom(messages, **options):
-        raise deepseek.AiUnavailableError('AI provider unreachable')
+        raise ai_client.AiUnavailableError('AI provider unreachable')
 
-    monkeypatch.setattr('app.leads.reason_suggest.deepseek.is_configured', lambda: True)
-    monkeypatch.setattr('app.leads.reason_suggest.deepseek.completion', boom)
+    monkeypatch.setattr('app.leads.reason_suggest.ai_client.is_configured', lambda: True)
+    monkeypatch.setattr('app.leads.reason_suggest.ai_client.completion', boom)
 
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
@@ -1531,6 +1686,478 @@ def test_a_lead_can_be_campaigned_the_moment_it_is_imported(
     assert fresh['not_added'] == []
     assert len(client.post(f"{CAMPAIGNS_URL}/{fresh['campaign']['id']}/send",
                            headers=headers).json()['started']) == 3
+
+
+def test_group_reason_precedence_and_needs_review(make_user, session):
+    owner = make_user(BROKER_EMAIL, role='broker')
+    campaign = Campaign(
+        user_id=owner.id,
+        name='Grouped reasons',
+        message_template='About {{address}}. {{reason}}',
+        reason_groups=json.dumps({'version': 1, 'groups': {
+            'expired': {'reason': 'Confirmed expired reason', 'confirmed': True},
+        }}),
+        status='draft',
+    )
+    session.add(campaign)
+    session.flush()
+    leads = [
+        Lead(user_id=owner.id, owner_name='Confirmed', phone='+13125551001',
+             property_address='1 Main St', signals='expired,high_equity',
+             main_signal='expired', main_signal_basis='broker_selected',
+             outreach_reason='Vendor reason', campaign_id=campaign.id),
+        Lead(user_id=owner.id, owner_name='Vendor', phone='+13125551002',
+             property_address='2 Main St', signals='expired,high_equity',
+             outreach_reason='Vendor reason', campaign_id=campaign.id),
+        Lead(user_id=owner.id, owner_name='Catalog', phone='+13125551003',
+             property_address='3 Main St', signals='high_equity',
+             main_signal='high_equity', main_signal_basis='single_signal',
+             campaign_id=campaign.id),
+        Lead(user_id=owner.id, owner_name='Review', phone='+13125551004',
+             property_address='4 Main St', signals='auction,bankruptcy',
+             campaign_id=campaign.id),
+    ]
+    session.add_all(leads)
+    session.commit()
+
+    assert campaign_service.resolve_reason(campaign, leads[0]) == (
+        'Confirmed expired reason', 'confirmed_group', False,
+    )
+    assert campaign_service.resolve_reason(campaign, leads[1]) == (
+        'Vendor reason', 'vendor', False,
+    )
+    assert campaign_service.resolve_reason(campaign, leads[2])[1:] == ('catalog', False)
+    assert campaign_service.resolve_reason(campaign, leads[3]) == ('', 'needs_review', True)
+    rows = campaign_service.preview(session, owner, campaign)['recipients']
+    by_name = {row['owner_name']: row for row in rows}
+    assert 'Vendor reason' in by_name['Confirmed']['text']
+    assert 'Vendor reason' in by_name['Vendor']['text']
+    assert by_name['Review']['needs_review'] is True
+    assert by_name['Review']['text'] == ''
+
+
+def test_provider_main_signal_and_contact_removal_are_property_atomic(
+        make_user, session):
+    owner = make_user(BROKER_EMAIL, role='broker')
+    phones = [
+        {'number': '+13125552001', 'phone': '+13125552001', 'dnc': False,
+         'owner_name': 'First Owner', 'consent': 'unknown'},
+        {'number': '+13125552002', 'phone': '+13125552002', 'dnc': False,
+         'owner_name': 'Second Owner', 'consent': 'express'},
+        {'number': '+13125552003', 'phone': '+13125552003', 'dnc': True,
+         'owner_name': 'Restricted Owner', 'consent': 'none'},
+    ]
+    lead = Lead(
+        user_id=owner.id, owner_name='Original Owners', phone=phones[0]['phone'],
+        property_address='10 Provider Way', signals='expired,high_equity',
+        source='provider_distribution', dnc=False,
+        details=json.dumps({'_phone_numbers': phones, 'property_type': 'Single Family'}),
+    )
+    campaign = Campaign(
+        user_id=owner.id, name='Provider contacts',
+        message_template='Hi {{first_name}}', reason_groups='{"version":1,"groups":{}}',
+        status='draft',
+    )
+    session.add_all([lead, campaign])
+    session.commit()
+    assert campaign_service.attach(session, owner, campaign, [lead.id]) == []
+    family = campaign_service.members(session, owner, campaign)
+    assert len(family) == 2
+    clone = next(item for item in family if item.source == 'provider_distribution_contact')
+
+    result = campaign_service.assign_main_signal(
+        session, owner, campaign, 'expired',
+        {'mode': 'ids', 'lead_ids': [clone.id]},
+    )
+    assert result['updated_properties'] == 1
+    assert {(item.main_signal, item.main_signal_basis)
+            for item in campaign_service.members(session, owner, campaign)} == {
+                ('expired', 'broker_selected')
+            }
+
+    session.add(LeadEvent(
+        lead_id=clone.id, event_category='activity', event_type='test_history',
+    ))
+    session.commit()
+    original_contact = lead.phone
+    campaign_service.remove_recipients(
+        session, owner, campaign, {'mode': 'ids', 'lead_ids': [lead.id]},
+    )
+    session.refresh(lead)
+    assert lead.campaign_id == campaign.id
+    assert lead.phone != original_contact
+    assert session.query(LeadEvent).filter_by(event_type='test_history').one().lead_id == lead.id
+    saved = json.loads(lead.details)
+    assert saved['property_type'] == 'Single Family'
+    assert {item['phone'] for item in saved['_phone_numbers']} == {
+        '+13125552001', '+13125552002', '+13125552003',
+    }
+    assert next(item for item in saved['_phone_numbers']
+                if item['phone'] == '+13125552003')['dnc'] is True
+
+    campaign_service.remove_recipients(
+        session, owner, campaign, {'mode': 'ids', 'lead_ids': [lead.id]},
+    )
+    session.refresh(lead)
+    assert lead.campaign_id is None
+    assert lead.owner_name == 'Original Owners'
+    assert lead.phone == original_contact
+    assert campaign_service.member_count(session, owner, campaign) == 0
+    with pytest.raises(ValueError, match='no recipients'):
+        campaign_service.send(session, owner, campaign)
+
+
+def test_legacy_main_signal_api_does_not_override_campaign_reason_resolution(
+        client, make_user, auth_header, sent_sms):
+    make_user(BROKER_EMAIL, role='broker')
+    headers = auth_header(BROKER_EMAIL)
+    upload(client, headers)
+    marcus_id = lead_id_for(client, headers, '4517 W Adams')
+    body = draft(client, headers, lead_ids(client, headers))
+    campaign_id = body['campaign']['id']
+
+    assigned = client.post(
+        f'{CAMPAIGNS_URL}/{campaign_id}/recipients/main-signal',
+        headers=headers,
+        params={'preview_page': 1, 'signal': 'high_equity'},
+        json={'main_signal': 'absentee_owner',
+              'selection': {'mode': 'ids', 'lead_ids': [marcus_id]}},
+    )
+    assert assigned.status_code == 200, assigned.text
+    recipient = next(row for row in assigned.json()['campaign']['preview']['recipients']
+                     if row['lead_id'] == marcus_id)
+    assert recipient['main_signal'] == 'absentee_owner'
+    assert recipient['main_signal_basis'] == 'broker_selected'
+    assert assigned.json()['campaign']['preview']['total_items'] == 1
+
+    confirmed = client.patch(
+        f'{CAMPAIGNS_URL}/{campaign_id}', headers=headers,
+        json={'reason_group': {
+            'signal': 'absentee_owner',
+            'reason': 'Confirmed group wording',
+            'confirmed': True,
+        }},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    recipient = next(row for row in confirmed.json()['preview']['recipients']
+                     if row['lead_id'] == marcus_id)
+    assert recipient['text'].endswith(
+        'Records show the owner lives elsewhere.\n\nReply STOP to Opt-out')
+
+    high_equity_reason = client.patch(
+        f'{CAMPAIGNS_URL}/{campaign_id}', headers=headers,
+        json={'reason_group': {
+            'signal': 'high_equity',
+            'reason': 'Confirmed high-equity wording',
+            'confirmed': True,
+        }},
+    )
+    assert high_equity_reason.status_code == 200, high_equity_reason.text
+    reassigned = client.post(
+        f'{CAMPAIGNS_URL}/{campaign_id}/recipients/main-signal', headers=headers,
+        json={'main_signal': 'high_equity',
+              'selection': {'mode': 'ids', 'lead_ids': [marcus_id]}},
+    )
+    assert reassigned.status_code == 200, reassigned.text
+    recipient = next(row for row in reassigned.json()['campaign']['preview']['recipients']
+                     if row['lead_id'] == marcus_id)
+    assert recipient['main_signal'] == 'high_equity'
+    assert recipient['text'].endswith(
+        'Records show the owner lives elsewhere.\n\nReply STOP to Opt-out')
+
+    reopened = client.get(f'{CAMPAIGNS_URL}/{campaign_id}', headers=headers).json()
+    recipient = next(row for row in reopened['preview']['recipients']
+                     if row['lead_id'] == marcus_id)
+    assert recipient['main_signal'] == 'high_equity'
+    assert recipient['text'].endswith(
+        'Records show the owner lives elsewhere.\n\nReply STOP to Opt-out')
+
+    filtered = client.get(
+        f'{CAMPAIGNS_URL}/{campaign_id}', headers=headers,
+        params={'signal': 'absentee_owner'},
+    ).json()
+    assert filtered['preview']['total_items'] == 1
+    assert filtered['preview']['recipients'][0]['lead_id'] == marcus_id
+    saved_group = next(
+        row for row in filtered['preview']['reason_groups']
+        if row['key'] == 'absentee_owner'
+    )
+    assert saved_group['reason'] == 'Confirmed group wording'
+    assert saved_group['confirmed'] is True
+
+    # Marcus is a single recipient under either of his valid Lead.signals;
+    # filtering never depends on the assigned Main Signal or duplicates him.
+    secondary = client.get(
+        f'{CAMPAIGNS_URL}/{campaign_id}', headers=headers,
+        params={'signal': 'high_equity'},
+    ).json()
+    assert secondary['preview']['total_items'] == 1
+    assert [row['lead_id'] for row in secondary['preview']['recipients']] == [marcus_id]
+    options = filtered['preview']['signal_options']
+    assert {'key': 'absentee_owner', 'label': 'Absentee Owner'} in options
+    assert {'key': 'high_equity', 'label': 'High Equity'} in options
+    assert {'key': 'pre_foreclosure', 'label': 'Pre-Foreclosure'} in options
+    assert {'key': 'probate', 'label': 'Probate'} in options
+    groups = {row['key']: row['count'] for row in filtered['preview']['reason_groups']}
+    assert groups == {
+        'absentee_owner': 1,
+        'high_equity': 1,
+        'pre_foreclosure': 1,
+        'probate': 1,
+    }
+
+    removed = client.post(
+        f'{CAMPAIGNS_URL}/{campaign_id}/recipients/remove',
+        headers=headers,
+        json={'selection': {'mode': 'ids', 'lead_ids': [marcus_id]}},
+    )
+    assert removed.status_code == 200, removed.text
+    assert removed.json()['campaign']['recipients'] == 2
+    assert sent_sms == []
+
+
+def test_group_reason_is_identical_in_preview_queue_message_and_grounding(
+        client, make_user, auth_header, sent_sms, session):
+    make_user(BROKER_EMAIL, role='broker')
+    headers = auth_header(BROKER_EMAIL)
+    upload(client, headers)
+    marcus_id = lead_id_for(client, headers, '4517 W Adams')
+    campaign_id = draft(client, headers, lead_ids(client, headers))['campaign']['id']
+    client.post(
+        f'{CAMPAIGNS_URL}/{campaign_id}/recipients/main-signal', headers=headers,
+        json={'main_signal': 'absentee_owner',
+              'selection': {'mode': 'ids', 'lead_ids': [marcus_id]}},
+    )
+    updated = client.patch(
+        f'{CAMPAIGNS_URL}/{campaign_id}', headers=headers,
+        json={'reason_group': {'signal': 'absentee_owner',
+                               'reason': 'One grounded group reason',
+                               'confirmed': True}},
+    ).json()
+    preview_text = next(row['text'] for row in updated['preview']['recipients']
+                        if row['lead_id'] == marcus_id)
+
+    response = client.post(f'{CAMPAIGNS_URL}/{campaign_id}/send', headers=headers)
+    assert response.status_code == 200, response.text
+    job = session.query(OutboundSmsJob).filter_by(
+        campaign_id=campaign_id, lead_id=marcus_id,
+    ).one()
+    assert job.text == preview_text
+    message = session.query(Message).filter_by(id=job.message_id).one()
+    assert message.text == preview_text
+    lead = session.get(Lead, marcus_id)
+    context = json.loads(session.get(Conversation, lead.conversation_id).lead_context)
+    stored_campaign = session.get(Campaign, campaign_id)
+    assert context['outreach_reason'] == campaign_service.resolve_reason(
+        stored_campaign, lead,
+    )[0]
+    assert any(payload['text'] == preview_text for payload in sent_sms)
+
+
+def test_reason_signal_frequency_is_per_property_and_per_recipient(make_user, session):
+    owner = make_user('frequency@example.test', role='broker')
+    campaign = Campaign(
+        user_id=owner.id, name='Frequency', status='draft',
+        message_template='About {{address}}. {{reason}}',
+        reason_groups=json.dumps({'version': 1, 'groups': {
+            'expired': {'reason': 'Expired confirmed', 'confirmed': True},
+            'probate': {'reason': 'Probate confirmed', 'confirmed': True},
+        }}),
+    )
+    session.add(campaign)
+    session.flush()
+    leads = []
+    for index in range(15):
+        leads.append(Lead(
+            user_id=owner.id, owner_name=f'Expired {index}',
+            phone=f'+1312600{index:04d}', property_address=f'{index} Expired St',
+            signals='expired', campaign_id=campaign.id,
+        ))
+        leads.append(Lead(
+            user_id=owner.id, owner_name=f'Probate {index}',
+            phone=f'+1312700{index:04d}', property_address=f'{index} Probate St',
+            signals='probate', campaign_id=campaign.id,
+        ))
+    leads.extend([
+        Lead(user_id=owner.id, owner_name='Expired Combo', phone='+13128000001',
+             property_address='100 Combo St', signals='expired,absentee_owner',
+             campaign_id=campaign.id),
+        Lead(user_id=owner.id, owner_name='Probate Combo', phone='+13128000002',
+             property_address='101 Combo St', signals='probate,pre_foreclosure',
+             campaign_id=campaign.id),
+        Lead(user_id=owner.id, owner_name='Expired Combo Second Phone',
+             phone='+13128000003', property_address='100 Combo St',
+             signals='expired,absentee_owner', source='provider_distribution_contact',
+             campaign_id=campaign.id),
+    ])
+    session.add_all(leads)
+    session.commit()
+
+    context = campaign_service._campaign_reason_context(session, owner, campaign)
+    by_name = {
+        lead.owner_name: context['assignments'][campaign_service._property_key(lead)]
+        for lead in leads
+    }
+    assert by_name['Expired Combo'] == 'expired'
+    assert by_name['Probate Combo'] == 'probate'
+    assert context['frequencies']['expired'] == 16
+    assert context['frequencies']['probate'] == 16
+    assert context['frequencies']['absentee_owner'] == 1
+
+
+def test_reason_signal_ties_vendor_fallback_and_snapshot_survive_removal(
+        make_user, session):
+    owner = make_user('snapshot@example.test', role='broker')
+    campaign = Campaign(
+        user_id=owner.id, name='Snapshot', status='draft',
+        message_template='About {{address}}. {{reason}}',
+        reason_groups=json.dumps({'version': 1, 'groups': {
+            'expired': {'reason': 'Stable expired reason', 'confirmed': True},
+            'auction': {'reason': 'Verified auction reason', 'confirmed': True},
+        }}),
+    )
+    session.add(campaign)
+    session.flush()
+    leads = [
+        Lead(user_id=owner.id, owner_name='Expired Base', phone='+13129000001',
+             property_address='1 Base St', signals='expired', campaign_id=campaign.id),
+        Lead(user_id=owner.id, owner_name='Stable Multi', phone='+13129000002',
+             property_address='2 Base St', signals='expired,absentee_owner',
+             campaign_id=campaign.id),
+        Lead(user_id=owner.id, owner_name='Verified Tie', phone='+13129000003',
+             property_address='3 Base St', signals='auction,bankruptcy',
+             main_signal='auction', main_signal_basis='source_verified',
+             campaign_id=campaign.id),
+        Lead(user_id=owner.id, owner_name='Vendor Tie', phone='+13129000004',
+             property_address='4 Base St', signals='divorce,vacant',
+             outreach_reason='Verified vendor context', campaign_id=campaign.id),
+        Lead(user_id=owner.id, owner_name='Unresolved Tie', phone='+13129000005',
+             property_address='5 Base St', signals='fsbo,tax_delinquent',
+             campaign_id=campaign.id),
+    ]
+    session.add_all(leads)
+    session.commit()
+
+    context = campaign_service._campaign_reason_context(session, owner, campaign)
+    assignment = lambda lead: context['assignments'][campaign_service._property_key(lead)]
+    assert assignment(leads[1]) == 'expired'
+    assert assignment(leads[2]) == 'auction'
+    assert assignment(leads[3]) is None
+    assert campaign_service.resolve_reason(campaign, leads[3], None)[1] == 'vendor'
+    assert campaign_service.resolve_reason(campaign, leads[4], None)[2] is True
+
+    removed = campaign_service.remove_recipients(
+        session, owner, campaign, {'mode': 'unresolved'},
+    )
+    assert removed['removed_contacts'] == 1
+    state = json.loads(campaign.reason_groups)
+    snapshot = state['reason_signal_snapshot']
+    assert snapshot['finalized'] is True
+    assert set(snapshot['properties']) == {
+        canonical(lead.property_address) for lead in leads[1:]
+    }
+    assert snapshot['properties'][canonical(leads[1].property_address)] == 'expired'
+
+    campaign_service.remove_recipients(
+        session, owner, campaign, {'mode': 'ids', 'lead_ids': [leads[0].id]},
+    )
+    session.refresh(campaign)
+    assert campaign_service.resolve_reason(campaign, leads[1])[0] == 'Stable expired reason'
+    snapshot_before_edit = json.loads(campaign.reason_groups)['reason_signal_snapshot']
+    campaign_service._update_reason_group(campaign, {
+        'signal': 'expired', 'reason': 'Intentionally edited reason', 'confirmed': True,
+    })
+    session.commit()
+    assert json.loads(campaign.reason_groups)['reason_signal_snapshot'] == snapshot_before_edit
+    assert campaign_service.resolve_reason(campaign, leads[1])[0] == 'Intentionally edited reason'
+
+
+def test_no_signal_ai_and_reason_precedence_are_safe(monkeypatch, make_user, session):
+    owner = make_user('neutral@example.test', role='broker')
+    campaign = Campaign(
+        user_id=owner.id, name='Neutral', status='draft',
+        message_template='About {{address}}. {{reason}}',
+        reason_groups=json.dumps({'version': 1, 'groups': {
+            campaign_service.NO_SIGNAL_REASON_KEY: {
+                'reason': 'Would you consider selling the property?', 'confirmed': True,
+            },
+        }}),
+    )
+    session.add(campaign)
+    session.flush()
+    vendor = Lead(
+        user_id=owner.id, owner_name='Vendor', phone='+13129990001',
+        property_address='1 Neutral St', signals='',
+        outreach_reason='Verified vendor reason', campaign_id=campaign.id,
+    )
+    neutral = Lead(
+        user_id=owner.id, owner_name='Neutral', phone='+13129990002',
+        property_address='2 Neutral St', signals='', campaign_id=campaign.id,
+    )
+    session.add_all([vendor, neutral])
+    session.commit()
+
+    assert campaign_service.resolve_reason(
+        campaign, vendor, campaign_service.NO_SIGNAL_REASON_KEY,
+    )[:2] == ('Verified vendor reason', 'vendor')
+    assert campaign_service.resolve_reason(
+        campaign, neutral, campaign_service.NO_SIGNAL_REASON_KEY,
+    )[:2] == ('Would you consider selling the property?', 'confirmed_group')
+    no_signal_group = next(
+        group for group in campaign_service.preview(session, owner, campaign)['reason_groups']
+        if group['key'] == campaign_service.NO_SIGNAL_REASON_KEY
+    )
+    assert no_signal_group['label'] == 'No Signal'
+    assert no_signal_group['count'] == 2
+
+    monkeypatch.setattr(reason_suggest.ai_client, 'is_configured', lambda: True)
+    monkeypatch.setattr(reason_suggest.ai_client, 'completion', lambda *_args, **_kwargs: {
+        'content': json.dumps({'suggestions': [
+            'Would you consider selling the property?',
+            'Are you open to discussing a possible sale?',
+            'Could we talk about whether selling may interest you?',
+        ]}),
+    })
+    suggestions = reason_suggest.suggest(
+        session, owner, campaign, signal=campaign_service.NO_SIGNAL_REASON_KEY,
+    )
+    assert len(suggestions['options']) == 3
+    assert {option['source'] for option in suggestions['options']} == {'ai'}
+    assert all('listed' not in option['text'].lower() for option in suggestions['options'])
+
+    def unavailable(*_args, **_kwargs):
+        raise reason_suggest.ai_client.AiUnavailableError('offline')
+    monkeypatch.setattr(reason_suggest.ai_client, 'completion', unavailable)
+    retry = reason_suggest.suggest(
+        session, owner, campaign, signal=campaign_service.NO_SIGNAL_REASON_KEY,
+    )
+    assert retry['options'] == []
+    assert retry['suggestions'] == []
+    assert retry['note'] == 'AI could not be reached. Retry Suggest with AI.'
+
+
+def test_missing_reason_does_not_block_or_remove_when_template_has_no_reason_token(
+        make_user, session):
+    owner = make_user('no-token@example.test', role='broker')
+    campaign = Campaign(
+        user_id=owner.id, name='No token', status='draft',
+        message_template='Hello {{first_name}}, about {{address}}.',
+        reason_groups='{"version":1,"groups":{}}',
+    )
+    session.add(campaign)
+    session.flush()
+    lead = Lead(
+        user_id=owner.id, owner_name='No Reason', phone='+13129990003',
+        property_address='3 Neutral St', signals='auction,bankruptcy',
+        campaign_id=campaign.id,
+    )
+    session.add(lead)
+    session.commit()
+    assert campaign_service.preview(session, owner, campaign)['needs_review_count'] == 0
+    with pytest.raises(ValueError, match='No campaign recipients'):
+        campaign_service.remove_recipients(
+            session, owner, campaign, {'mode': 'unresolved'},
+        )
 
 def test_the_campaign_table_carries_what_the_pool_table_showed(
         client, make_user, auth_header, sent_sms):

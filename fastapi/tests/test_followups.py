@@ -463,8 +463,8 @@ def test_reply_suggestions_are_drafted_from_the_thread_history(
         seen['messages'] = messages
         return {'content': '```json\n{"suggestions": ["Happy to run the numbers for you."]}\n```'}
 
-    monkeypatch.setattr('app.sms.reply_suggest.deepseek.is_configured', lambda: True)
-    monkeypatch.setattr('app.sms.reply_suggest.deepseek.completion', fake_completion)
+    monkeypatch.setattr('app.sms.reply_suggest.ai_client.is_configured', lambda: True)
+    monkeypatch.setattr('app.sms.reply_suggest.ai_client.completion', fake_completion)
 
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
@@ -495,8 +495,8 @@ def test_reply_suggestions_see_the_property_details_behind_the_thread(
         seen['messages'] = messages
         return {'content': '{"suggestions": ["It shows 3 beds and 2 baths."]}'}
 
-    monkeypatch.setattr('app.sms.reply_suggest.deepseek.is_configured', lambda: True)
-    monkeypatch.setattr('app.sms.reply_suggest.deepseek.completion', fake_completion)
+    monkeypatch.setattr('app.sms.reply_suggest.ai_client.is_configured', lambda: True)
+    monkeypatch.setattr('app.sms.reply_suggest.ai_client.completion', fake_completion)
 
     user = make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
@@ -520,13 +520,13 @@ def test_reply_suggestions_see_the_property_details_behind_the_thread(
 
 def test_reply_suggestions_fall_back_to_templates_when_ai_is_down(
         client, make_user, auth_header, sent_sms, monkeypatch):
-    from app.sms import deepseek
+    from app.ai import client as ai_client
 
     def boom(messages, **options):
-        raise deepseek.AiUnavailableError('AI provider unreachable')
+        raise ai_client.AiUnavailableError('AI provider unreachable')
 
-    monkeypatch.setattr('app.sms.reply_suggest.deepseek.is_configured', lambda: True)
-    monkeypatch.setattr('app.sms.reply_suggest.deepseek.completion', boom)
+    monkeypatch.setattr('app.sms.reply_suggest.ai_client.is_configured', lambda: True)
+    monkeypatch.setattr('app.sms.reply_suggest.ai_client.completion', boom)
 
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)

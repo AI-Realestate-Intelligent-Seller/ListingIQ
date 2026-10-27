@@ -13,6 +13,7 @@ from ..batchdata import models as bd
 from ..batchdata.service import property_table_row
 from ..dealmachine import models as dm
 from ..leads.address import canonical
+from ..leads.catalog import SIGNALS, normalize_signal
 from ..leads.importer import normalize_phone, score_lead
 from ..models import Lead, User
 from ..propertyradar import models as pr
@@ -204,6 +205,16 @@ def _has_contact_mapping(lead):
         and bool(phones)
         and all(isinstance(phone, dict) and phone.get("owner_name") for phone in phones)
     )
+
+
+def _lead_signals(categories):
+    """Canonical lead signal keys for provider categories, in order, unknowns dropped."""
+    found = []
+    for category in categories or []:
+        key = category if category in SIGNALS else normalize_signal(category)
+        if key and key not in found:
+            found.append(key)
+    return found
 
 
 def _sync_distributed_lead(lead, row, data, sources):
@@ -666,6 +677,17 @@ def distribute(db, payload, actor_id):
         if payload.mode == "sandbox":
             continue
         data = row.data_json
+        rule = plan["rules"][allocation["rule_index"]]
+        # Provider category keys ("tax_default", "reo", "canceled") are stored
+        # as canonical lead signals; unknown ones were silently dropped later.
+        lead_signals = _lead_signals(row.categories_json)
+        matched_categories = sorted(set(_lead_signals(
+            set(rule.get("categories") or []).intersection(row.categories_json or [])
+        )))
+        verified_main_signal = (
+            matched_categories[0] if len(matched_categories) == 1 else None
+        )
+        single_main_signal = lead_signals[0] if len(lead_signals) == 1 else None
         allowed = [
             phone
             for phone in data.get("phones", [])
@@ -677,13 +699,16 @@ def distribute(db, payload, actor_id):
             phone=allowed[0]["number"] if allowed else None,
             property_address=data["address"],
             area=data.get("city"),
-            signals=",".join(row.categories_json),
+            signals=",".join(lead_signals),
+            main_signal=verified_main_signal or single_main_signal,
+            main_signal_basis=("source_verified" if verified_main_signal
+                               else "single_signal" if single_main_signal else None),
             source="provider_distribution",
             dnc=row.lead_status == "dnc" or bool(data.get("phones") and not allowed),
             details=json.dumps(lead_details_payload(data, row.sources_json, run_id)),
         )
         lead.score = score_lead(
-            row.categories_json, bool(lead.phone), bool(lead.property_address)
+            lead_signals, bool(lead.phone), bool(lead.property_address)
         )
         db.add(lead)
         db.flush()

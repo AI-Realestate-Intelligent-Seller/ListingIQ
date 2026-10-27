@@ -8,6 +8,7 @@ export type Campaign = {
   message_template: string;
   /** One reason for the whole batch. Blank falls back to each lead's own signal. */
   outreach_reason: string;
+  group_reason_mode: boolean;
   status: CampaignStatus;
   sent_at: string | null;
   created_at: string | null;
@@ -36,6 +37,10 @@ export type CampaignRecipient = {
   area: string | null;
   /** Same shape the Lead Pool table renders. */
   signals: { key: string; label: string }[];
+  main_signal: string | null;
+  main_signal_basis: "single_signal" | "source_verified" | "broker_selected" | null;
+  reason_source: "legacy" | "confirmed_group" | "vendor" | "catalog" | "needs_review" | null;
+  needs_review: boolean;
   score: number;
   stage: string | null;
   last_activity_at: string | null;
@@ -63,11 +68,37 @@ export type CampaignPreview = {
   page_size: number;
   total_items: number;
   total_pages: number;
+  unresolved_main_signal_count: number;
+  needs_review_count: number;
+  reason_groups: CampaignReasonGroup[];
+  /** Every valid Lead.signals category represented anywhere in this campaign. */
+  signal_options: { key: string; label: string }[];
   /** Set when the template will not render; Send stays disabled while it is. */
   template_error: string;
   /** Placeholder name → what it becomes, for the token help beside the editor. */
   tokens: Record<string, string>;
 };
+
+export type CampaignReasonGroup = {
+  key: string;
+  label: string;
+  count: number;
+  reason: string;
+  confirmed: boolean;
+};
+
+export type CampaignFilters = {
+  signals?: string[];
+  no_signal?: boolean;
+  main_signal?: string;
+  area?: string;
+  search?: string;
+};
+
+export type CampaignSelection =
+  | { mode: "ids"; lead_ids: number[]; filters?: never }
+  | { mode: "filtered"; lead_ids?: never; filters: CampaignFilters }
+  | { mode: "unresolved"; lead_ids?: never; filters?: never };
 
 /** How much of a campaign carries one signal. */
 export type CampaignSignalShare = {
@@ -81,7 +112,12 @@ export type CampaignSignalShare = {
 export type CampaignReasonSuggestions = {
   signals: CampaignSignalShare[];
   suggestions: string[];
-  /** "ai" when DeepSeek phrased them, "catalog" for the built-in wordings. */
+  /** Structured form; optional so older API deployments remain readable. */
+  options?: {
+    text: string;
+    source: "preferred" | "ai" | "catalog";
+  }[];
+  /** "ai" when the configured provider phrased them, "catalog" for built-ins. */
   source: "ai" | "catalog";
   /** Why the catalog was used, when it was. Empty on the happy path. */
   note: string;

@@ -321,12 +321,40 @@ class CampaignDraftRequest(BaseModel):
     name: Optional[str] = Field(None, max_length=200)
     message_template: Optional[str] = Field(None, max_length=1600)
 
+class CampaignReasonGroupUpdate(BaseModel):
+    signal: str = Field(min_length=1, max_length=64)
+    reason: str = Field(default='', max_length=300)
+    confirmed: bool = False
+
 class CampaignUpdateRequest(BaseModel):
     """Rename a campaign, rewrite its message or its reason, or all three."""
     name: Optional[str] = Field(None, max_length=200)
     message_template: Optional[str] = Field(None, max_length=1600)
     # Empty string is meaningful: it hands {{reason}} back to each lead's signal.
     outreach_reason: Optional[str] = Field(None, max_length=300)
+    reason_group: Optional[CampaignReasonGroupUpdate] = None
+
+class CampaignRecipientFilters(BaseModel):
+    signals: List[str] = []
+    no_signal: bool = False
+    main_signal: Optional[str] = Field(None, max_length=64)
+    area: Optional[str] = Field(None, max_length=120)
+    search: Optional[str] = Field(None, max_length=200)
+
+class CampaignRecipientSelection(BaseModel):
+    mode: str
+    lead_ids: List[int] = Field(default_factory=list, max_items=100_000)
+    filters: CampaignRecipientFilters = CampaignRecipientFilters()
+
+class CampaignMainSignalRequest(BaseModel):
+    main_signal: str = Field(min_length=1, max_length=64)
+    selection: CampaignRecipientSelection
+
+class CampaignRemoveRecipientsRequest(BaseModel):
+    selection: CampaignRecipientSelection
+
+class CampaignReasonSuggestionRequest(BaseModel):
+    signal: Optional[str] = Field(None, max_length=64)
 
 class CampaignSignalShare(BaseModel):
     """How much of the campaign carries one signal."""
@@ -335,11 +363,17 @@ class CampaignSignalShare(BaseModel):
     count: int
     share: float
 
+class CampaignReasonSuggestionOption(BaseModel):
+    text: str
+    source: str
+
 class CampaignReasonSuggestions(BaseModel):
     """Reason wordings that fit what this set of leads has in common."""
     signals: List[CampaignSignalShare] = []
     suggestions: List[str] = []
-    # 'ai' when DeepSeek phrased them, 'catalog' for the built-in wordings.
+    # Backward-compatible structured form for distinguishing curated and AI copy.
+    options: List[CampaignReasonSuggestionOption] = []
+    # 'ai' when the configured provider phrased them, 'catalog' for built-ins.
     source: str = 'catalog'
     # Why the catalog was used, when it was. Empty on the happy path.
     note: str = ''
@@ -347,7 +381,7 @@ class CampaignReasonSuggestions(BaseModel):
 class ReplySuggestions(BaseModel):
     """Draft next replies for a thread, grounded in its message history."""
     suggestions: List[str] = []
-    # 'ai' when DeepSeek drafted them, 'template' for the built-in wordings.
+    # 'ai' when the configured provider drafted them, 'template' for built-ins.
     source: str = 'template'
     # Why the templates were used, when they were. Empty on the happy path.
     note: str = ''
@@ -364,6 +398,10 @@ class CampaignRecipient(BaseModel):
     property_address: Optional[str]
     area: Optional[str] = None
     signals: List[dict] = []
+    main_signal: Optional[str] = None
+    main_signal_basis: Optional[str] = None
+    reason_source: Optional[str] = None
+    needs_review: bool = False
     score: int = 0
     stage: Optional[str] = None
     last_activity_at: Optional[datetime] = None
@@ -389,6 +427,10 @@ class CampaignPreview(BaseModel):
     page_size: int = 20
     total_items: int = 0
     total_pages: int = 1
+    unresolved_main_signal_count: int = 0
+    needs_review_count: int = 0
+    reason_groups: List[dict] = []
+    signal_options: List[dict] = []
     # Set when the template will not render; the composer shows it and blocks Send.
     template_error: str = ''
     tokens: dict = {}
@@ -399,6 +441,7 @@ class CampaignOut(BaseModel):
     name: str
     message_template: str
     outreach_reason: str = ''
+    group_reason_mode: bool = False
     status: str
     sent_at: Optional[datetime] = None
     created_at: Optional[datetime] = None

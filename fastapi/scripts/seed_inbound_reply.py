@@ -12,7 +12,7 @@ and the lead classifier runs exactly as it does there.
 What it does NOT do by default is wake Bobbie. The webhook is what queues her
 (`process_ai_reply`); writing to the table bypasses that, so running this costs
 nothing and sends nothing. Pass --ai-reply to run her pipeline as well — that
-calls DeepSeek and sends a real outbound message.
+    calls the configured AI provider and sends a real outbound message.
 
     # See what you can reply to
     python scripts/seed_inbound_reply.py --list
@@ -124,9 +124,11 @@ def run_bobbie(session, conversation: Conversation, text: str) -> None:
               f"handled_by={conversation.handled_by!r}), so she will not reply. "
               'Hand it back to her from the UI first.')
         return
-    if not settings['ai'].get('api_key'):
-        print('\nDEEPSEEK_API_KEY is not set, so no reply can be generated. '
-              'Set it in the environment the script runs in and try again.')
+    from app.ai.client import is_configured
+
+    if not is_configured():
+        print(f"\nCredentials for AI_PROVIDER={settings['ai']['provider']} are not set, "
+              'so no reply can be generated. Configure that provider and try again.')
         return
 
     before = session.query(Message).filter(Message.conversation_id == conversation.id).count()
@@ -162,7 +164,7 @@ def main() -> int:
     parser.add_argument('--no-classify', action='store_true',
                         help='Skip the lead classifier, leaving lead_status untouched.')
     parser.add_argument('--ai-reply', action='store_true',
-                        help='Also run Bobbie, as the webhook does. Calls DeepSeek and sends an SMS.')
+                        help='Also run Bobbie, as the webhook does. Calls the configured AI provider and sends an SMS.')
     args = parser.parse_args()
 
     if args.ai_reply:

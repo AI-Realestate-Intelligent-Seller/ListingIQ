@@ -2,10 +2,64 @@
 
 Direct port of the prototype's bobbie-policy.js. These are deterministic checks
 applied to every generated draft; conversation intent and calendar state are
-decided by DeepSeek in bobbie.py.
+decided by the configured AI provider in bobbie.py.
 """
 
+import contextvars
+import os
 import re
+
+from ..core.config import settings
+
+
+# ---------------------------------------------------------------------------
+# Local debugging prints ([AI DEBUG]). Simulation mode only; set
+# AI_DEBUG_PRINTS=0 to silence them. Never prints keys or phone numbers.
+_AI_DEBUG = contextvars.ContextVar('ai_debug', default=None)
+
+
+def ai_debug_enabled() -> bool:
+    mode = str((settings.get('telnyx') or {}).get('mode') or '').strip().lower()
+    flag = os.getenv('AI_DEBUG_PRINTS', 'true').strip().lower()
+    return mode == 'simulation' and flag not in ('0', 'false', 'no', 'off')
+
+
+def ai_debug_begin(conversation_id=None, inbound_message_id=None) -> None:
+    _AI_DEBUG.set({'conversation_id': conversation_id, 'inbound_message_id': inbound_message_id,
+                   'phase': 'original', 'source': 'original'})
+
+
+def ai_debug_state() -> dict:
+    return _AI_DEBUG.get() or {}
+
+
+def ai_debug_set(**fields) -> None:
+    state = _AI_DEBUG.get()
+    if state is not None:
+        state.update(fields)
+
+
+def ai_debug(_stage: str, _message: str = '', /, **fields) -> None:
+    """Print one debug line. Never raises: debugging must not change the reply."""
+    try:
+        if not ai_debug_enabled():
+            return
+        state = ai_debug_state()
+        ids = f"conv={state.get('conversation_id', '-')} inbound_msg={state.get('inbound_message_id', '-')}"
+        details = ' '.join(f'{key}={value!r}' for key, value in fields.items())
+        print(f'[AI DEBUG][{_stage}] {ids} {_message} {details}'.rstrip(), flush=True)
+    except Exception:  # pragma: no cover - debug output only
+        pass
+
+
+def ai_debug_safely(function):
+    """Wrap a debug-only helper so it can never raise into the SMS pipeline."""
+    def wrapper(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except Exception:  # pragma: no cover - debug output only
+            return None
+    return wrapper
 
 EMAIL_ADDRESS = re.compile(r'\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b', re.I)
 PHONE_NUMBER = re.compile(r'(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b')
@@ -34,14 +88,29 @@ BUYER_DENIAL = re.compile(
     re.I,
 )
 UNSUPPORTED_PRODUCTION = re.compile(
-    r"\b(?:my|our) recent sales\b|\b(?:i|we)(?:['’]?ve| have) (?:sold|closed|handled)\b", re.I
+    r"\b(?:my|our) recent sales\b|\b(?:i|we)(?:['’]?ve| have) (?:sold|closed)\b"
+    r"|\b(?:i|we)(?:['’]?ve| have) handled\s+(?:\w+\s+){0,2}?(?:sales|transactions|listings|deals|closings|homes|properties)\b",
+    re.I
 )
+# First-person work history is allowed ("I've worked with RE/MAX Premier on brokerage
+# growth"); a claim of local track record or a client count is not.
 UNSUPPORTED_LOCAL_EXPERIENCE = re.compile(
-    r"\b(?:i['’]?ve (?:worked|helped)|i (?:work|have worked) with|i know the [^.?!]{0,35} market"
-    r'|my local experience)\b',
+    r"\b(?:i['’]?ve|i have|i)\s+(?:worked|helped|work|served|represented)\b[^.?!]{0,60}?"
+    r"(?:\b(?:in|around|across|throughout|near)\s+(?:your|this|the|our)\s+(?:area|neighbou?rhood|community|town"
+    r"|city|market|street|block|zip(?:\s?code)?|subdivision)\b"
+    r"|\b(?:nearby|locally|near you|around here|in the area)\b"
+    r"|\b(?:many|lots of|dozens of|hundreds of|countless|plenty of|other|\d+)\s+(?:local\s+)?(?:sellers|buyers"
+    r"|homeowners|clients|families|owners|properties|homes|listings)\b)"
+    r"|\bi know the [^.?!]{0,35} market\b|\bmy local experience\b",
     re.I,
 )
-PRECISE_TENURE = re.compile(r'\b(?:several years|since \d{4}|(?:for|over) \d+ years)\b', re.I)
+PRECISE_TENURE = re.compile(
+    r'\b(?:several years|since \d{4}|(?:for|over) \d+ years'
+    r'|\d+\+?\s+years?\s+(?:of\s+)?(?:local\s+|real[-\s]estate\s+|industry\s+)?experience'
+    r'|\d+\+?\s+years?\s+(?:in|as)\s+(?:real estate|the business|the industry|this area|your area|an? (?:realtor|agent|broker))'
+    r'|decades? of experience)\b',
+    re.I,
+)
 EXAMPLE_FACT_LEAK = re.compile(
     r"\b(?:sliding glass doors?|100 showings?|investor['’]?s note|27620 E Lakeview|Morgan|Grant|Dolby Haas)\b",
     re.I,
@@ -53,10 +122,56 @@ UNSUPPORTED_OUTCOME = re.compile(
 )
 IDENTITY_ASSISTANT = re.compile(r"\bBobbie Fisher['’]?s (?:AI )?assistant\b", re.I)
 IDENTITY_THIRD_PERSON = re.compile(
-    r'\bBobbie\s+(?:would|will|can|needs?|has|focuses|is)\b'
+    r'\bBobbie(?:\s+Fisher)?\s+(?:would|will|can|could|needs?|has|had|focuses|is|was|previously|currently'
+    r'|recently|also|works|worked|joined|specializes|helps|leads|led)\b'
+    r"|\bBobbie(?:\s+Fisher)?['’]s\s+(?:background|experience|career|work|team|brokerage|office|role|history)\b"
     r'|\b(?:she|her)\s+(?:would|will|can|needs?|has|focuses|is)\b',
     re.I,
 )
+# Bobbie introducing herself ("I'm Bobbie Fisher currently…") and quoted owner
+# text are not third-person self-reference, so they are removed before matching.
+IDENTITY_SELF_INTRODUCTION = re.compile(
+    r"\b(?:I['’]m|I am|this is|it['’]s|here['’]s)\s+Bobbie(?:\s+Fisher)?\b", re.I)
+QUOTED_TEXT = re.compile(r'"[^"]*"|“[^”]*”')
+
+
+# The owner asks whether a person, Bobbie herself, or an AI is texting.
+AI_IDENTITY_QUESTION = re.compile(
+    r"\b(?:are|r)\s+(?:you|u)\s+(?:an?\s+|really\s+|actually\s+)?(?:ai|a\.i\.|bot|robot|chat\s?bot|human|real(?!\s+estate)"
+    r"|(?:a\s+)?(?:real\s+)?person|automated|(?:a\s+)?machine|bobbie)\b"
+    r"|\bis\s+this\s+(?:an?\s+|really\s+|actually\s+)?(?:ai|bot|robot|automated|(?:a\s+)?(?:real\s+)?(?:person|human)"
+    r"|real(?!\s+estate)|bobbie)\b"
+    r"|\bam\s+i\s+(?:talking|speaking|texting|chatting)\s+(?:to|with)\s+(?:an?\s+|the\s+)?(?:ai|bot|robot|machine"
+    r"|computer|(?:real\s+)?(?:person|human)|bobbie)\b"
+    r"|\b(?:automated|auto-?generated|computer[-\s]generated)\s+(?:message|reply|text|response)s?\b",
+    re.I,
+)
+AI_DISCLOSURE = re.compile(r'\b(?:AI|A\.I\.|automated|artificial intelligence)\b', re.I)
+# Never claim a human is personally texting or deny being automated.
+FALSE_HUMAN_CLAIM = re.compile(
+    r"\b(?:I['’]?m|I\s+am)\s+(?:not\s+(?:an?\s+)?(?:ai|bot|robot|machine|automated)|(?:a\s+)?real\s+(?:person|human)"
+    r"|(?:a\s+)?human|really\s+Bobbie|actually\s+Bobbie)\b"
+    r"|\bnot\s+(?:an?\s+)?(?:ai|bot|robot|automated)\b"
+    r"|\b(?:this\s+is|it['’]s)\s+(?:really|actually)\s+(?:me|Bobbie)\b"
+    r"|\bpersonally\s+(?:texting|typing|writing|replying)\b",
+    re.I,
+)
+
+
+def is_ai_identity_question(text: str = '') -> bool:
+    return bool(AI_IDENTITY_QUESTION.search(QUOTED_TEXT.sub(' ', str(text or ''))))
+
+
+def _latest_owner_text(history: list | None) -> str:
+    for item in reversed(history or []):
+        if item.get('direction') == 'inbound':
+            return str(item.get('text') or '')
+    return ''
+
+
+def _third_person_identity(text: str) -> bool:
+    remainder = IDENTITY_SELF_INTRODUCTION.sub('I', QUOTED_TEXT.sub(' ', text))
+    return bool(IDENTITY_THIRD_PERSON.search(remainder))
 PHONE_SOURCE_CLAIM_SUBJECT = re.compile(r'\b(?:number|contact info|contact information)\b', re.I)
 PHONE_SOURCE_CLAIM_ORIGIN = re.compile(r'\b(?:public|property|listing|county|tax)\s+(?:record|records|data)\b', re.I)
 
@@ -102,7 +217,8 @@ def _questions(value: str = '') -> list:
 
 def _question_intent(value: str = '') -> str:
     text = str(value).lower()
-    if re.search(r'\b(?:call|phone|meet|meeting|appointment|visit|walk-?through|stop by|come by|swing by)\b', text):
+    if re.search(r'\b(?:call|phone|meet|meeting|appointment|visit|walk-?through'
+                 r'|(?:stop(?:ping)?|com(?:e|ing)|swing(?:ing)?|drop(?:ping)?) by|take a (?:quick )?look)\b', text):
         return 'scheduled_meeting'
     if re.search(r'\b(?:chat|talk|conversation)\b', text):
         return 'conversation'
@@ -119,6 +235,50 @@ def _question_intent(value: str = '') -> str:
     return ''
 
 
+def asked_questions(history: list | None = None) -> list:
+    """Every question Bobbie has already sent in this conversation, oldest first."""
+    asked = []
+    for item in history or []:
+        if item.get('direction') == 'outbound':
+            asked.extend(question.strip() for question in _questions(item.get('text') or ''))
+    return list(dict.fromkeys(question for question in asked if question))
+
+
+# Re-asking these topics is a repeat even when worded differently
+# ("What price were you hoping to get for it?" vs "…for 1 Test St?").
+REPEAT_BY_INTENT = {'scheduled_meeting', 'pricing'}
+# Steps at which Bobbie must not yet ask for a visit, call or meeting.
+NO_MEETING_STEPS = {'answer_and_qualify', 'answer_only'}
+
+
+# The prompt deliberately answers valuation, comps and fee questions with an
+# in-person look, so a visit invitation is expected there.
+VISIT_ANSWERS_QUESTION = re.compile(
+    r'\b(?:price|pricing|value|valuation|worth|sell for|comps?|comparables?|fees?|commission)\b', re.I)
+
+
+# A first-person visit offer stated rather than asked ("I'd like to stop by…").
+MEETING_OFFER = re.compile(
+    r"\b(?:i(?:['’]d| would)(?: also| really)? (?:like|love) to|i can|let me|i(?:['’]m| am) happy to"
+    r"|i(?:['’]ll| will))\b[^.?!]{0,40}"
+    r"\b(?:stop(?:ping)? by|come by|swing by|drop by|visit|meet|take a (?:quick )?look"
+    r"|see (?:the|your) (?:home|house|property|place)(?: in person)?)\b",
+    re.I,
+)
+
+
+def premature_meeting_question(reply: str = '', next_step: str | None = None, latest_owner_text: str = '') -> str:
+    """The visit/meeting request or offer made before the disposition allows one, if any."""
+    if next_step not in NO_MEETING_STEPS or VISIT_ANSWERS_QUESTION.search(latest_owner_text or ''):
+        return ''
+    question = next((question for question in _questions(reply)
+                     if _question_intent(question) == 'scheduled_meeting'), '')
+    if question:
+        return question
+    offer = MEETING_OFFER.search(clean_reply(reply))
+    return offer.group(0) if offer else ''
+
+
 def find_conversation_repetition(reply: str, history: list | None = None) -> str:
     """Bobbie must progress the conversation, never re-ask an answered question."""
     prior = [clean_reply(item.get('text') or '') for item in (history or [])
@@ -128,26 +288,44 @@ def find_conversation_repetition(reply: str, history: list | None = None) -> str
     current_questions = _questions(current)
     for previous in prior:
         if current.lower() == previous.lower():
+            ai_debug('REPEAT', 'repeated_reply: identical to an earlier Bobbie message',
+                     text=current, previous=previous)
             return 'repeated_reply'
         if len(_normalized_tokens(current)) >= 6 and similarity(current, previous) >= 0.86:
+            ai_debug('REPEAT', 'repeated_reply: similarity >= 0.86 to an earlier Bobbie message',
+                     text=current, previous=previous, similarity=round(similarity(current, previous), 3))
             return 'repeated_reply'
         for current_question in current_questions:
             for previous_question in _questions(previous):
                 intent = _question_intent(current_question)
                 same_intent = bool(intent) and intent == _question_intent(previous_question)
                 if (similarity(current_question, previous_question) >= 0.72
-                        or (same_intent and intent == 'scheduled_meeting')):
+                        or (same_intent and intent in REPEAT_BY_INTENT)):
+                    rule = ('question similarity >= 0.72'
+                            if similarity(current_question, previous_question) >= 0.72
+                            else f'both questions have the same {intent} intent')
+                    ai_debug('REPEAT', f'repeated_question: {rule}', draft_question=current_question,
+                             previous_question=previous_question,
+                             similarity=round(similarity(current_question, previous_question), 3),
+                             intent=intent or '')
                     return 'repeated_question'
     return ''
 
 
 def find_reply_policy_violations(reply: str, phone_source_known: bool | None = None,
-                                 max_length: int = 240, history: list | None = None) -> list:
+                                 max_length: int = 240, history: list | None = None,
+                                 next_step: str | None = None) -> list:
     text = clean_reply(reply)
     violations = []
     if len(text) > max_length:
         violations.append('over_length')
-    if IDENTITY_ASSISTANT.search(text) or IDENTITY_THIRD_PERSON.search(text):
+    if FALSE_HUMAN_CLAIM.search(text):
+        violations.append('false_human_claim')
+    if is_ai_identity_question(_latest_owner_text(history)):
+        # A truthful "automated on Bobbie Fisher's behalf" answer must name Bobbie.
+        if not AI_DISCLOSURE.search(text):
+            violations.append('missing_ai_disclosure')
+    elif IDENTITY_ASSISTANT.search(text) or _third_person_identity(text):
         violations.append('identity_switch')
     if EMAIL_ADDRESS.search(text):
         violations.append('invented_email')
@@ -178,7 +356,34 @@ def find_reply_policy_violations(reply: str, phone_source_known: bool | None = N
     repetition = find_conversation_repetition(text, history or [])
     if repetition:
         violations.append(repetition)
+    if premature_meeting_question(text, next_step, _latest_owner_text(history)):
+        violations.append('premature_meeting_request')
     return list(dict.fromkeys(violations))
+
+
+# Questions about Bobbie herself, including how long she has been somewhere,
+# as opposed to how long a property sale will take.
+AGENT_TENURE_QUESTION = re.compile(
+    r"\bhow long (?:has|have|had|did|was|were)\s+(?:bobbie|she|you|her)\b[^?.!]{0,40}"
+    r"\b(?:been|with|at|worked|working|in real estate|an? (?:agent|broker|realtor))\b",
+    re.I,
+)
+AGENT_BACKGROUND_QUESTION = re.compile(
+    r"\bwho(?:\s+is|['’]s)\s+(?:bobbie|she)\b|\btell me about (?:bobbie|yourself|her)\b"
+    r"|\b(?:which|what)\s+(?:brokerage|company|firm|office)\b"
+    r"|\b(?:bobbie|she|you)\b[^?.!]{0,40}\b(?:brokerage|re/?max|real broker|background|licensed)\b",
+    re.I,
+)
+
+
+def _agent_background_fallback(latest: str) -> str:
+    """Approved facts only: the current brokerage if approved, history without an invented tenure."""
+    approved = (settings.get('sms') or {}).get('approved_brokerage') or ''
+    current = f'I’m with {approved} now' if approved else 'I’d rather not guess at my current brokerage here'
+    earlier = ', and my RE/MAX Premier work was earlier' if re.search(r're/?max', latest, re.I) else ''
+    tenure = (' I don’t have a verified exact tenure to share, so I won’t guess.'
+              if AGENT_TENURE_QUESTION.search(latest) or re.search(r'\bhow long\b', latest, re.I) else '')
+    return f'{current}{earlier}.{tenure}'
 
 
 def safe_grounded_fallback(latest_inbound: str = '', violations: list | None = None,
@@ -189,6 +394,12 @@ def safe_grounded_fallback(latest_inbound: str = '', violations: list | None = N
     latest = str(latest_inbound or '')
     candidates = []
 
+    if 'missing_ai_disclosure' in violations or 'false_human_claim' in violations or is_ai_identity_question(latest):
+        candidates.append('These replies are automated (AI) on Bobbie Fisher’s behalf. '
+                          'I can still help with questions about your property.')
+    agent_question = bool(AGENT_TENURE_QUESTION.search(latest) or AGENT_BACKGROUND_QUESTION.search(latest))
+    if agent_question:
+        candidates.append(_agent_background_fallback(latest))
     if plan.get('next_step') == 'offer_call':
         candidates.append('Thanks—that gives me enough to understand what you need. '
                           'Would you be open to me stopping by to take a quick look at the property?')
@@ -222,7 +433,8 @@ def safe_grounded_fallback(latest_inbound: str = '', violations: list | None = N
     if re.search(r'\b(?:price|pricing|value|worth)\b', latest, re.I):
         candidates.append('I’d compare the prior price with current competition and buyer feedback '
                           'before recommending a position.')
-    if re.search(r'\b(?:timeline|timeframe|how long)\b', latest, re.I):
+    if (re.search(r'\b(?:timeline|timeframe|how long)\b', latest, re.I)
+            and not AGENT_TENURE_QUESTION.search(latest)):
         candidates.append('Timing depends on price, condition, and current demand, so I don’t have '
                           'verified data to promise a timeframe.')
     if re.search(r'\bnext step\b', latest, re.I):
@@ -232,5 +444,102 @@ def safe_grounded_fallback(latest_inbound: str = '', violations: list | None = N
 
     for candidate in candidates:
         if not find_conversation_repetition(candidate, history or []):
+            _debug_fallback_choice(candidate, candidates, latest, violations, plan)
             return candidate
-    return 'I don’t have anything new and verified to add, so I’ll leave it there.'
+        ai_debug('FALLBACK', 'candidate skipped because it was already sent', rule=_fallback_rule(candidate),
+                 text=candidate)
+    final = 'I don’t have anything new and verified to add, so I’ll leave it there.'
+    _debug_fallback_choice(final, candidates, latest, violations, plan)
+    return final
+
+
+_FALLBACK_RULES = (
+    ('These replies are automated', 'AI-identity question or disclosure violation'),
+    ('I’m with ', 'agent background/tenure question (approved brokerage)'),
+    ('I’d rather not guess at my current brokerage', 'agent background/tenure question (no approved brokerage)'),
+    ('Thanks—that gives me enough', 'next_step=offer_call'),
+    ('I have a property lead record', 'phone-source question or unsupported_phone_source'),
+    ('I don’t have a verified callback number', 'callback question or invented_phone'),
+    ('Fees and listing terms', 'fee/commission keyword or unsupported_fee'),
+    ('This chat can’t retrieve verified comps', 'email/comps/report keyword or unsupported_delivery'),
+    ('I don’t have a verified buyer', 'buyer keyword or unsupported_buyer'),
+    ('I’d review the prior pricing', 'strategy/options keyword or example_fact_leak'),
+    ('That expired-listing signal', 'why/reach-out keyword'),
+    ('I’d compare the prior price', 'price/value/worth keyword'),
+    ('Timing depends on price', 'timeline/timeframe/how-long keyword'),
+    ('The next step would be', 'next-step keyword'),
+    ('I’ve shared what I can verify', 'catch-all: no specific fallback rule matched'),
+    ('I don’t have anything new', 'every candidate was already sent'),
+)
+
+
+def _fallback_rule(text: str) -> str:
+    for prefix, rule in _FALLBACK_RULES:
+        if text.startswith(prefix):
+            return rule
+    return 'unknown'
+
+
+@ai_debug_safely
+def _debug_fallback_choice(selected, candidates, latest, violations, plan) -> None:
+    if ai_debug_enabled():
+        ai_debug('FALLBACK', 'HARDCODED fallback selected', rule=_fallback_rule(selected), text=selected,
+                 chars=len(selected), latest_owner_message=latest, violations=list(violations),
+                 next_step=(plan or {}).get('next_step'),
+                 candidates_in_order=[_fallback_rule(item) for item in candidates])
+
+
+def explain_policy_violations(reply: str, violations: list, history: list | None = None,
+                              max_length: int = 240) -> dict:
+    """Debug only: the text each violation matched. Does not affect the policy result."""
+    text = clean_reply(reply)
+
+    def found(pattern, value=text):
+        match = pattern.search(value)
+        return repr(match.group(0)) if match else 'no direct match'
+
+    reasons = {}
+    for violation in violations:
+        if violation == 'over_length':
+            reasons[violation] = f'{len(text)} chars > {max_length}'
+        elif violation == 'identity_switch':
+            assistant = IDENTITY_ASSISTANT.search(text)
+            remainder = IDENTITY_SELF_INTRODUCTION.sub('I', QUOTED_TEXT.sub(' ', text))
+            reasons[violation] = (f'assistant identity {assistant.group(0)!r}' if assistant
+                                  else f'third person {found(IDENTITY_THIRD_PERSON, remainder)}')
+        elif violation == 'false_human_claim':
+            reasons[violation] = found(FALSE_HUMAN_CLAIM)
+        elif violation == 'missing_ai_disclosure':
+            reasons[violation] = 'owner asked if this is AI/a person; reply has no AI/automated wording'
+        elif violation == 'invented_email':
+            reasons[violation] = 'email address in reply'
+        elif violation == 'invented_phone':
+            match = PHONE_NUMBER.search(text)
+            digits = re.sub(r'\D', '', match.group(0)) if match else ''
+            reasons[violation] = f'phone number ending {digits[-4:]}' if digits else 'phone number in reply'
+        elif violation == 'unsupported_delivery':
+            reasons[violation] = found(DELIVERY_PROMISE)
+        elif violation == 'unsupported_fee':
+            reasons[violation] = found(UNSUPPORTED_FEE)
+        elif violation == 'unsupported_buyer':
+            reasons[violation] = found(UNSUPPORTED_BUYER, BUYER_DENIAL.sub(' ', text))
+        elif violation == 'unsupported_production':
+            reasons[violation] = found(UNSUPPORTED_PRODUCTION)
+        elif violation == 'unsupported_local_experience':
+            reasons[violation] = found(UNSUPPORTED_LOCAL_EXPERIENCE)
+        elif violation == 'unsupported_outcome':
+            reasons[violation] = found(UNSUPPORTED_OUTCOME)
+        elif violation == 'unsupported_tenure':
+            reasons[violation] = found(PRECISE_TENURE)
+        elif violation == 'example_fact_leak':
+            reasons[violation] = found(EXAMPLE_FACT_LEAK)
+        elif violation == 'unsupported_phone_source':
+            reasons[violation] = (f'{found(PHONE_SOURCE_CLAIM_SUBJECT)} + {found(PHONE_SOURCE_CLAIM_ORIGIN)} '
+                                  'while the phone source is unknown')
+        elif violation == 'premature_meeting_request':
+            reasons[violation] = 'meeting/visit question before the disposition allows one'
+        elif violation in ('repeated_reply', 'repeated_question'):
+            reasons[violation] = 'see the [AI DEBUG][REPEAT] line above'
+        else:
+            reasons[violation] = 'see policy.py'
+    return reasons

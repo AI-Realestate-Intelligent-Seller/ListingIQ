@@ -52,12 +52,16 @@ _SIGNAL_ALIASES: dict[str, str] = {
     'canceled mls listing': 'cancelled_mls_listing',
     'cancelled listing': 'cancelled_mls_listing',
     'canceled listing': 'cancelled_mls_listing',
+    # Provider category keys (BatchData, PropertyRadar, DealMachine).
+    'cancelled': 'cancelled_mls_listing',
+    'canceled': 'cancelled_mls_listing',
     'foreclosure': 'foreclosure',
     'pre foreclosure': 'pre_foreclosure',
     'preforeclosure': 'pre_foreclosure',
     'pre-foreclosure': 'pre_foreclosure',
     'auction': 'auction',
     'property auction': 'auction',
+    'active auction': 'auction',
     'tax delinquent': 'tax_delinquent',
     'tax default': 'tax_delinquent',
     'tax delinquent tax default': 'tax_delinquent',
@@ -95,6 +99,7 @@ _SIGNAL_ALIASES: dict[str, str] = {
     'cashbuyer': 'cash_buyer',
     'vacant land': 'vacant_land',
     'land vacant': 'vacant_land',
+    'vacant lot': 'vacant_land',
 }
 
 # Stages, in the order the UI shows them. Derived, in this precedence.

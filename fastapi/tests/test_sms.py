@@ -198,11 +198,14 @@ def test_merge_lead_status_never_downgrades_a_terminal_status():
 # Outreach + closing detection
 # --------------------------------------------------------------------------
 
-def test_initial_outreach_uses_the_first_name_and_property():
+def test_initial_outreach_uses_the_first_name_and_property(monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setitem(settings['sms'], 'approved_brokerage', '')  # the brokerage-neutral default
     text = build_initial_outreach('Maya Chen', '123 Maple Ave.', 'It came off the market.')
     assert text.startswith('Hey Maya,')
     assert '123 Maple Ave' in text
-    assert text.endswith('Bobbie Fisher – RE/MAX')
+    assert text.endswith('Would you be open to a brief conversation? Bobbie Fisher')
+    assert 'RE/MAX' not in text
 
 
 def test_lead_context_marks_the_phone_source_as_unknown():

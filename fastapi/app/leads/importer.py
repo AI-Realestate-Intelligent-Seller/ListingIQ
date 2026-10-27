@@ -182,6 +182,18 @@ def parse_details(value: object) -> dict:
             if item is not None and str(item).strip() != ''}
 
 
+# Lofty CRM tags the business treats as listing-status signals ("Expired",
+# "fsbo", "Canceled"). New imports already read Tags as the signal column; this
+# set drives the backfill of leads imported before that, and nothing else.
+CRM_TAG_SIGNALS = frozenset({'expired', 'fsbo', 'cancelled_mls_listing'})
+
+
+def crm_tag_signals(details: dict) -> list[str]:
+    """Listing-status signals named by the lead's CRM tags, in tag order."""
+    return [signal for signal in parse_signals(str(details.get('crm_tags') or ''))
+            if signal in CRM_TAG_SIGNALS]
+
+
 def signals_from_details(details: dict) -> list[str]:
     """Signals the details blob states outright."""
     found = []

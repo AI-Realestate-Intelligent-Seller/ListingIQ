@@ -86,7 +86,7 @@ export type AppointmentResult = {
 /** Draft next replies for a thread, grounded in its message history. */
 export type ReplySuggestions = {
   suggestions: string[];
-  /** "ai" when DeepSeek drafted them, "template" for the built-in wordings. */
+  /** "ai" when the configured provider drafted them, "template" for built-ins. */
   source: "ai" | "template";
   /** Why the templates were used, when they were. Empty on the happy path. */
   note: string;

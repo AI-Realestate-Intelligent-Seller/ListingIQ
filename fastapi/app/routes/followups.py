@@ -422,7 +422,7 @@ def suggest_replies(conversation_id: int, current_user: User = Depends(get_curre
                     session: Session = Depends(get_db)):
     """Draft next replies from this thread's history. Nothing is sent.
 
-    POST rather than GET: each call spends a DeepSeek request, so it should not
+    POST rather than GET: each call spends an AI provider request, so it should not
     be something a browser or a proxy can repeat on its own.
     """
     _require_access(current_user)
