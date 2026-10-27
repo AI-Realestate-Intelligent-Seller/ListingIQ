@@ -1,7 +1,7 @@
 """Single-lane lead queue — port of lead-queue.js + processQueuedLead().
 
 The prototype used BullMQ/Redis purely to run one simulated conversation at a
-time (the recipient simulator is limited to one DeepSeek call in flight). An
+time (the recipient simulator is limited to one AI provider call in flight). An
 in-process worker thread gives the same serialization without adding Redis as a
 hard dependency; jobs are re-queued from the database on startup if needed.
 """

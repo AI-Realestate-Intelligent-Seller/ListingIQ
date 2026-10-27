@@ -21,19 +21,40 @@ def _formatted_now(timezone: str) -> str:
     return stamp.strip()
 
 
+def brokerage_rule() -> str:
+    """How Bobbie may describe her current brokerage, gated on business approval."""
+    approved = (settings.get('sms') or {}).get('approved_brokerage') or ''
+    if approved:
+        return f'My current brokerage is approved as {approved}; when relevant, say so plainly, e.g. "I\'m with {approved}."'
+    return ('No current brokerage is approved for messaging yet: never state a brokerage as my confirmed current '
+            'firm. If asked, say in a few natural words what recent listings show, and keep earlier firms as history.')
+
+
+AI_DISCLOSURE_RULE = (
+    'If the owner asks whether they are texting a person, Bobbie herself, a bot, or an AI, answer truthfully: say '
+    "plainly that these replies are automated (AI) on Bobbie Fisher's behalf, never claim a human is personally "
+    'typing, and you may name Bobbie in that reply; then keep helping briefly.'
+)
+
+
 def build_bobbie_prompt(conversation, scheduling: str = '') -> str:
     timezone = settings['ai']['timezone']
     now = _formatted_now(timezone)
     property_address = getattr(conversation, 'property_address', None) or 'unknown'
     return (
-        f"Write only Bobbie Fisher of RE/MAX Premier's next complete SMS. Never call yourself an assistant. "
+        f"Write only Bobbie Fisher's next complete SMS, in Bobbie's own first-person voice (I, me, my); never "
+        f"refer to Bobbie as Bobbie, she, or her. Never call yourself an assistant unprompted. {AI_DISCLOSURE_RULE} "
         f"Current time: {now} ({timezone}); property: {property_address}.\n"
-        "Use at most 220 characters in one or two short sentences. Answer the latest message as a whole: address its "
+        "Use at most 220 characters (about 35 words) in one or two short sentences; aim for about 200-220 at most "
+        "by answering the owner's actual question first, each part in a few words, and leaving out secondary "
+        "detail. Answer the latest message as a whole: address its "
         "direct question, concern, and condition before asking anything. Never repeat or paraphrase a question already "
         "asked, even if unanswered; progress or close instead.\n"
         "Use only approved runtime tool context. Never invent the phone-number source, callback number, email address, "
         "exact fee, buyer, offer, valuation, local sales, tenure, performance, or availability. If data is unavailable, "
-        "say so plainly.\n"
+        "say so plainly. State supported facts in natural, concise first person without stock hedges such as "
+        "\"publicly listed\", \"public records show\", or \"pending confirmation\", and never invent experience, "
+        f"titles, or years. {brokerage_rule()}\n"
         "This simulator cannot send email, retrieve live comps, or perform a future follow-up. Never promise those "
         "actions; continue by text or explain that Bobbie must handle them separately.\n"
         "The goal is a low-pressure onsite meeting: Bobbie visiting the property in person to see it and talk through "

@@ -44,7 +44,7 @@ def _conversation(session, user: User, *, contact: str, name: str,
     return conversation
 
 
-def test_reply_prompt_uses_exact_newest_20_eligible_messages_without_cross_thread_leak(
+def test_reply_prompt_uses_exact_newest_40_eligible_messages_without_cross_thread_leak(
         session, monkeypatch):
     """One fixture covers selection, chronology, roles, repetition, and isolation."""
     user = _user(session, 'agent@fictional.example')
@@ -58,29 +58,29 @@ def test_reply_prompt_uses_exact_newest_20_eligible_messages_without_cross_threa
     )
     base = datetime(2026, 1, 2, 9, 0, 0, tzinfo=timezone.utc)
     scenario_text = {
-        5: 'I am interested in selling the Cedar property.',
-        6: 'I can explain the next steps.',
-        7: 'I am not interested at that price.',
-        8: 'Would a higher price change your mind?',
-        9: 'How many bedrooms does Cedar have?',
-        10: 'The profile says three bedrooms.',
-        11: 'I do not want an appointment.',
-        12: 'Understood, I will not schedule one.',
-        13: 'Please have a human call me.',
-        14: 'A broker can call tomorrow.',
-        15: 'I also own 202 Pine Road.',
-        16: 'We can discuss each property separately.',
-        17: 'Earlier I said yes to selling.',
-        18: 'Thanks for clarifying.',
-        19: 'Keep this repeated statement.',
-        20: 'Keep this repeated statement.',
-        21: 'What is the roof age? It is absent from my profile.',
-        22: 'I will check rather than guess.',
-        23: 'Actually, my latest preference is not to sell.',
-        24: 'Can you confirm you understood my latest preference?',
+        25: 'I am interested in selling the Cedar property.',
+        26: 'I can explain the next steps.',
+        27: 'I am not interested at that price.',
+        28: 'Would a higher price change your mind?',
+        29: 'How many bedrooms does Cedar have?',
+        30: 'The profile says three bedrooms.',
+        31: 'I do not want an appointment.',
+        32: 'Understood, I will not schedule one.',
+        33: 'Please have a human call me.',
+        34: 'A broker can call tomorrow.',
+        35: 'I also own 202 Pine Road.',
+        36: 'We can discuss each property separately.',
+        37: 'Earlier I said yes to selling.',
+        38: 'Thanks for clarifying.',
+        39: 'Keep this repeated statement.',
+        40: 'Keep this repeated statement.',
+        41: 'What is the roof age? It is absent from my profile.',
+        42: 'I will check rather than guess.',
+        43: 'Actually, my latest preference is not to sell.',
+        44: 'Can you confirm you understood my latest preference?',
     }
     target_messages = []
-    for index in range(1, 25):
+    for index in range(1, 45):
         message = Message(
             conversation_id=conversation.id,
             direction='inbound' if index % 2 else 'outbound',
@@ -107,15 +107,16 @@ def test_reply_prompt_uses_exact_newest_20_eligible_messages_without_cross_threa
         captured['options'] = options
         return {'content': '{"suggestions":["I understood your latest preference."]}'}
 
-    monkeypatch.setattr(reply_suggest.deepseek, 'is_configured', lambda: True)
-    monkeypatch.setattr(reply_suggest.deepseek, 'completion', fake_completion)
+    monkeypatch.setattr(reply_suggest.ai_client, 'is_configured', lambda: True)
+    monkeypatch.setattr(reply_suggest.ai_client, 'completion', fake_completion)
     before = session.query(Message).count()
 
     result = reply_suggest.suggest(session, conversation)
 
     expected_lines = [
-        f"{'Owner' if index % 2 else 'Agent'}: {scenario_text.get(index, f'old context {index}')}"
-        for index in range(5, 25)
+        f"{'OWNER [INBOUND]' if index % 2 else 'BROKERAGE [OUTBOUND]'}: "
+        f"{scenario_text.get(index, f'old context {index}')}"
+        for index in range(5, 45)
     ]
     expected_facts = json.dumps({
         'owner_name': 'Avery North',
@@ -130,28 +131,33 @@ def test_reply_prompt_uses_exact_newest_20_eligible_messages_without_cross_threa
             'property_details': {},
         }],
     })
-    expected_history = '\n'.join(expected_lines)
-    expected_user_prompt = (
-        f'PROPERTY FACTS:\n{expected_facts}\n\n'
-        f'CONVERSATION (oldest first):\n{expected_history}\n\n'
-        "Draft the agent's reply to the owner's latest message."
-    )
-    assert captured == {
-        'messages': [
-            {'role': 'system', 'content': reply_suggest.SYSTEM_PROMPT},
-            {'role': 'user', 'content': expected_user_prompt},
-        ],
-        'options': {'temperature': 0.4, 'max_tokens': 400},
+    assert captured['messages'][0] == {
+        'role': 'system',
+        'content': reply_suggest.SYSTEM_PROMPT,
     }
+    assert captured['messages'][1]['role'] == 'user'
+    user_prompt = captured['messages'][1]['content']
+    facts_text, remainder = user_prompt.split(
+        '\n\nCONVERSATION HISTORY (chronological, oldest to newest):\n', 1,
+    )
+    history_text, task_text = remainder.split('\n\nTASK:\n', 1)
+    assert facts_text == f'PROPERTY FACTS (reference data):\n{expected_facts}'
+    assert history_text.splitlines() == expected_lines
+    assert 'Distinguish carefully between OWNER [INBOUND] and BROKERAGE [OUTBOUND]' in task_text
+    assert 'without assuming the owner responded' in task_text
+    assert captured['options']['temperature'] == 0.4
+    assert captured['options']['max_tokens'] == 600
+    assert captured['options']['feature'] == 'followups.reply_suggestions'
+    assert captured['options']['output_schema'] == reply_suggest.REPLY_SUGGESTIONS_SCHEMA
     assert result == {
         'suggestions': ['I understood your latest preference.'],
         'source': 'ai',
         'note': '',
     }
-    assert expected_lines.count('Owner: Keep this repeated statement.') == 1
-    assert expected_lines.count('Agent: Keep this repeated statement.') == 1
-    assert 'old context 4' not in expected_user_prompt
-    assert 'LEAK FROM ANOTHER CONVERSATION' not in expected_user_prompt
+    assert expected_lines.count('OWNER [INBOUND]: Keep this repeated statement.') == 1
+    assert expected_lines.count('BROKERAGE [OUTBOUND]: Keep this repeated statement.') == 1
+    assert 'old context 4' not in user_prompt
+    assert 'LEAK FROM ANOTHER CONVERSATION' not in user_prompt
     assert session.query(Message).count() == before
 
 
@@ -222,14 +228,14 @@ def test_reply_prompt_contains_exact_linked_property_facts_and_excludes_unrelate
         captured['request'] = messages
         return {'content': '{"suggestions":["I have the imported details in front of me."]}'}
 
-    monkeypatch.setattr(reply_suggest.deepseek, 'is_configured', lambda: True)
-    monkeypatch.setattr(reply_suggest.deepseek, 'completion', fake_completion)
+    monkeypatch.setattr(reply_suggest.ai_client, 'is_configured', lambda: True)
+    monkeypatch.setattr(reply_suggest.ai_client, 'completion', fake_completion)
 
     reply_suggest.suggest(session, conversation)
 
     user_prompt = captured['request'][1]['content']
-    facts_json = user_prompt.split('PROPERTY FACTS:\n', 1)[1].split(
-        '\n\nCONVERSATION (oldest first):', 1)[0]
+    facts_json = user_prompt.split('PROPERTY FACTS (reference data):\n', 1)[1].split(
+        '\n\nCONVERSATION HISTORY (chronological, oldest to newest):', 1)[0]
     assert json.loads(facts_json) == {
         'owner_name': 'Jordan Example',
         'current_property': '20 Current Lane, Fiction City, IL 60020',
@@ -262,24 +268,28 @@ def test_reply_prompt_contains_exact_linked_property_facts_and_excludes_unrelate
     assert '999 Unrelated Avenue' not in user_prompt
     assert '+15559999999' not in user_prompt
     assert '_campaign_original' not in user_prompt
+    assert 'OWNER [INBOUND]: Which details do you have for the current property?' in user_prompt
+    assert 'TASK:\nGenerate up to three contextually appropriate outbound SMS drafts' in user_prompt
 
 
-def test_reply_history_character_bound_is_the_exact_recent_tail():
+def test_reply_history_preserves_complete_messages_without_character_tail_truncation():
     messages = [
         Message(direction='inbound' if index % 2 else 'outbound',
                 text=f'message-{index:02d}-' + chr(64 + index) * 500)
         for index in range(1, 21)
     ]
     full = '\n'.join(
-        f"{'Owner' if item.direction == 'inbound' else 'Agent'}: {item.text}"
+        f"{'OWNER [INBOUND]' if item.direction == 'inbound' else 'BROKERAGE [OUTBOUND]'}: "
+        f'{item.text}'
         for item in messages
     )
 
     bounded = reply_suggest._history_text(messages)
 
-    assert bounded == full[-reply_suggest.MAX_HISTORY_CHARS:]
-    assert len(bounded) == reply_suggest.MAX_HISTORY_CHARS
-    assert bounded.endswith('message-20-' + 'T' * 500)
+    assert bounded == full
+    assert len(bounded) > reply_suggest.MAX_HISTORY_CHARS
+    assert bounded.startswith('OWNER [INBOUND]: message-01-' + 'A' * 500)
+    assert bounded.endswith('BROKERAGE [OUTBOUND]: message-20-' + 'T' * 500)
 
 
 def test_reply_output_parser_and_unusable_provider_fallback_are_deterministic(
@@ -292,7 +302,7 @@ def test_reply_output_parser_and_unusable_provider_fallback_are_deterministic(
     assert reply_suggest._parse(json.dumps({
         'suggestions': ['  First option.  ', '', None, 42, 'First option.', overlong,
                         'Fourth option is bounded out.'],
-    })) == ['First option.', 'x' * reply_suggest.MAX_SUGGESTION_CHARS,
+    })) == ['First option.', overlong,
             'Fourth option is bounded out.']
 
     user = _user(session, 'fallback@fictional.example')
@@ -307,9 +317,9 @@ def test_reply_output_parser_and_unusable_provider_fallback_are_deterministic(
         created_at=datetime(2026, 3, 4, 8, 0, 0, tzinfo=timezone.utc),
     ))
     session.commit()
-    monkeypatch.setattr(reply_suggest.deepseek, 'is_configured', lambda: True)
+    monkeypatch.setattr(reply_suggest.ai_client, 'is_configured', lambda: True)
     monkeypatch.setattr(
-        reply_suggest.deepseek, 'completion',
+        reply_suggest.ai_client, 'completion',
         lambda *_args, **_kwargs: {'content': '{"suggestions":[null,"  ",7]}'},
     )
 
@@ -361,8 +371,8 @@ def test_campaign_prompt_uses_exact_tenant_scoped_membership_counts_and_no_perso
         captured['options'] = options
         return {'content': json.dumps({'suggestions': ['Model one.', 'Model two.', 'Model three.']})}
 
-    monkeypatch.setattr(reason_suggest.deepseek, 'is_configured', lambda: True)
-    monkeypatch.setattr(reason_suggest.deepseek, 'completion', fake_completion)
+    monkeypatch.setattr(reason_suggest.ai_client, 'is_configured', lambda: True)
+    monkeypatch.setattr(reason_suggest.ai_client, 'completion', fake_completion)
 
     result = reason_suggest.suggest(session, owner, campaign)
 
@@ -389,7 +399,9 @@ def test_campaign_prompt_uses_exact_tenant_scoped_membership_counts_and_no_perso
         'The set is mainly about: Expired, High Equity.\n'
         'Write 3 alternative reasons.'
     )
-    assert captured['options'] == {'temperature': 0.7}
+    assert captured['options']['temperature'] == 0.7
+    assert captured['options']['feature'] == 'campaigns.reason_suggestions'
+    assert captured['options']['output_schema'] == reason_suggest.REASON_SUGGESTIONS_SCHEMA
     provider_text = json.dumps(captured['messages'])
     for prohibited in (
         'Casey One', 'Casey Two', 'Casey Three', '+15551000001',
@@ -416,7 +428,7 @@ def test_campaign_empty_signals_and_malformed_ai_output_use_exact_catalog_fallba
     ])
     session.commit()
 
-    monkeypatch.setattr(reason_suggest.deepseek, 'is_configured', lambda: True)
+    monkeypatch.setattr(reason_suggest.ai_client, 'is_configured', lambda: True)
     no_signal_result = {
         'signals': [],
         'suggestions': reason_suggest._GENERIC_SUGGESTIONS,
@@ -427,7 +439,7 @@ def test_campaign_empty_signals_and_malformed_ai_output_use_exact_catalog_fallba
     assert reason_suggest.suggest(session, owner, empty_profile_campaign) == no_signal_result
 
     monkeypatch.setattr(
-        reason_suggest.deepseek, 'completion',
+        reason_suggest.ai_client, 'completion',
         lambda *_args, **_kwargs: {'content': 'not valid JSON'},
     )
     fallback = reason_suggest._catalog_suggestions([{
@@ -437,5 +449,5 @@ def test_campaign_empty_signals_and_malformed_ai_output_use_exact_catalog_fallba
         'signals': [{'key': 'expired', 'label': 'Expired', 'count': 1, 'share': 1.0}],
         'suggestions': fallback,
         'source': 'catalog',
-        'note': 'DeepSeek returned nothing usable, so these are the standard wordings.',
+        'note': 'The AI provider returned nothing usable, so these are the standard wordings.',
     }

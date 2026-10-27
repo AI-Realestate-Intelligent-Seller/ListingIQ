@@ -111,4 +111,7 @@ def test_relative_paths_resolve_against_the_backend_directory():
 def test_configured_stores_are_absolute_paths():
     assert settings['vector_store']['path'].startswith('/')
     assert settings['sms']['knowledge_pdf'].startswith('/')
-    assert settings['redis_url'].startswith('redis://')
+    # A plain boolean keeps pytest's assertion detail from printing the URL,
+    # which can carry a password.
+    plain_redis = settings['redis_url'].startswith('redis://')
+    assert plain_redis, 'REDIS_URL must use redis://'

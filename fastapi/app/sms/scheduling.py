@@ -1,7 +1,7 @@
 """Scheduling output guards — port of scheduling-state.js.
 
 These are output safety guards only. Conversation intent and calendar state are
-decided by DeepSeek's structured disposition response in bobbie.py.
+decided by the configured AI provider's structured response in bobbie.py.
 """
 
 import re
@@ -18,8 +18,14 @@ WEEKDAY = re.compile(r'\b(?:monday|tuesday|wednesday|thursday|friday|saturday|su
 AVAILABILITY_PHRASING = re.compile(
     r'\b(?:i can do|i have|available|open|would .{0,20} work|does .{0,20} work|tomorrow at|today at)\b', re.I
 )
+# "Confirmed" counts only as a booking claim ("you're confirmed", "your visit is
+# confirmed"); biography wording such as "my tenure isn't confirmed" is not one.
 UNBOOKED_CONFIRMATION = re.compile(
-    r"\b(?:you(?:['’]re| are) all set|confirmed|booked"
+    r"\b(?:you(?:['’]re| are) all set"
+    r"|(?:you|we|it|that|everything|all)(?:['’]re|['’]s| are| is)\s+(?:now\s+|all\s+)?confirmed"
+    r"|(?:appointment|visit|meeting|call|walk-?through|showing|time|slot|booking|reservation)s?\s+"
+    r"(?:is\s+|are\s+|has\s+been\s+|have\s+been\s+)?confirmed"
+    r"|i(?:['’]ve| have) confirmed|confirmed\s+for|booked"
     r"|i(?:['’]ll| will) (?:book|confirm|reserve|schedule|set (?:it|that) up|put you down"
     r"|get (?:it|that) booked|give you a call|call you|ring you)"
     r"|see you (?:at|then|there)|talk (?:to you )?(?:then|at)|looking forward to (?:it|our call|our visit|meeting you|seeing))\b",

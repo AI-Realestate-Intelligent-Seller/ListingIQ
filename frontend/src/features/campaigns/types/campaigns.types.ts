@@ -117,7 +117,7 @@ export type CampaignReasonSuggestions = {
     text: string;
     source: "preferred" | "ai" | "catalog";
   }[];
-  /** "ai" when DeepSeek phrased them, "catalog" for the built-in wordings. */
+  /** "ai" when the configured provider phrased them, "catalog" for built-ins. */
   source: "ai" | "catalog";
   /** Why the catalog was used, when it was. Empty on the happy path. */
   note: string;

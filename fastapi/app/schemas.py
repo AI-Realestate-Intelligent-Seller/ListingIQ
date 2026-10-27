@@ -373,7 +373,7 @@ class CampaignReasonSuggestions(BaseModel):
     suggestions: List[str] = []
     # Backward-compatible structured form for distinguishing curated and AI copy.
     options: List[CampaignReasonSuggestionOption] = []
-    # 'ai' when DeepSeek phrased them, 'catalog' for the built-in wordings.
+    # 'ai' when the configured provider phrased them, 'catalog' for built-ins.
     source: str = 'catalog'
     # Why the catalog was used, when it was. Empty on the happy path.
     note: str = ''
@@ -381,7 +381,7 @@ class CampaignReasonSuggestions(BaseModel):
 class ReplySuggestions(BaseModel):
     """Draft next replies for a thread, grounded in its message history."""
     suggestions: List[str] = []
-    # 'ai' when DeepSeek drafted them, 'template' for the built-in wordings.
+    # 'ai' when the configured provider drafted them, 'template' for built-ins.
     source: str = 'template'
     # Why the templates were used, when they were. Empty on the happy path.
     note: str = ''

@@ -50,12 +50,43 @@ def load_config():
         'client_secret': os.getenv('GOOGLE_CLIENT_SECRET', cfg.get('google', {}).get('client_secret')),
         'redirect_uri': os.getenv('GOOGLE_OAUTH_REDIRECT_URI', cfg.get('google', {}).get('redirect_uri'))
     }
-    # Bobbie / DeepSeek conversational AI.
+    # Provider-neutral conversational AI. DeepSeek remains the default.
     ai_cfg = cfg.get('ai', {}) if isinstance(cfg.get('ai', {}), dict) else {}
+    ai_provider = (os.getenv('AI_PROVIDER') or ai_cfg.get('provider') or 'deepseek').strip().lower()
+    # AI_MODEL stays the shared fallback. A provider-specific model wins, so
+    # switching AI_PROVIDER (and restarting) is enough to move between providers.
+    shared_model = os.getenv('AI_MODEL') or ai_cfg.get('model')
+    deepseek_model = (os.getenv('DEEPSEEK_MODEL') or ai_cfg.get('deepseek_model')
+                      or shared_model or 'deepseek-v4-flash')
+    anthropic_model = (os.getenv('ANTHROPIC_MODEL') or ai_cfg.get('anthropic_model')
+                       or shared_model or '')
     cfg['ai'] = {
+        'provider': ai_provider,
         'api_key': os.getenv('DEEPSEEK_API_KEY') or os.getenv('AI_API_KEY') or ai_cfg.get('api_key'),
         'base_url': (os.getenv('AI_BASE_URL') or ai_cfg.get('base_url') or 'https://api.deepseek.com').rstrip('/'),
-        'model': os.getenv('AI_MODEL') or ai_cfg.get('model') or 'deepseek-v4-flash',
+        'model': anthropic_model if ai_provider == 'anthropic' else deepseek_model,
+        'deepseek_model': deepseek_model,
+        'anthropic_model': anthropic_model,
+        'anthropic_api_key': (os.getenv('ANTHROPIC_API_KEY')
+                              or ai_cfg.get('anthropic_api_key')),
+        'anthropic_base_url': (
+            os.getenv('ANTHROPIC_BASE_URL')
+            or ai_cfg.get('anthropic_base_url')
+            or 'https://api.anthropic.com'
+        ).rstrip('/'),
+        'anthropic_api_version': (
+            os.getenv('ANTHROPIC_API_VERSION')
+            or ai_cfg.get('anthropic_api_version')
+            or '2026-10-21'
+        ),
+        'anthropic_simple_max_output_tokens': int(
+            os.getenv('ANTHROPIC_SIMPLE_MAX_OUTPUT_TOKENS',
+                      ai_cfg.get('anthropic_simple_max_output_tokens', 1024))
+        ),
+        'anthropic_complex_max_output_tokens': int(
+            os.getenv('ANTHROPIC_COMPLEX_MAX_OUTPUT_TOKENS',
+                      ai_cfg.get('anthropic_complex_max_output_tokens', 2048))
+        ),
         'timeout_seconds': float(os.getenv('AI_REQUEST_TIMEOUT_MS', ai_cfg.get('timeout_ms', 30000))) / 1000.0,
         'timezone': os.getenv('BOBBIE_TIMEZONE', ai_cfg.get('timezone', 'America/Chicago')),
         # Retrieval embeddings: MiniLM ONNX bundled with chromadb (local, free).
@@ -74,6 +105,10 @@ def load_config():
             or sms_cfg.get('knowledge_pdf')
             or 'data/knowledge/Bobbie_Fisher_REMAX_Comprehensive_Profile_and_AI_Knowledge_Base.pdf'
         ),
+        # Set only after the business has approved Bobbie's current brokerage for
+        # messaging (e.g. "Real Broker LLC"). Empty keeps messages brokerage-neutral.
+        'approved_brokerage': str(os.getenv('BOBBIE_APPROVED_BROKERAGE',
+                                            sms_cfg.get('approved_brokerage', '')) or '').strip(),
         'knowledge_collection': os.getenv('KNOWLEDGE_COLLECTION',
                                           sms_cfg.get('knowledge_collection', 'bobbie_knowledge')),
         'knowledge_chunk_chars': int(os.getenv('KNOWLEDGE_CHUNK_CHARS',

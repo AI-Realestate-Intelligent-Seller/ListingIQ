@@ -128,9 +128,9 @@ export function updateCampaign(
 }
 
 /**
- * Asks DeepSeek to phrase the reason this set of leads has in common. POST
+ * Asks the configured AI provider to phrase the reason this set shares. POST
  * because each call spends a request; the server falls back to its built-in
- * wordings when DeepSeek is unconfigured or unreachable, so this never fails
+ * wordings when AI is unconfigured or unreachable, so this never fails
  * just because the network did.
  */
 export function suggestReasons(

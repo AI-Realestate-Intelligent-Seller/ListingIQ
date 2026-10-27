@@ -176,6 +176,8 @@ class DeepSeekProvider:
             } for tool in request.tools]
         if request.options.tool_choice is not None:
             body['tool_choice'] = request.options.tool_choice
+        if request.output_schema is not None:
+            body.setdefault('response_format', {'type': 'json_object'})
         for key, value in request.options.provider_options.items():
             if not key.startswith('_'):
                 body[key] = value

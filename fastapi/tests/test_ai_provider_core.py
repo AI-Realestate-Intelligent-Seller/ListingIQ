@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 import pytest
 import requests
 
+from app.ai import client as ai_client
 from app.ai.errors import (
     AuthenticationError,
     InvalidProviderRequestError,
@@ -407,6 +408,38 @@ def test_legacy_completion_signature_and_return_shape_route_through_service(monk
     assert seen['request'].options.provider_options['_legacy_options']['response_format'] == {
         'type': 'json_object',
     }
+
+
+def test_neutral_client_selects_provider_and_model_from_configuration(monkeypatch):
+    seen = {}
+
+    def generate(ai_request):
+        seen['request'] = ai_request
+        return AIResponse(
+            text='configured answer', structured=None, tool_calls=(), stop_reason='stop',
+            provider=ai_request.provider, model=ai_request.model, provider_request_id='r-config',
+            usage=TokenUsage(), latency_ms=1, structured_output_valid=None,
+        )
+
+    monkeypatch.setitem(ai_client.settings['ai'], 'anthropic_api_key', 'configured')
+    monkeypatch.setitem(ai_client.settings['ai'], 'provider', 'anthropic')
+    monkeypatch.setitem(ai_client.settings['ai'], 'model', 'claude-sonnet-5-5')
+    monkeypatch.setattr(ai_client.ai_service, 'generate', generate)
+
+    result = ai_client.completion([{'role': 'user', 'content': 'hello'}])
+
+    assert result == {'role': 'assistant', 'content': 'configured answer'}
+    assert seen['request'].provider == 'anthropic'
+    assert seen['request'].model == 'claude-sonnet-5-5'
+    assert seen['request'].feature == 'ai.completion'
+    assert legacy.completion is ai_client.completion
+
+    # An unsupported model is rejected before any provider request is built.
+    seen.clear()
+    monkeypatch.setitem(ai_client.settings['ai'], 'model', 'claude-configured')
+    with pytest.raises(ai_client.AiUnavailableError, match='cannot use model'):
+        ai_client.completion([{'role': 'user', 'content': 'hello'}])
+    assert seen == {}
 
 
 def test_legacy_completion_preserves_empty_envelope_and_error_boundaries(monkeypatch):

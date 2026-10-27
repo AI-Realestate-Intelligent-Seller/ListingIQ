@@ -2,6 +2,14 @@
 
 import re
 
+from ..core.config import settings
+
+
+def outreach_signature() -> str:
+    """Bobbie's name, plus her brokerage only once the business has approved it."""
+    brokerage = (settings.get('sms') or {}).get('approved_brokerage') or ''
+    return f'Bobbie Fisher – {brokerage}' if brokerage else 'Bobbie Fisher'
+
 
 def _clean_sentence(value: str = '') -> str:
     return re.sub(r'[\s.?!]+$', '', str(value or '').strip())
@@ -26,4 +34,4 @@ def build_initial_outreach(name: str, property_address: str, outreach_reason: st
     address = _clean_sentence(property_address)
     reason = _clean_sentence(outreach_reason)
     return (f'Hey {first_name}, I’m reaching out about {address}. {reason}. '
-            'Would you be open to a brief conversation? Bobbie Fisher – RE/MAX')
+            f'Would you be open to a brief conversation? {outreach_signature()}')

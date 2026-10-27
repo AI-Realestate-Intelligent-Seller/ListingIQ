@@ -13,13 +13,16 @@ from uuid import uuid4
 
 import requests
 
+from ..ai.client import AiUnavailableError
 from ..core.config import settings
 from ..db import SessionLocal
 from ..logger import get_logger, log_event
 from ..models import Conversation, Lead, Message
 from . import bobbie
-from .deepseek import AiUnavailableError
 from .classifier import classify_lead_message, finalized_lead_status, is_opt_out, merge_lead_status
+from .policy import (
+    ai_debug, ai_debug_begin, ai_debug_enabled, ai_debug_safely, ai_debug_set, ai_debug_state, asked_questions,
+)
 from .scheduling import (
     contains_scheduling_pressure,
     contains_time_proposal,
@@ -427,6 +430,14 @@ def record_inbound_classification(session, conversation: Conversation, text: str
 # The AI reply pipeline
 # ---------------------------------------------------------------------------
 
+@ai_debug_safely
+def _debug_final(reply: str, event_type: str, source: str | None = None) -> None:
+    if source:
+        ai_debug_set(source=source)
+    ai_debug('FINAL', 'outgoing SMS', text=reply, chars=len(reply or ''),
+             source=ai_debug_state().get('source'), event_type=event_type)
+
+
 def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
     """Port of processAiReply(). Runs in a background thread with its own session."""
     session = SessionLocal()
@@ -444,6 +455,15 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
         log_event(logger, 'sms.ai.started', conversation_id=conversation.id,
                   user_id=conversation.user_id, inbound_chars=len(latest_inbound_text or ''),
                   lead_status=conversation.lead_status)
+        if ai_debug_enabled():
+            try:
+                inbound = (session.query(Message.id)
+                           .filter(Message.conversation_id == conversation.id, Message.direction == 'inbound')
+                           .order_by(Message.id.desc()).first())
+            except Exception:  # debug output only
+                inbound = None
+            ai_debug_begin(conversation.id, inbound[0] if inbound else None)
+            ai_debug('START', 'Bobbie reply pipeline started', owner_message=latest_inbound_text)
         # Only one branch below runs per call (each returns), so the status
         # this conversation carried on entry is the "from" side of whichever
         # move happens.
@@ -452,6 +472,8 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
         if is_opt_out(latest_inbound_text):
             log_event(logger, 'sms.ai.opt_out_detected', conversation_id=conversation.id)
             reply = 'Understood — I’ll remove you from my outreach list. Take care.'
+            ai_debug('FALLBACK', 'HARDCODED reply selected', rule='opt-out (STOP/DNC) detected', text=reply)
+            _debug_final(reply, 'ai.reply', 'fallback')
             hand_to_broker(session, conversation)
             mark_lead_completed(session, conversation, lead_status='dnc', dnc_alert=True)
             _log_status_change(session, conversation, status_before, 'dnc')
@@ -472,6 +494,12 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
             should_fetch_availability=(disposition.get('calendar') or {}).get(
                 'should_fetch_availability'),
         )
+        ai_debug('DISPOSITION', 'model disposition', action=disposition.get('action'),
+                 intent=disposition.get('intent'), next_step=disposition.get('next_step'),
+                 calendar_state=(disposition.get('calendar') or {}).get('state'),
+                 should_fetch_availability=(disposition.get('calendar') or {}).get('should_fetch_availability'),
+                 stage=disposition.get('conversation_stage'), lead_status=disposition.get('lead_status'),
+                 reason=disposition.get('reason'))
 
         if disposition['action'] == 'end':
             closing_context = 'Do not schedule; this conversation is ending.'
@@ -480,13 +508,21 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
                 'Write one brief, respectful closing acknowledgment suited to the owner’s latest message. '
                 'Do not ask any question, offer another service, request a call, mention scheduling, or try to continue.'
             )
-            closing_reply = bobbie.generate_ai_reply(conversation, history, closing_context, closing_control)
+            closing_evidence = []
+            ai_debug_set(phase='closing')
+            closing_reply = bobbie.generate_ai_reply(conversation, history, closing_context, closing_control,
+                                                     evidence_out=closing_evidence)
             closing_reply = bobbie.review_and_repair_ai_reply(
-                conversation, history, closing_reply, disposition, closing_context, closing_control)
+                conversation, history, closing_reply, disposition, closing_context, closing_control,
+                knowledge_evidence=closing_evidence)
             if not closing_reply or '?' in closing_reply or contains_scheduling_pressure(closing_reply):
                 log_event(logger, 'sms.ai.closing.fallback', level=logging.WARNING,
                           conversation_id=conversation.id, reason='unsafe_or_empty_draft')
                 closing_reply = 'Understood. Thanks for letting me know, and take care.'
+                ai_debug('FALLBACK', 'HARDCODED closing reply selected',
+                         rule='closing draft empty, asked a question, or pressured scheduling', text=closing_reply)
+                ai_debug_set(source='fallback')
+            _debug_final(closing_reply, 'ai.closing')
             send_and_store_message(session, conversation, closing_reply, 'ai.closing')
             hand_to_broker(session, conversation)
             mark_lead_completed(session, conversation, lead_status=disposition['lead_status'])
@@ -508,15 +544,24 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
             f"Qualification focus: {disposition['qualification_focus'] or 'none supplied'}. "
             f"Calendar state: {disposition['calendar']['state']}. Reason: {disposition['reason']}. "
             'Follow the required next step naturally without assuming facts. If the next step is '
-            'answer_and_qualify, answer the concern and ask one concise logical question; do not request a meeting yet. '
+            'answer_and_qualify, answer the concern and ask one concise logical question; do not mention, offer or '
+            'ask about a visit, stop-by, call or meeting in this reply. '
             'If it is answer_only, do not ask a question. If it is offer_call, do not qualify further: acknowledge '
             'what is already known and make one low-pressure request to visit the property in person without '
             'proposing a time (a phone call only if the owner has declined a visit or asked for a call). '
             'Never propose, offer or confirm a day or time; a person from the team arranges every meeting.'
         )
+        already_asked = asked_questions(history)
+        if already_asked:
+            # The disposition can point back at a question Bobbie already asked; never re-ask it.
+            disposition_control += (
+                ' Questions already asked in this conversation (never ask these again, even reworded, even if '
+                'unanswered; if the qualification focus is one of them, ask a different useful question or none): '
+                + ' | '.join(already_asked[-6:])
+            )
         calendar_state = disposition['calendar']
         log_event(logger, 'sms.calendar.state_resolved', conversation_id=conversation.id,
-                  source='deepseek', state=calendar_state['state'],
+                  source=settings['ai']['provider'], state=calendar_state['state'],
                   should_fetch_availability=calendar_state['should_fetch_availability'])
 
         scheduling_context = ''
@@ -525,6 +570,9 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
             # time), she says a person will follow up and steps back; the
             # assigned broker/agent sets the time and place from Follow-ups.
             reply = 'Great, thank you. Someone from our team will text you shortly to set up a time that works.'
+            ai_debug('FALLBACK', 'HARDCODED reply selected', rule='meeting handoff (should_fetch_availability)',
+                     text=reply)
+            _debug_final(reply, 'ai.reply', 'fallback')
             outbound = send_and_store_message(session, conversation, reply, 'ai.reply')
             previous_status = conversation.lead_status
             hand_to_broker(session, conversation)
@@ -540,13 +588,20 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
                                   'Do not offer times, ask for a visit or a call, or pressure them to schedule.')
 
         fallback_plan = {'next_step': disposition['next_step']}
+        # Knowledge results the reviewed draft was written from.
+        reply_evidence = []
         reply = bobbie.generate_ai_reply(
-            conversation, history, scheduling_context, disposition_control, fallback_plan)
+            conversation, history, scheduling_context, disposition_control, fallback_plan,
+            evidence_out=reply_evidence)
 
         if contains_unbooked_confirmation(reply) or contains_time_proposal(reply):
             log_event(logger, 'sms.ai.safety_rewrite', level=logging.WARNING,
                       conversation_id=conversation.id, reason='unbooked_confirmation')
+            ai_debug('FALLBACK', 'HARDCODED reply selected before review',
+                     rule=('unbooked booking claim' if contains_unbooked_confirmation(reply)
+                           else 'day/time proposal'), replaced=reply)
             reply = 'I haven’t scheduled anything, and I won’t invent a time.'
+            ai_debug_set(source='fallback')
 
         if calendar_state['state'] == 'call_declined' and contains_scheduling_pressure(reply):
             log_event(logger, 'sms.ai.safety_rewrite', level=logging.WARNING,
@@ -554,22 +609,42 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
             retry_context = (f'{scheduling_context}\nThe previous draft improperly reintroduced a call. '
                              'Reply directly by text without mentioning a call, meeting, schedule, appointment, '
                              'email, or future follow-up.')
-            retry = bobbie.generate_ai_reply(conversation, history, retry_context, disposition_control, fallback_plan)
+            retry_evidence = []
+            ai_debug('FALLBACK', 'draft pressured scheduling after the owner declined; regenerating once',
+                     rule='call_declined + scheduling pressure', replaced=reply)
+            ai_debug_set(phase='call_declined_retry')
+            retry = bobbie.generate_ai_reply(conversation, history, retry_context, disposition_control, fallback_plan,
+                                             evidence_out=retry_evidence)
             reply = ('Understood—I’ll keep this to text and answer what I can here.'
                      if contains_scheduling_pressure(retry) else retry)
+            ai_debug_set(phase='original')
+            if contains_scheduling_pressure(retry):
+                ai_debug('FALLBACK', 'HARDCODED reply selected', rule='retry still pressured scheduling',
+                         text=reply)
+                ai_debug_set(source='fallback')
+            reply_evidence = retry_evidence
 
         reply = bobbie.review_and_repair_ai_reply(conversation, history, reply, disposition,
-                                                  scheduling_context, disposition_control)
+                                                  scheduling_context, disposition_control,
+                                                  knowledge_evidence=reply_evidence)
 
         if contains_unbooked_confirmation(reply) or contains_time_proposal(reply):
             log_event(logger, 'sms.ai.review_rewrite', level=logging.WARNING,
                       conversation_id=conversation.id, reason='calendar_safety')
+            ai_debug('FALLBACK', 'HARDCODED reply selected after review',
+                     rule=('unbooked booking claim' if contains_unbooked_confirmation(reply)
+                           else 'day/time proposal'), replaced=reply)
             reply = 'I haven’t scheduled anything, and I won’t invent a time.'
+            ai_debug_set(source='fallback')
         if calendar_state['state'] == 'call_declined' and contains_scheduling_pressure(reply):
             log_event(logger, 'sms.ai.review_rewrite', level=logging.WARNING,
                       conversation_id=conversation.id, reason='pressure_after_refusal')
+            ai_debug('FALLBACK', 'HARDCODED reply selected after review',
+                     rule='call_declined + scheduling pressure', replaced=reply)
             reply = 'Understood—I’ll keep this to text and answer what I can here.'
+            ai_debug_set(source='fallback')
 
+        _debug_final(reply, 'ai.reply')
         outbound = send_and_store_message(session, conversation, reply, 'ai.reply')
         if is_conversation_closing(reply):
             hand_to_broker(session, conversation)
@@ -581,7 +656,7 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
                   text_chars=len(reply))
     except AiUnavailableError as error:
         # Nothing is sent when the model is unreachable; autopilot stays on so the
-        # next inbound message retries once DeepSeek is configured again.
+        # next inbound message retries once the configured AI provider is available.
         log_event(logger, 'sms.ai.failed', level=logging.ERROR,
                   conversation_id=conversation_id, stage='model',
                   error_type=type(error).__name__, error=str(error))

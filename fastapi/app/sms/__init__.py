@@ -1,1 +1,1 @@
-"""Bobbie SMS workspace: DeepSeek conversation runtime, policy guards and delivery."""
+"""Bobbie SMS workspace: provider-neutral AI runtime, policy guards and delivery."""

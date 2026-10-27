@@ -48,6 +48,10 @@ class AuthenticationError(AIError):
     category = 'authentication'
 
 
+class PermissionDeniedError(AIError):
+    category = 'permission'
+
+
 class ProviderConfigurationError(AuthenticationError):
     category = 'provider_configuration'
 

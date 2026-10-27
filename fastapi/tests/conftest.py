@@ -10,6 +10,118 @@ import pytest
 BASE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE_DIR))
 
+# Test-only safety: no test may send a real SMS or reach a paid AI provider.
+# These run before app.core.config loads .env, and load_dotenv never overrides
+# a variable that is already set, so local credentials are never picked up.
+os.environ['SMS_MODE'] = 'simulation'
+os.environ['SIMULATION_SMS_URL'] = ''
+os.environ['AI_PROVIDER'] = 'deepseek'
+for _secret in ('DEEPSEEK_API_KEY', 'AI_API_KEY', 'ANTHROPIC_API_KEY', 'TELNYX_API_KEY'):
+    os.environ[_secret] = ''
+
+# Keep the remaining production credentials out of the test process too. Only
+# variable names are matched here; no value from .env is read. The integration
+# tests set the secrets they need themselves.
+import re  # noqa: E402
+
+_CREDENTIAL_NAME = re.compile(
+    r'(_API_KEY|_API_TOKEN|_SECRET|_PASSWORD|_ACCESS_KEY_ID|_SECRET_ACCESS_KEY'
+    r'|_PRIVATE_KEY|_ENCRYPTION_KEY)$')
+_dotenv = BASE_DIR / '.env'
+_dotenv_names = set(re.findall(r'(?m)^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=',
+                               _dotenv.read_text(encoding='utf-8'))) if _dotenv.exists() else set()
+for _name in _dotenv_names:
+    if _CREDENTIAL_NAME.search(_name):
+        os.environ[_name] = ''
+from cryptography.fernet import Fernet  # noqa: E402
+
+os.environ['FERNET_KEY'] = Fernet.generate_key().decode()   # throwaway, valid format
+os.environ['SECRET_KEY'] = 'test-secret-key'
+os.environ['REDIS_URL'] = 'redis://127.0.0.1:6379'          # credential-free; connections are refused
+os.environ['QDRANT_URL'] = ''
+os.environ['QDRANT_API_KEY'] = ''
+
+# Refuse every network connection (loopback included), so a test that forgets to
+# mock a provider fails instead of calling it. Unix sockets stay available.
+import socket  # noqa: E402
+
+BLOCKED_CONNECTIONS: list[str] = []
+BLOCKED_LOOKUPS: list[str] = []
+_LOCAL_NAMES = {None, '', 'localhost', '127.0.0.1', '::1'}
+_original_connect = socket.socket.connect
+_original_connect_ex = socket.socket.connect_ex
+_original_sendto = socket.socket.sendto
+_original_sendmsg = socket.socket.sendmsg
+_original_getaddrinfo = socket.getaddrinfo
+_original_gethostbyname = socket.gethostbyname
+_original_gethostbyname_ex = socket.gethostbyname_ex
+
+
+def _refuse(sock, address):
+    if sock.family in (socket.AF_INET, socket.AF_INET6):
+        host = address[0] if isinstance(address, tuple) else str(address)
+        BLOCKED_CONNECTIONS.append(host)
+        raise ConnectionRefusedError(f'Network is disabled during tests: {host}')
+    return None
+
+
+def _refuse_lookup(host):
+    if host not in _LOCAL_NAMES:
+        BLOCKED_LOOKUPS.append(str(host))
+        raise socket.gaierror(socket.EAI_NONAME, 'DNS lookups are disabled during tests')
+
+
+def _guarded_connect(sock, address):
+    _refuse(sock, address)
+    return _original_connect(sock, address)
+
+
+def _guarded_connect_ex(sock, address):
+    _refuse(sock, address)
+    return _original_connect_ex(sock, address)
+
+
+def _guarded_sendto(sock, data, *args):
+    # UDP covers DNS resolvers that bypass getaddrinfo.
+    _refuse(sock, args[-1])
+    return _original_sendto(sock, data, *args)
+
+
+def _guarded_sendmsg(sock, buffers, *args):
+    if len(args) >= 3 and args[2] is not None:
+        _refuse(sock, args[2])
+    return _original_sendmsg(sock, buffers, *args)
+
+
+def _guarded_getaddrinfo(host, *args, **kwargs):
+    _refuse_lookup(host)
+    return _original_getaddrinfo(host, *args, **kwargs)
+
+
+def _guarded_gethostbyname(host):
+    _refuse_lookup(host)
+    return _original_gethostbyname(host)
+
+
+def _guarded_gethostbyname_ex(host):
+    _refuse_lookup(host)
+    return _original_gethostbyname_ex(host)
+
+
+socket.socket.connect = _guarded_connect
+socket.socket.connect_ex = _guarded_connect_ex
+socket.socket.sendto = _guarded_sendto
+socket.socket.sendmsg = _guarded_sendmsg
+socket.getaddrinfo = _guarded_getaddrinfo
+socket.gethostbyname = _guarded_gethostbyname
+socket.gethostbyname_ex = _guarded_gethostbyname_ex
+
+
+def pytest_terminal_summary(terminalreporter):
+    terminalreporter.write_line(
+        f'network guard: {len(BLOCKED_CONNECTIONS)} blocked connections, '
+        f'{len(BLOCKED_LOOKUPS)} blocked DNS lookups')
+
 # Point the application at a throwaway SQLite database before app.core.config
 # (and therefore app.db) is imported.
 _TEST_DB = Path(tempfile.gettempdir()) / f'ListingIQ_test_{uuid.uuid4().hex}.db'

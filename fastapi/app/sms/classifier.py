@@ -1,6 +1,6 @@
 """Deterministic lead classification — port of lead-classifier.js.
 
-Used as the safety net when the DeepSeek disposition call is unavailable, and to
+Used as the safety net when the AI disposition call is unavailable, and to
 detect opt-outs before any model call is made.
 """
 

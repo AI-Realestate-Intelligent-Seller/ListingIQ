@@ -10,9 +10,16 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.ai import client as ai_client
 from app.leads import reason_suggest
 from app.sms import bobbie, reply_suggest, service
 from app.sms.deepseek import AiUnavailableError
+
+
+def test_ai_features_bind_to_the_provider_neutral_client():
+    assert bobbie.completion is ai_client.completion
+    assert reply_suggest.ai_client is ai_client
+    assert reason_suggest.ai_client is ai_client
 
 
 @pytest.fixture
@@ -77,7 +84,10 @@ def test_disposition_normalizes_a_valid_structured_response(monkeypatch, convers
     # The server derives this flag from the validated calendar state.
     assert result['calendar']['should_fetch_availability'] is False
     assert seen['messages'][0]['role'] == 'system'
-    assert seen['options'] == {'temperature': 0, 'max_tokens': 240}
+    assert seen['options']['temperature'] == 0
+    assert seen['options']['max_tokens'] == 240
+    assert seen['options']['feature'] == 'sms.disposition'
+    assert seen['options']['output_schema'] == bobbie.DISPOSITION_SCHEMA
 
 
 def test_disposition_uses_the_deterministic_fallback_for_malformed_json(
@@ -169,6 +179,52 @@ def test_reply_generation_dispatches_tools_and_returns_the_followup_completion(
     assert any(message.get('role') == 'system'
                and message.get('content', '').startswith('Approved runtime context')
                for message in calls[0][0])
+
+
+def test_reply_generation_executes_multiple_tools_before_continuing(
+        monkeypatch, conversation, history):
+    calls = []
+    monkeypatch.setattr(bobbie.knowledge, 'needs_bobbie_knowledge', lambda _text: False)
+    monkeypatch.setattr(
+        bobbie.knowledge,
+        'search_bobbie_knowledge',
+        lambda query, limit: {'query': query, 'limit': limit, 'results': []},
+    )
+
+    def fake_completion(messages, **options):
+        calls.append((messages, options))
+        if len(calls) == 1:
+            return {
+                'content': '',
+                'tool_calls': [
+                    {
+                        'id': 'tool-call-lead',
+                        'type': 'function',
+                        'function': {'name': 'get_lead_details', 'arguments': '{}'},
+                    },
+                    {
+                        'id': 'tool-call-knowledge',
+                        'type': 'function',
+                        'function': {
+                            'name': 'search_bobbie_knowledge',
+                            'arguments': '{"query":"commission"}',
+                        },
+                    },
+                ],
+            }
+        return {'content': 'That makes sense. What timing would work best for you?'}
+
+    monkeypatch.setattr(bobbie, 'completion', fake_completion)
+
+    result = bobbie.generate_ai_reply(conversation, history)
+
+    assert result
+    assert len(calls) == 2
+    tool_results = [message for message in calls[1][0] if message.get('role') == 'tool']
+    assert [message.get('tool_call_id') for message in tool_results] == [
+        'tool-call-lead',
+        'tool-call-knowledge',
+    ]
 
 
 def test_empty_reply_is_retried_once_with_the_existing_contract(

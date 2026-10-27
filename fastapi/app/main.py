@@ -150,8 +150,19 @@ app.include_router(
     prefix="/api/v1/platform-admin/integrations/data",
     tags=["integration-data"],
 )
+def _validate_ai_configuration():
+    """Refuse to start with a provider/model pair that cannot work."""
+    from .ai.configuration import validate_ai_settings
+    from .core.config import settings
+
+    validate_ai_settings(settings['ai'])
+    logging.getLogger(__name__).info(
+        'AI provider=%s model=%s', settings['ai']['provider'], settings['ai']['model'])
+
+
 @app.on_event("startup")
 def startup_event():
+    _validate_ai_configuration()
     init_db()
     # Alembic loads its own logging config while checking migrations. Restore
     # the application level afterwards so request lifecycle logs remain visible.

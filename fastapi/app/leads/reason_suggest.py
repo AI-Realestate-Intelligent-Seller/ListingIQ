@@ -5,7 +5,7 @@ one area, or the probate records from one month. When the set has a story in
 common, `{{reason}}` should say it once in the broker's own voice rather than
 falling back to a generic per-signal sentence.
 
-The signal counting here is ordinary arithmetic over imported data. DeepSeek is
+The signal counting here is ordinary arithmetic over imported data. The configured AI provider is
 only asked to phrase what that arithmetic already found — it is given the signal
 labels and nothing else about the owners, and it may not introduce a fact. If it
 is unconfigured or unreachable, the catalog wording below is used instead, so
@@ -21,9 +21,10 @@ from difflib import SequenceMatcher
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from ..ai import client as ai_client
+from ..ai.schemas import REASON_SUGGESTIONS_SCHEMA
 from ..logger import get_logger
 from ..models import Campaign, Lead, User
-from ..sms import deepseek
 from ..tenancy import brokerage_user_ids
 from . import address as address_key
 from .catalog import SIGNALS
@@ -228,18 +229,22 @@ def _neutral_suggestions(count: int) -> dict:
     """Only real AI output is offered for No Signal; unsafe claims are discarded."""
     profile = [{'key': NO_SIGNAL_REASON_KEY, 'label': 'No Signal',
                 'count': count, 'share': 1.0}]
-    if not deepseek.is_configured():
+    if not ai_client.is_configured():
         return {
             'signals': profile, 'suggestions': [], 'options': [], 'source': 'catalog',
             'note': 'AI is unavailable. Retry Suggest with AI when the provider is configured.',
         }
     try:
-        message = deepseek.completion(_neutral_prompt(count), temperature=0.7)
+        message = ai_client.completion(
+            _neutral_prompt(count), temperature=0.7,
+            output_schema=REASON_SUGGESTIONS_SCHEMA,
+            feature='campaigns.reason_suggestions.neutral',
+        )
         generated = [
             text for text in _parse(message.get('content') or '')
             if not _UNSUPPORTED_NEUTRAL_CLAIM.search(text)
         ][:MAX_SUGGESTIONS]
-    except deepseek.AiUnavailableError as error:
+    except ai_client.AiUnavailableError as error:
         logger.warning('Neutral reason suggestions could not reach AI: %s', error)
         return {
             'signals': profile, 'suggestions': [], 'options': [], 'source': 'catalog',
@@ -319,7 +324,7 @@ def _signal_suggestions(profile: list[dict], signal: str) -> dict:
     options = ([{'text': preferred, 'source': 'preferred'}] if preferred else [])
     needed = MAX_SUGGESTIONS - len(options)
 
-    if not deepseek.is_configured():
+    if not ai_client.is_configured():
         return {
             'signals': profile,
             'suggestions': [option['text'] for option in options],
@@ -329,17 +334,19 @@ def _signal_suggestions(profile: list[dict], signal: str) -> dict:
         }
 
     try:
-        message = deepseek.completion(
+        message = ai_client.completion(
             _prompt(profile, profile, profile[0]['count'], '',
                     requested=needed, preferred=preferred),
             temperature=0.7,
+            output_schema=REASON_SUGGESTIONS_SCHEMA,
+            feature='campaigns.reason_suggestions.signal',
         )
         generated = _meaningfully_distinct(
             _parse(message.get('content') or ''),
             [option['text'] for option in options],
             needed,
         )
-    except deepseek.AiUnavailableError as error:
+    except ai_client.AiUnavailableError as error:
         logger.warning('Signal reason suggestions could not reach AI: %s', error)
         return {
             'signals': profile,
@@ -421,22 +428,24 @@ def suggest(session: Session, user: User, campaign: Campaign,
         .limit(1).scalar()
     ) or ''
 
-    if not deepseek.is_configured():
+    if not ai_client.is_configured():
         return {'signals': profile, 'suggestions': fallback, 'source': 'catalog',
-                'note': 'DeepSeek is not configured, so these are the standard wordings.'}
+                'note': 'The AI provider is not configured, so these are the standard wordings.'}
 
     try:
-        message = deepseek.completion(_prompt(dominant, profile, total, area),
-                                      temperature=0.7)
+        message = ai_client.completion(_prompt(dominant, profile, total, area),
+                                      temperature=0.7,
+                                      output_schema=REASON_SUGGESTIONS_SCHEMA,
+                                      feature='campaigns.reason_suggestions')
         suggestions = _parse(message.get('content') or '')
-    except deepseek.AiUnavailableError as error:
+    except ai_client.AiUnavailableError as error:
         logger.warning('Reason suggestions fell back to the catalog: %s', error)
         return {'signals': profile, 'suggestions': fallback, 'source': 'catalog',
-                'note': 'DeepSeek could not be reached, so these are the standard wordings.'}
+                'note': 'The AI provider could not be reached, so these are the standard wordings.'}
 
     if not suggestions:
         return {'signals': profile, 'suggestions': fallback, 'source': 'catalog',
-                'note': 'DeepSeek returned nothing usable, so these are the standard wordings.'}
+                'note': 'The AI provider returned nothing usable, so these are the standard wordings.'}
 
     # The catalog wording is kept on the end as a safe choice the broker can pick.
     for text in fallback:

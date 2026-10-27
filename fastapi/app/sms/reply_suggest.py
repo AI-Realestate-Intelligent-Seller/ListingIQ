@@ -16,11 +16,12 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
+from ..ai import client as ai_client
+from ..ai.schemas import REPLY_SUGGESTIONS_SCHEMA
 from ..leads.catalog import signal_label
 from ..leads.service import lead_details, split_signals
 from ..logger import get_logger
 from ..models import Booking, Conversation, Lead, Message
-from . import deepseek
 
 logger = get_logger(__name__)
 
@@ -471,7 +472,7 @@ def suggest(session: Session, conversation: Conversation) -> dict:
             'source': 'template',
             'note': 'There is no message history yet, so these are starter replies.',
         }
-    if not deepseek.is_configured():
+    if not ai_client.is_configured():
         return {
             'suggestions': fallback,
             'source': 'template',
@@ -479,10 +480,12 @@ def suggest(session: Session, conversation: Conversation) -> dict:
         }
     facts_text = _facts_text(property_facts(session, conversation))
     try:
-        message = deepseek.completion(_prompt(facts_text, history),
-                                      temperature=0.4, max_tokens=600)
+        message = ai_client.completion(_prompt(facts_text, history),
+                                      temperature=0.4, max_tokens=600,
+                                      output_schema=REPLY_SUGGESTIONS_SCHEMA,
+                                      feature='followups.reply_suggestions')
         suggestions = _parse(message.get('content') or '')
-    except deepseek.AiUnavailableError as error:
+    except ai_client.AiUnavailableError as error:
         logger.warning('Reply suggestions fell back to templates: %s', error)
         return {
             'suggestions': fallback,

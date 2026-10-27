@@ -26,7 +26,7 @@ from .instrumentation import (
 )
 from .models import AIRequest, AIResponse, StructuredOutputMode
 from .provider import AIProvider
-from .providers import DeepSeekProvider
+from .providers import AnthropicProvider, DeepSeekProvider
 from .registry import ProviderRegistry
 
 
@@ -73,6 +73,11 @@ class AIService:
             ).with_request(request)
 
         def parse(response: AIResponse[Any]) -> AIResponse[StructuredT]:
+            if (response.provider == 'anthropic'
+                    and response.stop_reason in {'max_tokens', 'refusal'}):
+                raise MalformedOutputError(
+                    f'Anthropic structured response is incomplete: {response.stop_reason}',
+                )
             try:
                 value = json.loads(response.text)
             except (TypeError, ValueError) as exc:
@@ -255,10 +260,12 @@ def _validate_json_schema(value: Any, schema: Mapping[str, Any], path: str = '$'
         'null': lambda item: item is None,
     }
     if expected is not None:
-        if expected not in type_checks:
+        expected_types = expected if isinstance(expected, list) else [expected]
+        if not expected_types or any(item not in type_checks for item in expected_types):
             raise UnsupportedCapabilityError(f'Unsupported JSON Schema type: {expected}')
-        if not type_checks[expected](value):
-            raise SchemaValidationError(f'{path} must be of type {expected}')
+        if not any(type_checks[item](value) for item in expected_types):
+            label = ' or '.join(expected_types)
+            raise SchemaValidationError(f'{path} must be of type {label}')
     if isinstance(value, dict):
         properties = schema.get('properties', {})
         if not isinstance(properties, Mapping):
@@ -302,6 +309,12 @@ default_registry.register('deepseek', DeepSeekProvider(
     api_key=lambda: settings['ai']['api_key'] or '',
     base_url=lambda: settings['ai']['base_url'],
     # Keep requests.post dynamically patchable at the historical module path.
+    http_post=lambda *args, **kwargs: requests.post(*args, **kwargs),
+))
+default_registry.register('anthropic', AnthropicProvider(
+    api_key=lambda: settings['ai']['anthropic_api_key'] or '',
+    base_url=lambda: settings['ai']['anthropic_base_url'],
+    api_version=lambda: settings['ai']['anthropic_api_version'],
     http_post=lambda *args, **kwargs: requests.post(*args, **kwargs),
 ))
 ai_service = AIService(default_registry)

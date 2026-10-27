@@ -955,7 +955,7 @@ def test_the_reason_that_was_previewed_is_the_one_that_is_sent(
 def test_suggestions_come_from_the_signals_the_set_shares(
         client, make_user, auth_header, sent_sms, monkeypatch):
     """Every lead here is expired, so the suggestion must be about an expired listing."""
-    monkeypatch.setattr('app.leads.reason_suggest.deepseek.is_configured', lambda: False)
+    monkeypatch.setattr('app.leads.reason_suggest.ai_client.is_configured', lambda: False)
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
     upload(client, headers,
@@ -1005,8 +1005,8 @@ def test_per_signal_suggestions_combine_preferred_and_mocked_ai_without_full_sms
             'Would selling the property help with the estate plans?',
         ]})}
 
-    monkeypatch.setattr('app.leads.reason_suggest.deepseek.is_configured', lambda: True)
-    monkeypatch.setattr('app.leads.reason_suggest.deepseek.completion', fake_completion)
+    monkeypatch.setattr('app.leads.reason_suggest.ai_client.is_configured', lambda: True)
+    monkeypatch.setattr('app.leads.reason_suggest.ai_client.completion', fake_completion)
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
     upload(client, headers,
@@ -1078,13 +1078,13 @@ def test_per_signal_suggestions_combine_preferred_and_mocked_ai_without_full_sms
 
 def test_per_signal_ai_failure_returns_only_legitimate_preferred_option(
         client, make_user, auth_header, sent_sms, monkeypatch):
-    from app.sms import deepseek
+    from app.ai import client as ai_client
 
     def boom(messages, **options):
-        raise deepseek.AiUnavailableError('offline test outage')
+        raise ai_client.AiUnavailableError('offline test outage')
 
-    monkeypatch.setattr('app.leads.reason_suggest.deepseek.is_configured', lambda: True)
-    monkeypatch.setattr('app.leads.reason_suggest.deepseek.completion', boom)
+    monkeypatch.setattr('app.leads.reason_suggest.ai_client.is_configured', lambda: True)
+    monkeypatch.setattr('app.leads.reason_suggest.ai_client.completion', boom)
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
     upload(client, headers)
@@ -1116,8 +1116,8 @@ def test_suggestions_use_deepseek_when_it_is_configured(
         seen['messages'] = messages
         return {'content': '```json\n{"suggestions": ["Phrased by the model."]}\n```'}
 
-    monkeypatch.setattr('app.leads.reason_suggest.deepseek.is_configured', lambda: True)
-    monkeypatch.setattr('app.leads.reason_suggest.deepseek.completion', fake_completion)
+    monkeypatch.setattr('app.leads.reason_suggest.ai_client.is_configured', lambda: True)
+    monkeypatch.setattr('app.leads.reason_suggest.ai_client.completion', fake_completion)
 
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
@@ -1136,13 +1136,13 @@ def test_suggestions_use_deepseek_when_it_is_configured(
 def test_a_deepseek_outage_falls_back_to_the_catalog_wordings(
         client, make_user, auth_header, sent_sms, monkeypatch):
     """The composer must still offer something when the provider is down."""
-    from app.sms import deepseek
+    from app.ai import client as ai_client
 
     def boom(messages, **options):
-        raise deepseek.AiUnavailableError('AI provider unreachable')
+        raise ai_client.AiUnavailableError('AI provider unreachable')
 
-    monkeypatch.setattr('app.leads.reason_suggest.deepseek.is_configured', lambda: True)
-    monkeypatch.setattr('app.leads.reason_suggest.deepseek.completion', boom)
+    monkeypatch.setattr('app.leads.reason_suggest.ai_client.is_configured', lambda: True)
+    monkeypatch.setattr('app.leads.reason_suggest.ai_client.completion', boom)
 
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
@@ -2110,8 +2110,8 @@ def test_no_signal_ai_and_reason_precedence_are_safe(monkeypatch, make_user, ses
     assert no_signal_group['label'] == 'No Signal'
     assert no_signal_group['count'] == 2
 
-    monkeypatch.setattr(reason_suggest.deepseek, 'is_configured', lambda: True)
-    monkeypatch.setattr(reason_suggest.deepseek, 'completion', lambda *_args, **_kwargs: {
+    monkeypatch.setattr(reason_suggest.ai_client, 'is_configured', lambda: True)
+    monkeypatch.setattr(reason_suggest.ai_client, 'completion', lambda *_args, **_kwargs: {
         'content': json.dumps({'suggestions': [
             'Would you consider selling the property?',
             'Are you open to discussing a possible sale?',
@@ -2126,8 +2126,8 @@ def test_no_signal_ai_and_reason_precedence_are_safe(monkeypatch, make_user, ses
     assert all('listed' not in option['text'].lower() for option in suggestions['options'])
 
     def unavailable(*_args, **_kwargs):
-        raise reason_suggest.deepseek.AiUnavailableError('offline')
-    monkeypatch.setattr(reason_suggest.deepseek, 'completion', unavailable)
+        raise reason_suggest.ai_client.AiUnavailableError('offline')
+    monkeypatch.setattr(reason_suggest.ai_client, 'completion', unavailable)
     retry = reason_suggest.suggest(
         session, owner, campaign, signal=campaign_service.NO_SIGNAL_REASON_KEY,
     )
