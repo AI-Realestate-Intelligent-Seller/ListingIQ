@@ -204,7 +204,14 @@ def _neutral_prompt(count: int) -> list[dict]:
                 'equity, vacancy, taxes, financial hardship, price, condition, or any '
                 'other fact about the owner or property. Each option must simply say the '
                 'broker is reaching out about the property and ask whether the recipient '
-                'would consider selling. No greeting or sign-off. Under 200 characters. '
+                'would consider selling. The message around this fragment already '
+                'introduces the sender, so never introduce yourself or say you are an '
+                'agent, broker or real-estate professional; start with the purpose, e.g. '
+                '"I wanted to ask whether you would consider selling your property." '
+                'Keep each option natural, short and worded differently from the others. '
+                'Do not say you noticed, saw or came across anything, and do not mention '
+                'records, buyers, value or the local market. No greeting or sign-off. '
+                'Under 200 characters. '
                 'Reply with JSON only: {"suggestions": ["...", "...", "..."]}'
             ),
         },
@@ -218,11 +225,79 @@ def _neutral_prompt(count: int) -> list[dict]:
     ]
 
 
-_UNSUPPORTED_NEUTRAL_CLAIM = re.compile(
-    r'\b(list(?:ed|ing)?|expired|absentee|live elsewhere|foreclos|probate|equity|'
-    r'vacan|tax(?:es)?|delinquen|distress|hardship|financial|estate|inherited|'
-    r'for sale|off market|market record|public record)\b', re.I,
+# A No Signal reason may say who the broker is and ask about a possible sale.
+# It may not state or imply anything about the owner or the property. Each rule
+# names the kind of claim it blocks, so a rejection can be explained. Offers about
+# the future ("would you consider listing it / putting it up for sale") and the
+# phrase "real estate" are not claims and stay allowed.
+_NEUTRAL_CLAIM_RULES: tuple[tuple[str, re.Pattern], ...] = (
+    ('listing_status', re.compile(
+        r"\b(?:expired|withdrawn|cancel+ed|fsbo|by owner|off(?:\s+the)?\s+market"
+        r"|no longer (?:listed|on the market|for sale)|back on the market"
+        r"|(?:came|come|taken|pulled|went) off"
+        r"|(?:your|the|its|previous|prior|old|former|recent) listing"
+        r"|(?:is|was|were|been|are|currently|already|still|recently|previously)"
+        r" (?:listed|for sale|on the market)"
+        r"|listing (?:expired|ended|lapsed|was|has|didn['’]t|did not))\b", re.I)),
+    ('ownership_or_residence', re.compile(
+        r"\b(?:absentee|live[sd]? elsewhere|(?:don['’]t|do not|no longer) live"
+        r"|out[- ]of[- ](?:area|state|town)|rental|tenants?|landlord|investors?"
+        r"|inherit\w*)\b", re.I)),
+    ('distress_or_legal', re.compile(
+        r"\b(?:foreclos\w*|pre-?foreclos\w*|default|auction|bank[- ]owned|reo"
+        r"|short sale|bankrupt\w*|lis pendens|probate|(?<!real )(?<!real-)estate"
+        r"|passed away|divorc\w*|separat\w*|court|filing|liens?)\b", re.I)),
+    ('vacancy', re.compile(r"\b(?:vacan\w*|empty|unoccupied|abandoned)\b", re.I)),
+    ('tax_or_finance', re.compile(
+        r"\b(?:tax(?:es)?|delinquen\w*|behind on|debt|mortgage|hardship|distress\w*"
+        r"|financial\w*|struggl\w*|motivated)\b", re.I)),
+    ('value_price_or_buyer', re.compile(
+        r"\b(?:equity|values?|valuation|worth|prices?|pricing|apprais\w*|cash"
+        r"|buyers?|top dollar|(?:an?|cash) offers?)\b|\$\s?\d|\d+\s?%", re.I)),
+    ('condition', re.compile(
+        r"\b(?:repairs?|condition|fixer|renovat\w*|damage\w*|upgrades?)\b", re.I)),
+    ('observed_record', re.compile(
+        r"\b(?:records?|public data|county|notices?|noticed|i see|i saw|came across)\b", re.I)),
+    ('market_claim', re.compile(
+        r"\b(?:hot market|market is|homes? (?:near|nearby|in (?:your|the) area)"
+        r"|neighbou?r\w*|nearby|demand|inventory|sold (?:near|in))\b", re.I)),
 )
+# The template already introduces the sender, so AI options must not do it again.
+# A style rule for AI output only; a broker's own confirmed wording is not checked.
+_SENDER_INTRODUCTION = re.compile(
+    r"\b(?:i['’]?m|i am|as|this is)\s+(?:a|an|your)?\s*(?:local\s+|licensed\s+)?"
+    r"(?:real[- ]estate\s+)?(?:agent|broker|realtor|professional|expert|specialist)\b", re.I)
+_ASKS_ABOUT_SELLING = re.compile(r'\b(?:sell\w*|sale|list(?:ing)? it|market)\b', re.I)
+
+
+def neutral_reason_problem(text: str) -> str | None:
+    """Why a No Signal reason is not neutral, e.g. 'listing_status: expired', or None."""
+    value = str(text or '')
+    for name, pattern in _NEUTRAL_CLAIM_RULES:
+        match = pattern.search(value)
+        if match:
+            return f'{name}: {match.group(0).lower()}'
+    if not _ASKS_ABOUT_SELLING.search(value):
+        return 'not_about_selling'
+    return None
+
+
+def _screen_neutral(texts: list[str]) -> tuple[list[str], list[str]]:
+    """Accepted neutral fragments, plus one named rejection reason per discarded one."""
+    accepted: list[str] = []
+    rejected: list[str] = []
+    for text in texts:
+        problem = neutral_reason_problem(text)
+        intro = _SENDER_INTRODUCTION.search(text)
+        if not problem and intro:
+            problem = f'sender_introduction: {intro.group(0).lower()}'
+        if problem:
+            rejected.append(problem)
+        elif not _meaningfully_distinct([text], accepted, 1):
+            rejected.append('near_duplicate')
+        else:
+            accepted.append(text)
+    return accepted[:MAX_SUGGESTIONS], rejected
 
 
 def _neutral_suggestions(count: int) -> dict:
@@ -240,21 +315,34 @@ def _neutral_suggestions(count: int) -> dict:
             output_schema=REASON_SUGGESTIONS_SCHEMA,
             feature='campaigns.reason_suggestions.neutral',
         )
-        generated = [
-            text for text in _parse(message.get('content') or '')
-            if not _UNSUPPORTED_NEUTRAL_CLAIM.search(text)
-        ][:MAX_SUGGESTIONS]
     except ai_client.AiUnavailableError as error:
         logger.warning('Neutral reason suggestions could not reach AI: %s', error)
         return {
             'signals': profile, 'suggestions': [], 'options': [], 'source': 'catalog',
             'note': 'AI could not be reached. Retry Suggest with AI.',
         }
+    content = message.get('content') or ''
+    raw = _payload_items(content)
+    parsed = _parse(content)
+    generated, rejected = _screen_neutral(parsed)
+    reasons: dict[str, int] = {}
+    for problem in rejected:
+        reasons[problem] = reasons.get(problem, 0) + 1
+    # Counts and rule names only: the prompt carries no owner data, and no text is logged.
+    logger.info(
+        'Neutral reason suggestions: recipients=%d generated=%d parsed=%d accepted=%d '
+        'rejected=%d reasons=%s', count, len(raw) if raw is not None else 0, len(parsed),
+        len(generated), len(rejected),
+        json.dumps(reasons, sort_keys=True) if raw is not None else 'unparseable_response',
+    )
     options = [{'text': text, 'source': 'ai'} for text in generated]
     note = '' if len(options) == MAX_SUGGESTIONS else (
         f'AI returned only {len(options)} safe usable '
         f'{"suggestion" if len(options) == 1 else "suggestions"}. Retry for more options.'
     )
+    if note and rejected:
+        kinds = sorted({problem.split(':')[0].replace('_', ' ') for problem in rejected})
+        note += f' Removed {len(rejected)} that were not neutral ({", ".join(kinds)}).'
     return {
         'signals': profile,
         'suggestions': generated,
@@ -264,8 +352,8 @@ def _neutral_suggestions(count: int) -> dict:
     }
 
 
-def _parse(content: str) -> list[str]:
-    """Pull the suggestion list out of the model's reply, however it wrapped it."""
+def _payload_items(content: str) -> list | None:
+    """The raw suggestion list in the model's reply, or None if it is not JSON."""
     text = (content or '').strip()
     # Models commonly fence JSON even when told not to.
     fenced = re.search(r'```(?:json)?\s*(.*?)```', text, re.S)
@@ -283,14 +371,18 @@ def _parse(content: str) -> list[str]:
             except ValueError:
                 payload = None
 
-    raw = []
     if isinstance(payload, dict):
-        raw = payload.get('suggestions') or []
-    elif isinstance(payload, list):
-        raw = payload
+        items = payload.get('suggestions')
+        return items if isinstance(items, list) else []
+    if isinstance(payload, list):
+        return payload
+    return None
 
+
+def _parse(content: str) -> list[str]:
+    """Pull the suggestion list out of the model's reply, however it wrapped it."""
     out: list[str] = []
-    for item in raw:
+    for item in _payload_items(content) or []:
         if not isinstance(item, str):
             continue
         cleaned = ' '.join(item.split()).strip().strip('"')

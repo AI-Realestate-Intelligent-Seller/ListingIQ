@@ -253,6 +253,15 @@ def _update_reason_group(campaign: Campaign, update: dict) -> None:
     confirmed = bool(update.get('confirmed'))
     if confirmed and not reason:
         raise ValueError('Write a reason before confirming this group.')
+    if confirmed and signal == NO_SIGNAL_REASON_KEY:
+        # These properties have no verified signal, so their shared reason may
+        # not state a listing status, distress, value or any other fact.
+        problem = reason_suggest.neutral_reason_problem(reason)
+        if problem:
+            raise ValueError(
+                'No Signal properties have no verified facts, so their reason must '
+                'stay neutral: say you are reaching out and ask about selling '
+                f'(found {problem.replace("_", " ")}).')
     state = _group_state(campaign) or {'version': 1, 'groups': {}}
     state['groups'][signal] = {'reason': reason, 'confirmed': confirmed}
     campaign.reason_groups = json.dumps(state, separators=(',', ':'), sort_keys=True)

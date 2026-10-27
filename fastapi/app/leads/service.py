@@ -15,11 +15,11 @@ from sqlalchemy.orm import Session
 import json
 
 from ..integration_data.models import CombinedProperty
-from ..models import Conversation, Lead, LeadEvent, Message, User
+from ..models import Campaign, Conversation, Lead, LeadEvent, Message, User
 from ..tenancy import brokerage_user_ids, session_cache
 from . import address as address_key
 from .catalog import SIGNALS, signal_label
-from .importer import normalize_phone, parse_upload, score_lead
+from .importer import crm_tag_signals, normalize_phone, parse_upload, score_lead
 from .location import STATE_LABELS, Location, parse as parse_location
 
 # Ids per DELETE statement — comfortably under every driver's bind-parameter cap.
@@ -90,6 +90,41 @@ def _point_in_polygon(latitude: float, longitude: float,
 
 def split_signals(lead: Lead) -> list[str]:
     return [key for key in (lead.signals or '').split(',') if key]
+
+
+def backfill_crm_tag_signals(session: Session, apply: bool = False) -> dict:
+    """Add Expired/FSBO/Cancelled from Lofty CRM tags to leads imported before they were read.
+
+    Dry run unless `apply`. Leads already texted, or in a campaign that is no
+    longer a draft, keep their signals so sent messages stay as they were.
+    """
+    sent_campaigns = {cid for (cid,) in session.query(Campaign.id)
+                      .filter(Campaign.status != 'draft').all()}
+    counts = {'checked': 0, 'updated': 0, 'skipped_already_contacted': 0, 'signals': {}}
+    leads = (session.query(Lead)
+             .filter(Lead.source == 'csv_import', Lead.details.like('%crm_tags%')).all())
+    for lead in leads:
+        counts['checked'] += 1
+        current = split_signals(lead)
+        added = [key for key in crm_tag_signals(lead_details(lead)) if key not in current]
+        if not added:
+            continue
+        if lead.conversation_id or lead.campaign_id in sent_campaigns:
+            counts['skipped_already_contacted'] += 1
+            continue
+        signals = current + added
+        lead.signals = ','.join(signals)
+        lead.score = score_lead(signals, bool(lead.phone), bool(lead.property_address))
+        if lead.main_signal is None and len(signals) == 1:
+            lead.main_signal, lead.main_signal_basis = signals[0], 'single_signal'
+        counts['updated'] += 1
+        for key in added:
+            counts['signals'][key] = counts['signals'].get(key, 0) + 1
+    if apply:
+        session.commit()
+    else:
+        session.rollback()
+    return counts
 
 
 def lead_details(lead: Lead) -> dict:
