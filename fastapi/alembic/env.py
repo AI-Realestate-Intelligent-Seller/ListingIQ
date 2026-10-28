@@ -5,6 +5,7 @@ import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from app.db import Base
+from app import models as _models  # noqa: F401 - register all shared metadata
 from app.core.config import settings
 
 config = context.config

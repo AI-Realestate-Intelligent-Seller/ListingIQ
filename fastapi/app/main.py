@@ -29,6 +29,7 @@ from .routes import (
 
 from .routes.websocket import router as websocket_router
 from .routes.push import router as push_router
+from .personas.routes import router as personas_router
 from .reminder.worker import start_reminder_worker
 from .location.worker import start_geocoding_worker
 
@@ -106,6 +107,7 @@ app.include_router(location.router, prefix="/api/v1/location", tags=["location"]
 app.include_router(webhooks.router, prefix="/api/v1/webhooks", tags=["webhooks"])
 app.include_router(ai.router, prefix="/api/v1/ai", tags=["ai"])
 app.include_router(platform_admin.router, prefix="/api/v1/platform-admin", tags=["platform-admin"])
+app.include_router(personas_router, prefix="/api/v1/personas", tags=["personas"])
 app.include_router(push_router)
 app.include_router(websocket_router)
 

@@ -139,6 +139,8 @@ from app.auth import hash_password  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import (AiRun, Booking, Campaign, Conversation, FeatureFlag, Invitation, Lead, LeadEvent,  # noqa: E402
                         Message, OutboundSmsJob, PlatformAuditLog, User)
+from app.personas.models import (Persona, PersonaDefault, PersonaDraft, PersonaEvent,  # noqa: E402
+                                 PersonaSubmission, PersonaVersion)
 
 
 @pytest.fixture(scope='session', autouse=True)
@@ -155,6 +157,15 @@ def _database():
 def clean_tables():
     session = db.SessionLocal()
     try:
+        session.query(PersonaEvent).delete()
+        session.query(PersonaDefault).delete()
+        session.query(PersonaDraft).delete()
+        session.query(PersonaSubmission).delete()
+        # Break the intentional active-version cycle before deleting immutable
+        # versions and their stable Persona roots.
+        session.query(Persona).update({Persona.active_version_id: None}, synchronize_session=False)
+        session.query(PersonaVersion).delete()
+        session.query(Persona).delete()
         session.query(PlatformAuditLog).delete()
         session.query(FeatureFlag).delete()
         session.query(LeadEvent).delete()

@@ -597,3 +597,8 @@ class Notification(Base):
     user = relationship("User")
     booking = relationship("Booking")
     reminder = relationship("BookingReminder")
+
+
+# Register the bounded Persona models on the shared SQLAlchemy metadata. The
+# import is intentionally last so the existing User model is already defined.
+from .personas import models as persona_models  # noqa: F401
