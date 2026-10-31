@@ -1,4 +1,4 @@
-export type DashboardTab = "overview" | "directory" | "assignments" | "leads" | "campaigns" | "followups" | "calendar";
+export type DashboardTab = "overview" | "directory" | "assignments" | "leads" | "campaigns" | "followups" | "calendar" | "persona";
 
 export type NotificationAction = {
   view: DashboardTab;
@@ -8,7 +8,7 @@ export type NotificationAction = {
   campaign_id?: number;
 };
 
-const tabs: DashboardTab[] = ["overview", "directory", "assignments", "leads", "campaigns", "followups", "calendar"];
+const tabs: DashboardTab[] = ["overview", "directory", "assignments", "leads", "campaigns", "followups", "calendar", "persona"];
 
 export function parseNotificationAction(value: unknown): NotificationAction | null {
   if (!value || typeof value !== "object") return null;

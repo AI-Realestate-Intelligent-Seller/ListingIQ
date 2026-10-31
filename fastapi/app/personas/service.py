@@ -19,11 +19,22 @@ from .models import (
     Persona,
     PersonaDefault,
     PersonaDraft,
+    PersonaDraftExample,
     PersonaEvent,
     PersonaSubmission,
+    PersonaSubmissionExample,
     PersonaVersion,
+    PersonaVersionExample,
 )
-from .schemas import CommunicationStyle, PersonaCreate, PersonaDraftUpdate
+from .schemas import (
+    CommunicationStyle,
+    PersonaCreate,
+    PersonaDraftUpdate,
+    PersonaExampleCreate,
+    PersonaExampleUpdate,
+    PersonaProfileConfig,
+    SourceReview,
+)
 
 
 class PersonaConflict(RuntimeError):
@@ -194,6 +205,7 @@ def create(session: Session, actor: User, payload: PersonaCreate) -> Persona:
         style_config=CommunicationStyle().dict(),
         style_instructions="",
         preferred_language="en",
+        profile_config=PersonaProfileConfig().dict(),
         review_status="draft",
         last_editor_user_id=actor.id,
         updated_at=datetime.utcnow(),
@@ -226,6 +238,32 @@ def get_draft(session: Session, actor: User, persona_id: int) -> PersonaDraft:
     return persona.draft
 
 
+# Profile maps the owner always edits as a whole (a removed N/A reason must disappear).
+_REPLACED_PROFILE_KEYS = frozenset({"confirmations", "na_reasons"})
+
+
+def _merge_config(current: dict, incoming, field: str) -> dict:
+    """Apply the supplied keys of a style/profile object onto the stored one."""
+    supplied = incoming.dict(exclude_unset=True)
+
+    def merge(base: dict, patch: dict, top: bool) -> dict:
+        result = dict(base)
+        for key, value in patch.items():
+            if isinstance(value, dict) and isinstance(result.get(key), dict) and not (top and key in _REPLACED_PROFILE_KEYS):
+                result[key] = merge(result[key], value, False)
+            else:
+                result[key] = value
+        return result
+
+    model = PersonaProfileConfig if field == "profile_config" else CommunicationStyle
+    try:
+        base = model.parse_obj(current or {}).dict()
+    except ValidationError:
+        # A stored value that no longer validates is replaced by the new one.
+        base = model().dict()
+    return model.parse_obj(merge(base, supplied, True)).dict()
+
+
 def update_draft(
     session: Session, actor: User, persona_id: int, payload: PersonaDraftUpdate
 ) -> PersonaDraft:
@@ -247,13 +285,20 @@ def update_draft(
     changed_fields = []
     values = {}
     for field, value in changes.items():
-        if field == "style_config":
-            # The style object is replaced whole, with defaults for omitted keys.
-            value = value.dict()
+        if field in {"style_config", "profile_config"}:
+            # Only the keys the client sent change; every other stored value
+            # (including fields the simplified form no longer shows) is kept.
+            value = _merge_config(getattr(draft, field) or {}, value, field)
+        if field == "profile_config":
+            value = _owner_review_update(draft.profile_config or {}, value)
         if getattr(draft, field) != value:
             values[field] = value
             changed_fields.append(field)
-    if not changed_fields:
+    # Saving the form approves the owner's examples in the same transaction.
+    unapproved = session.query(PersonaDraftExample.id).filter(
+        PersonaDraftExample.persona_id == persona.id, PersonaDraftExample.owner_approved == 0,
+    ).count()
+    if not changed_fields and not unapproved:
         return draft
     next_revision = payload.revision + 1
     values.update(
@@ -286,6 +331,13 @@ def update_draft(
     if result.rowcount != 1:
         session.rollback()
         raise PersonaConflict("Draft revision is stale; reload the draft and retry")
+    if unapproved:
+        session.execute(
+            update(PersonaDraftExample)
+            .where(PersonaDraftExample.persona_id == persona.id, PersonaDraftExample.owner_approved == 0)
+            .values(owner_approved=1)
+            .execution_options(synchronize_session=False)
+        )
     session.expire(draft)
     session.refresh(draft)
     _record_event(
@@ -293,46 +345,345 @@ def update_draft(
         persona,
         actor,
         "persona.draft_changed",
-        detail={"revision": next_revision, "fields": sorted(changed_fields)},
+        detail={"revision": next_revision, "fields": sorted(changed_fields), "examples_approved": unapproved},
     )
     session.commit()
     session.refresh(draft)
     return draft
 
 
-def validation_result(draft: PersonaDraft) -> dict:
-    required = {
-        "full_name": draft.full_name,
-        "display_name": draft.display_name,
-        "professional_role": draft.professional_role,
-        "brokerage_name": draft.brokerage_name,
-        "sms_signature": draft.sms_signature,
-        "preferred_language": draft.preferred_language,
-    }
-    errors = [
-        f"{field} is required"
-        for field, value in required.items()
-        if not str(value or "").strip()
-    ]
+def _advance_draft_revision(
+    session: Session, persona: Persona, actor: User, expected_revision: int, event_type: str
+) -> PersonaDraft:
+    result = session.execute(
+        update(PersonaDraft)
+        .where(
+            PersonaDraft.persona_id == persona.id,
+            PersonaDraft.revision == expected_revision,
+        )
+        .values(
+            revision=expected_revision + 1,
+            review_status="draft",
+            submitted_by_user_id=None,
+            submitted_at=None,
+            last_editor_user_id=actor.id,
+            updated_at=datetime.utcnow(),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount != 1:
+        session.rollback()
+        raise PersonaConflict("Draft revision is stale; reload the draft and retry")
+    _record_event(
+        session,
+        persona,
+        actor,
+        event_type,
+        detail={"revision": expected_revision + 1},
+    )
+    return persona.draft
+
+
+def list_draft_examples(
+    session: Session, actor: User, persona_id: int, page: int, page_size: int,
+    channel: str | None = None, scenario: str | None = None,
+):
+    persona = _load(session, actor, persona_id, owner=True)
+    query = session.query(PersonaDraftExample).filter(PersonaDraftExample.persona_id == persona.id)
+    if channel:
+        query = query.filter(PersonaDraftExample.channel == channel)
+    if scenario:
+        query = query.filter(PersonaDraftExample.scenario.ilike(f"%{scenario}%"))
+    total = query.count()
+    items = query.order_by(PersonaDraftExample.position, PersonaDraftExample.id).offset((page - 1) * page_size).limit(page_size).all()
+    return items, total, persona.draft.revision
+
+
+def create_example(
+    session: Session, actor: User, persona_id: int, payload: PersonaExampleCreate
+) -> PersonaDraftExample:
+    persona = _load(session, actor, persona_id, owner=True)
+    if persona.status == "archived":
+        raise PersonaConflict("An archived Persona cannot be edited")
+    if persona.draft.revision != payload.revision:
+        raise PersonaConflict(f"Draft revision is stale; current revision is {persona.draft.revision}")
+    maximum = session.query(func.max(PersonaDraftExample.position)).filter(PersonaDraftExample.persona_id == persona.id).scalar()
+    position = (maximum if maximum is not None else -1) + 1
+    values = payload.dict(exclude={"revision"})
+    # The owner saving their own example is the approval; no separate step.
+    values["owner_approved"] = 1
+    row = PersonaDraftExample(persona_id=persona.id, position=position, **values)
+    session.add(row)
+    _advance_draft_revision(session, persona, actor, payload.revision, "persona.example_created")
+    session.commit()
+    session.refresh(row)
+    return row
+
+
+def update_example(
+    session: Session, actor: User, persona_id: int, example_id: int, payload: PersonaExampleUpdate
+) -> PersonaDraftExample:
+    persona = _load(session, actor, persona_id, owner=True)
+    if persona.draft.revision != payload.revision:
+        raise PersonaConflict(f"Draft revision is stale; current revision is {persona.draft.revision}")
+    row = session.query(PersonaDraftExample).filter(PersonaDraftExample.id == example_id, PersonaDraftExample.persona_id == persona.id).first()
+    if row is None:
+        raise _not_found("Conversation example not found")
+    changes = {field: getattr(payload, field) for field in payload.__fields_set__ if field != "revision"}
+    if not changes:
+        raise PersonaValidationFailure("No example changes were supplied", ["no_changes"])
+    # Whatever the owner saves is their approved wording.
+    changes["owner_approved"] = True
+    changed = False
+    for field, value in changes.items():
+        if field == "owner_approved":
+            value = int(value)
+        if getattr(row, field) != value:
+            setattr(row, field, value)
+            changed = True
+    if not changed:
+        return row
+    _advance_draft_revision(session, persona, actor, payload.revision, "persona.example_changed")
+    session.commit()
+    session.refresh(row)
+    return row
+
+
+def save_examples(session: Session, actor: User, persona_id: int, payload) -> list[PersonaDraftExample]:
+    """Save the owner's whole example list in one transaction.
+
+    Listed examples are created or updated in the given order, examples the
+    owner removed are deleted, and every saved example is owner-approved
+    because the owner saved it. Import metadata (context, flags, provenance)
+    of existing examples is kept. One revision check, one revision bump.
+    """
+    persona = _load(session, actor, persona_id, owner=True)
+    if persona.status == "archived":
+        raise PersonaConflict("An archived Persona cannot be edited")
+    if persona.draft.revision != payload.revision:
+        raise PersonaConflict(f"Draft revision is stale; current revision is {persona.draft.revision}")
+    rows = {row.id: row for row in session.query(PersonaDraftExample).filter(PersonaDraftExample.persona_id == persona.id)}
+    unknown = [item.id for item in payload.examples if item.id is not None and item.id not in rows]
+    if unknown:
+        raise _not_found("Conversation example not found")
+    kept_ids, seen, ordered = set(), set(), []
+    for item in payload.examples:
+        key = (item.scenario, item.channel, item.customer_message, item.preferred_response)
+        if key in seen or (item.id is not None and item.id in kept_ids):
+            continue  # an exact repeat in the same save is stored once
+        seen.add(key)
+        values = {field: getattr(item, field) for field in ("scenario", "channel", "language", "customer_message", "preferred_response")}
+        if item.id is not None:
+            row = rows[item.id]
+            kept_ids.add(item.id)
+            if item.provenance is not None:
+                values["provenance"] = item.provenance
+            for field, value in values.items():
+                setattr(row, field, value)
+            row.owner_approved = 1
+        else:
+            row = PersonaDraftExample(
+                persona_id=persona.id, position=0, context="", style_explanation="", review_flags=[],
+                provenance=item.provenance or "user_written", owner_approved=1, **values,
+            )
+            session.add(row)
+        ordered.append(row)
+    for row_id, row in rows.items():
+        if row_id not in kept_ids:
+            session.delete(row)
+    session.flush()
+    for position, row in enumerate(ordered):
+        row.position = position
+    _advance_draft_revision(session, persona, actor, payload.revision, "persona.examples_saved")
+    session.commit()
+    for row in ordered:
+        session.refresh(row)
+    return ordered
+
+
+def delete_example(
+    session: Session, actor: User, persona_id: int, example_id: int, revision: int
+) -> int:
+    persona = _load(session, actor, persona_id, owner=True)
+    if persona.draft.revision != revision:
+        raise PersonaConflict(f"Draft revision is stale; current revision is {persona.draft.revision}")
+    row = session.query(PersonaDraftExample).filter(PersonaDraftExample.id == example_id, PersonaDraftExample.persona_id == persona.id).first()
+    if row is None:
+        raise _not_found("Conversation example not found")
+    session.delete(row)
+    _advance_draft_revision(session, persona, actor, revision, "persona.example_removed")
+    session.commit()
+    return revision + 1
+
+
+def duplicate_example(
+    session: Session, actor: User, persona_id: int, example_id: int, revision: int
+) -> PersonaDraftExample:
+    persona = _load(session, actor, persona_id, owner=True)
+    if persona.draft.revision != revision:
+        raise PersonaConflict(f"Draft revision is stale; current revision is {persona.draft.revision}")
+    source = session.query(PersonaDraftExample).filter(PersonaDraftExample.id == example_id, PersonaDraftExample.persona_id == persona.id).first()
+    if source is None:
+        raise _not_found("Conversation example not found")
+    values = _example_snapshot(source)
+    values["scenario"] = f"{values['scenario']} (copy)"[:120]
+    values["owner_approved"] = 1
+    maximum = session.query(func.max(PersonaDraftExample.position)).filter(PersonaDraftExample.persona_id == persona.id).scalar()
+    position = (maximum if maximum is not None else -1) + 1
+    row = PersonaDraftExample(persona_id=persona.id, position=position, **values)
+    session.add(row)
+    _advance_draft_revision(session, persona, actor, revision, "persona.example_duplicated")
+    session.commit()
+    session.refresh(row)
+    return row
+
+
+def list_submission_examples(session: Session, actor: User, persona_id: int, submission_id: int, page: int, page_size: int):
+    submission(session, actor, persona_id, submission_id)
+    query = session.query(PersonaSubmissionExample).filter(PersonaSubmissionExample.submission_id == submission_id)
+    return query.order_by(PersonaSubmissionExample.position).offset((page - 1) * page_size).limit(page_size).all(), query.count()
+
+
+def list_version_examples(session: Session, actor: User, persona_id: int, version_number: int, page: int, page_size: int):
+    selected = version(session, actor, persona_id, version_number)
+    query = session.query(PersonaVersionExample).filter(PersonaVersionExample.version_id == selected.id)
+    return query.order_by(PersonaVersionExample.position).offset((page - 1) * page_size).limit(page_size).all(), query.count()
+
+
+# What the owner must supply before submitting. These are exactly the fields
+# the simplified setup form shows; other stored profile fields stay optional
+# and are kept as they are. Communication style is captured through
+# owner-approved conversation examples, not through descriptive settings.
+REQUIRED_PROFILE_FIELDS = {
+    "who_i_am": ("full_name", "professional_title", "license_number", "licensing_jurisdiction", "licensing_status"),
+    "professional_background": ("biography", "specialties", "service_areas"),
+}
+# Fields that may instead be marked not applicable with a written reason.
+NOT_APPLICABLE_ALLOWED = frozenset({"professional_title", "license_number", "licensing_jurisdiction", "licensing_status"})
+FIELD_LABELS = {
+    "full_name": "Full name", "professional_title": "Professional title", "license_number": "License number",
+    "licensing_jurisdiction": "Licensing jurisdiction", "licensing_status": "License status", "biography": "Biography",
+    "specialties": "Specialties", "service_areas": "Service areas", "brokerage_name": "Brokerage",
+    "preferred_language": "Primary language",
+}
+
+
+def _persona_size_check(draft, examples) -> tuple[str | None, str | None]:
+    """Refuse a Persona whose live AI context would exceed the runtime budget.
+
+    Every approved SMS example is sent with every AI request, so the check
+    measures exactly what the runtime builds, with the same estimate.
+    """
+    from ..sms.prompt import (PERSONA_PUBLISH_TOKEN_LIMIT, PERSONA_PUBLISH_WARNING_TOKENS,
+                              persona_context_tokens)
+
+    persona = {field: getattr(draft, field, None) for field in (
+        "professional_title", "professional_role", "biography", "experience_summary", "specialties",
+        "service_areas", "sms_signature", "style_config", "style_instructions", "preferred_language",
+        "profile_config")}
+    approved = [{field: getattr(row, field, "") or "" for field in (
+        "scenario", "language", "customer_message", "preferred_response", "context", "style_explanation")}
+        for row in examples or []
+        if getattr(row, "channel", None) == "sms" and bool(getattr(row, "owner_approved", 0))]
+    tokens = persona_context_tokens(persona, approved, str(getattr(draft, "full_name", "") or ""),
+                                    str(getattr(draft, "brokerage_name", "") or ""))
+    if tokens > PERSONA_PUBLISH_TOKEN_LIMIT:
+        return (f"conversation_examples.too_large: the approved SMS examples, style and playbook come to about "
+                f"{tokens:,} tokens; the limit is {PERSONA_PUBLISH_TOKEN_LIMIT:,}. Shorten or remove some "
+                f"examples so your AI can keep replying."), None
+    if tokens > PERSONA_PUBLISH_WARNING_TOKENS:
+        return None, (f"approved SMS examples, style and playbook are large (about {tokens:,} tokens of the "
+                      f"{PERSONA_PUBLISH_TOKEN_LIMIT:,} limit); every AI request carries all of them")
+    return None, None
+
+
+def validation_result(draft: PersonaDraft, examples: list[PersonaDraftExample] | None = None) -> dict:
+    """The one completeness check used by import review and by submission."""
+    errors = []
+    # Account-level values; the setup form shows them, so they must be present.
+    for field in ("brokerage_name", "preferred_language"):
+        if not str(getattr(draft, field, "") or "").strip():
+            errors.append(f"{field} is required")
     try:
         CommunicationStyle.parse_obj(draft.style_config or {})
     except ValidationError:
         errors.append("communication style configuration is invalid")
     warnings = []
-    if not draft.biography.strip():
-        warnings.append("biography is empty")
-    if not draft.experience_summary.strip():
-        warnings.append("experience summary is empty")
+    sections = {
+        "who_i_am": {"complete": False, "missing": []},
+        "professional_background": {"complete": False, "missing": []},
+        "conversation_examples": {"complete": bool(examples), "missing": []},
+    }
+    try:
+        profile = PersonaProfileConfig.parse_obj(draft.profile_config or {})
+    except ValidationError:
+        profile = None
+        errors.append("personal AI profile configuration is invalid")
+        sections["who_i_am"] = {"complete": False, "missing": ["invalid configuration"]}
+    if profile:
+        values = {
+            "full_name": draft.full_name,
+            "professional_title": draft.professional_title,
+            "license_number": profile.identity.license_number,
+            "licensing_jurisdiction": profile.identity.licensing_jurisdiction,
+            "licensing_status": profile.identity.licensing_status,
+            "biography": draft.biography,
+            "specialties": draft.specialties,
+            "service_areas": draft.service_areas,
+        }
+        for section, fields in REQUIRED_PROFILE_FIELDS.items():
+            missing = []
+            for field in fields:
+                value = values[field]
+                supplied = bool(value) if not isinstance(value, str) else bool(value.strip())
+                not_applicable = (
+                    field in NOT_APPLICABLE_ALLOWED
+                    and profile.confirmations.get(field) == "not_applicable"
+                    and profile.na_reasons.get(field, "").strip()
+                )
+                if not supplied and not not_applicable:
+                    missing.append(field)
+            sections[section] = {"complete": not missing, "missing": missing}
+            errors.extend(
+                f"{section}.{field} is required" + (" or needs a reasoned N/A" if field in NOT_APPLICABLE_ALLOWED else "")
+                for field in missing
+            )
+        examples = examples or []
+        missing_examples = []
+        if not examples:
+            missing_examples.append("at least one conversation example")
+        if examples and not any(bool(row.owner_approved) for row in examples):
+            missing_examples.append("at least one owner-approved example")
+        sections["conversation_examples"] = {"complete": not missing_examples, "missing": missing_examples}
+        errors.extend(f"conversation_examples.{item} is required" for item in missing_examples)
+        channels = {row.channel for row in examples}
+        for channel in ("sms", "email"):
+            if channel not in channels:
+                warnings.append(f"no {channel.upper()} conversation example supplied")
+        flagged = sum(1 for row in examples if getattr(row, "review_flags", None))
+        if flagged:
+            warnings.append(f"{flagged} conversation example(s) carry import review flags")
+        size_error, size_warning = _persona_size_check(draft, examples)
+        if size_error:
+            errors.append(size_error)
+            sections["conversation_examples"]["complete"] = False
+            sections["conversation_examples"]["missing"].append("a shorter set of SMS examples")
+        if size_warning:
+            warnings.append(size_warning)
     return {
         "valid": not errors,
         "errors": errors,
         "warnings": warnings,
         "revision": draft.revision,
+        "sections": sections,
+        "missing_count": len(errors),
     }
 
 
 def validate(session: Session, actor: User, persona_id: int) -> dict:
-    return validation_result(get_draft(session, actor, persona_id))
+    draft = get_draft(session, actor, persona_id)
+    examples = session.query(PersonaDraftExample).filter(PersonaDraftExample.persona_id == persona_id).all()
+    return validation_result(draft, examples)
 
 
 def submit(
@@ -358,7 +709,13 @@ def submit(
         raise PersonaConflict(
             "This draft revision was already submitted; edit the draft to resubmit"
         )
-    result = validation_result(draft)
+    draft_examples = (
+        session.query(PersonaDraftExample)
+        .filter(PersonaDraftExample.persona_id == persona.id)
+        .order_by(PersonaDraftExample.position, PersonaDraftExample.id)
+        .all()
+    )
+    result = validation_result(draft, draft_examples)
     if not result["valid"]:
         raise PersonaValidationFailure("Persona draft is not valid", result["errors"])
     pending = (
@@ -378,17 +735,34 @@ def submit(
         .scalar()
         or 0
     ) + 1
+    example_snapshots = [_example_snapshot(row) for row in draft_examples]
     submission = PersonaSubmission(
         persona_id=persona.id,
         submission_number=submission_number,
         draft_revision=revision,
         snapshot=snapshot,
-        content_hash=_content_hash(snapshot),
+        content_hash=_content_hash(snapshot, example_snapshots),
         status="submitted",
         submitted_by_user_id=actor.id,
         submitted_at=datetime.utcnow(),
     )
     session.add(submission)
+    try:
+        # A concurrent submit may take the same submission number or the
+        # single pending slot first; the database constraint decides.
+        session.flush()
+    except IntegrityError as error:
+        session.rollback()
+        raise PersonaConflict(
+            "This Persona already has a submission awaiting review"
+        ) from error
+    for position, (draft_example, example) in enumerate(zip(draft_examples, example_snapshots)):
+        session.add(PersonaSubmissionExample(
+            submission_id=submission.id,
+            source_example_id=draft_example.id,
+            position=position,
+            **example,
+        ))
     previous = draft.review_status
     now = datetime.utcnow()
     # Mark the draft as submitted only if it is still the submitted revision;
@@ -529,6 +903,7 @@ _SNAPSHOT_FIELDS = (
     "style_config",
     "style_instructions",
     "preferred_language",
+    "profile_config",
 )
 
 
@@ -555,9 +930,53 @@ def _snapshot(draft: PersonaDraft) -> dict:
     return {field: getattr(draft, field) for field in _SNAPSHOT_FIELDS}
 
 
-def _content_hash(snapshot: dict) -> str:
+_EXAMPLE_FIELDS = (
+    "scenario", "channel", "language", "customer_message", "preferred_response",
+    "context", "style_explanation", "provenance", "owner_approved",
+)
+
+
+def _example_snapshot(example) -> dict:
+    result = {field: getattr(example, field) for field in _EXAMPLE_FIELDS}
+    result["owner_approved"] = int(bool(result["owner_approved"]))
+    # Flags join the snapshot (and its content hash) only when present, so
+    # submissions frozen before flags existed keep their original hash.
+    flags = list(getattr(example, "review_flags", None) or [])
+    if flags:
+        result["review_flags"] = flags
+    return result
+
+
+def _owner_review_update(current: dict, incoming: dict) -> dict:
+    """Keep server-written import review records; accept only owner decisions.
+
+    The owner may confirm, dispute, keep or dismiss imported items and add a
+    note, but cannot delete, add or relabel what the source document said.
+    """
+    existing = (current or {}).get("source_review") or {}
+    proposed = (incoming or {}).get("source_review") or {}
+
+    def decisions(items, key, fields):
+        return {key(item): {name: item[name] for name in fields if name in item} for item in items or []}
+
+    claim_key = lambda item: (item.get("statement"), item.get("source_status"), item.get("field_path"))  # noqa: E731
+    detail_key = lambda item: (item.get("section"), item.get("detail"))  # noqa: E731
+    claim_decisions = decisions(proposed.get("claims"), claim_key, ("owner_status", "owner_note"))
+    detail_decisions = decisions(proposed.get("unmapped_details"), detail_key, ("owner_status",))
+    review = {key: value for key, value in existing.items()}
+    review["claims"] = [{**item, **claim_decisions.get(claim_key(item), {})} for item in existing.get("claims") or []]
+    review["unmapped_details"] = [
+        {**item, **detail_decisions.get(detail_key(item), {})} for item in existing.get("unmapped_details") or []
+    ]
+    result = dict(incoming)
+    result["source_review"] = SourceReview.parse_obj(review).dict()
+    return result
+
+
+def _content_hash(snapshot: dict, examples: list[dict] | None = None) -> str:
+    content = snapshot if not examples else {"profile": snapshot, "examples": examples}
     encoded = json.dumps(
-        snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        content, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -593,9 +1012,11 @@ def publish(
         raise PersonaConflict("Only a pending submission can be published")
     snapshot = dict(submission.snapshot)
     content_hash = submission.content_hash
+    submission_examples = sorted(submission.examples, key=lambda row: (row.position, row.id))
+    example_snapshots = [_example_snapshot(row) for row in submission_examples]
     if (
         set(snapshot) != set(_SNAPSHOT_FIELDS)
-        or _content_hash(snapshot) != content_hash
+        or _content_hash(snapshot, example_snapshots) != content_hash
     ):
         raise PersonaConflict("Submission snapshot failed its integrity check")
     if (
@@ -631,6 +1052,13 @@ def publish(
         raise PersonaConflict(
             "Persona publication conflicted with another publication"
         ) from error
+    for position, (source, example) in enumerate(zip(submission_examples, example_snapshots)):
+        session.add(PersonaVersionExample(
+            version_id=version.id,
+            source_submission_example_id=source.id,
+            position=position,
+            **example,
+        ))
     submission.status = "published"
     submission.reviewed_by_user_id = actor.id
     submission.reviewed_at = datetime.utcnow()
@@ -655,9 +1083,138 @@ def publish(
             "content_hash": content_hash,
         },
     )
+    # Outbox row only; no vector-store call happens inside this transaction.
+    from .knowledge_indexing import queue_version
+    queue_version(session, persona, version, actor.id)
     session.commit()
     session.refresh(version)
     return version
+
+
+def _next_version_number(session: Session, persona_id: int) -> int:
+    return (
+        session.query(func.max(PersonaVersion.version_number))
+        .filter(PersonaVersion.persona_id == persona_id)
+        .scalar()
+        or 0
+    ) + 1
+
+
+def _ensure_owner_sms_default(session: Session, actor: User, persona: Persona) -> PersonaDefault:
+    """Make this owner's active Personal Persona their SMS default in the caller's transaction."""
+    permissions.require_owner(actor, persona)
+    row = (
+        session.query(PersonaDefault)
+        .filter(PersonaDefault.user_id == actor.id, PersonaDefault.channel == "sms")
+        .first()
+    )
+    now = datetime.utcnow()
+    if row is None:
+        row = PersonaDefault(
+            brokerage_id=actor.brokerage_id,
+            user_id=actor.id,
+            channel="sms",
+            persona_id=persona.id,
+            updated_by_user_id=actor.id,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(row)
+    else:
+        row.brokerage_id = actor.brokerage_id
+        row.persona_id = persona.id
+        row.updated_by_user_id = actor.id
+        row.updated_at = now
+    return row
+
+
+def publish_own(session: Session, actor: User, persona_id: int, revision: int) -> tuple[PersonaVersion, bool]:
+    """The owner publishes their own Personal Persona directly; no HOB review.
+
+    Publishes exactly the saved draft revision the owner reviewed (409 if it
+    changed), only when it passes the submission completeness rules. The new
+    immutable version, with its examples and their provenance and flags, is
+    activated for the owner. Publishing a configuration that is already
+    published creates nothing new and returns that version. Existing
+    submissions, including pending ones, are left untouched.
+
+    Returns the version and whether it was created now.
+    """
+    persona = _load(session, actor, persona_id, owner=True, lock=True)
+    if persona.status == "archived":
+        raise PersonaConflict("An archived Persona cannot be published")
+    draft = persona.draft
+    if draft.revision != revision:
+        raise PersonaConflict(f"Draft revision is stale; current revision is {draft.revision}")
+    draft_examples = (
+        session.query(PersonaDraftExample)
+        .filter(PersonaDraftExample.persona_id == persona.id)
+        .order_by(PersonaDraftExample.position, PersonaDraftExample.id)
+        .all()
+    )
+    result = validation_result(draft, draft_examples)
+    if not result["valid"]:
+        raise PersonaValidationFailure("Persona draft is not complete", result["errors"])
+    snapshot = _snapshot(draft)
+    example_snapshots = [_example_snapshot(row) for row in draft_examples]
+    content_hash = _content_hash(snapshot, example_snapshots)
+
+    def already_published():
+        return session.query(PersonaVersion).filter(
+            PersonaVersion.persona_id == persona.id, PersonaVersion.content_hash == content_hash,
+        ).first()
+
+    existing = already_published()
+    if existing is None:
+        version = PersonaVersion(
+            persona_id=persona.id,
+            version_number=_next_version_number(session, persona.id),
+            **snapshot,
+            content_hash=content_hash,
+            style_schema_version=1,
+            prompt_schema_version=1,
+            published_by_user_id=actor.id,
+            published_at=datetime.utcnow(),
+        )
+        session.add(version)
+        try:
+            session.flush()
+        except IntegrityError as error:
+            # A concurrent click published first; the database constraints decide.
+            session.rollback()
+            existing = already_published()
+            if existing is None:
+                raise PersonaConflict("Persona publication conflicted with another publication; reload and retry") from error
+            return existing, False
+        for position, (source, example) in enumerate(zip(draft_examples, example_snapshots)):
+            session.add(PersonaVersionExample(
+                version_id=version.id, source_submission_example_id=None, position=position, **example,
+            ))
+        created = True
+    else:
+        version, created = existing, False
+    previous = persona.active_version
+    _mark_draft_if_revision(session, persona.id, revision, base_version_id=version.id, review_status="published")
+    if created:
+        _record_event(
+            session, persona, actor, "persona.version_published", version=version,
+            to_state=f"v{version.version_number}",
+            detail={"revision": revision, "content_hash": content_hash, "self_published": True},
+        )
+    if previous is None or previous.id != version.id:
+        persona.active_version_id = version.id
+        persona.display_name = version.display_name
+        persona.updated_at = datetime.utcnow()
+        _record_event(
+            session, persona, actor, "persona.version_activated", version=version,
+            from_state=f"v{previous.version_number}" if previous else None, to_state=f"v{version.version_number}",
+        )
+    _ensure_owner_sms_default(session, actor, persona)
+    from .knowledge_indexing import queue_version
+    queue_version(session, persona, version, actor.id)
+    session.commit()
+    session.refresh(version)
+    return version, created
 
 
 def versions(session: Session, actor: User, persona_id: int) -> list[PersonaVersion]:
@@ -700,7 +1257,7 @@ def activate(
     )
     if persona is None:
         raise permissions.PersonaAccessError("Persona not found", not_found=True)
-    permissions.require_publish(session, actor, persona)
+    permissions.require_activate(session, actor, persona)
     if persona.status == "archived":
         raise PersonaConflict("An archived Persona cannot be activated")
     selected = (
@@ -716,7 +1273,12 @@ def activate(
             "Persona version not found", not_found=True
         )
     previous = persona.active_version
+    from .knowledge_indexing import queue_version
     if previous and previous.id == selected.id:
+        if permissions.is_owner(actor, persona):
+            _ensure_owner_sms_default(session, actor, persona)
+        queue_version(session, persona, selected, actor.id)
+        session.commit()
         return selected
     restored = (
         previous is not None and selected.version_number < previous.version_number
@@ -733,6 +1295,11 @@ def activate(
         from_state=f"v{previous.version_number}" if previous else None,
         to_state=f"v{selected.version_number}",
     )
+    if permissions.is_owner(actor, persona):
+        _ensure_owner_sms_default(session, actor, persona)
+    # Activation by the owner or a reviewer: the selected version's knowledge
+    # must be indexed for the persona owner either way (idempotent per version).
+    queue_version(session, persona, selected, actor.id)
     session.commit()
     session.refresh(selected)
     return selected

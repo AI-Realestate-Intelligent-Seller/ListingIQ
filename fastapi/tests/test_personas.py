@@ -19,11 +19,46 @@ from app.personas.schemas import PersonaDraftUpdate
 API = "/api/v1/personas"
 
 PUBLISHABLE = {
+    "professional_title": "Real Estate Advisor",
     "biography": "A local real estate professional focused on clear owner communication.",
     "experience_summary": "Works with property owners on practical real estate options.",
     "specialties": ["Residential real estate"],
     "service_areas": ["Chicago"],
     "style_instructions": "Be concise, calm, and answer the owner's question first.",
+    "profile_config": {
+        "schema_version": 2,
+        "completeness_enforced": True,
+        "identity": {
+            "license_number": "OWNER-CONFIRMED-123",
+            "licensing_jurisdiction": "Ontario",
+            "licensing_status": "Active (owner confirmed)",
+            "professional_intro": "I help owners make clear real estate decisions.",
+        },
+        "background": {
+            "unique_selling_proposition": "Clear advice focused on owner outcomes.",
+            "professional_philosophy": "Clarity before urgency.",
+        },
+        "communication": {
+            "professional_casual_behavior": "Professional and conversational.",
+            "paragraph_style": "Short paragraphs.",
+            "emoji_usage": "Rarely.",
+            "human_involvement": "Escalate sensitive and negotiation issues.",
+        },
+        "playbook": {
+            "introduction": "State my name and why I am reaching out.",
+            "trust_building": "Be specific and transparent.",
+            "qualifying_questions": "Ask one relevant question at a time.",
+            "valuation_conversations": "Separate evidence from opinion.",
+            "buyer_vs_seller": "Adapt to the customer's role and outcome.",
+            "investors_and_owners": "Use commercial language only when appropriate.",
+            "pricing_disagreements": "Show evidence and respect owner authority.",
+            "objections": "Acknowledge, clarify, and answer.",
+            "follow_up": "Reference context and add value.",
+            "appointments": "Offer a purpose and optional times.",
+            "sensitive_escalation": "Pause and involve an authorized human.",
+            "human_handoff": "Explain who is joining and what context is shared.",
+        },
+    },
 }
 
 
@@ -47,7 +82,29 @@ def _edit(client, headers, persona_id, revision, **changes):
 def _make_publishable(client, headers, persona_id, revision=1, **changes):
     response = _edit(client, headers, persona_id, revision, **{**PUBLISHABLE, **changes})
     assert response.status_code == 200, response.text
-    return response.json()
+    draft = response.json()
+    examples = client.get(f"{API}/{persona_id}/examples", headers=headers)
+    assert examples.status_code == 200, examples.text
+    if examples.json()["total"] == 0:
+        example = client.post(
+            f"{API}/{persona_id}/examples",
+            headers=headers,
+            json={
+                "revision": draft["revision"],
+                "scenario": "Owner follow-up",
+                "channel": "sms",
+                "language": "en",
+                "customer_message": "Can you send more information?",
+                "preferred_response": "Absolutely. What would be most useful to review first?",
+                "context": "",
+                "style_explanation": "Concise and asks one useful question.",
+                "provenance": "illustrative",
+                "owner_approved": True,
+            },
+        )
+        assert example.status_code == 201, example.text
+        draft["revision"] = example.json()["revision"]
+    return draft
 
 
 def _submit(client, headers, persona_id, revision):
@@ -280,21 +337,21 @@ def test_hob_reviews_only_the_submitted_snapshot_and_never_the_draft(client, tea
     submitted = _submit(client, h["michael"], pid, rev2["revision"])
     assert submitted.status_code == 200, submitted.text
     submission = submitted.json()
-    assert submission["draft_revision"] == 2
+    assert submission["draft_revision"] == rev2["revision"]
     assert submission["status"] == "submitted"
 
     # The owner keeps editing after submitting; the pending review is frozen.
     secret = "Unreleased private pricing strategy for spring."
-    rev3 = _edit(client, h["michael"], pid, 2, biography=secret)
+    rev3 = _edit(client, h["michael"], pid, rev2["revision"], biography=secret)
     assert rev3.status_code == 200
-    assert rev3.json()["revision"] == 3
+    assert rev3.json()["revision"] == rev2["revision"] + 1
 
     # HOB sees the Persona summary, never the draft.
     detail = client.get(f"{API}/{pid}", headers=h["hob"])
     assert detail.status_code == 200
     assert detail.json()["draft"] is None
     assert client.get(f"{API}/{pid}/draft", headers=h["hob"]).status_code == 404
-    assert _edit(client, h["hob"], pid, 3, biography="HOB edit").status_code == 404
+    assert _edit(client, h["hob"], pid, rev3.json()["revision"], biography="HOB edit").status_code == 404
 
     reviews = client.get(f"{API}/{pid}/submissions", headers=h["hob"])
     assert reviews.status_code == 200
@@ -309,7 +366,7 @@ def test_hob_reviews_only_the_submitted_snapshot_and_never_the_draft(client, tea
     assert published.json()["content_hash"] == submission["content_hash"]
 
     owner_draft = client.get(f"{API}/{pid}/draft", headers=h["michael"]).json()
-    assert owner_draft["revision"] == 3
+    assert owner_draft["revision"] == rev3.json()["revision"]
     assert owner_draft["biography"] == secret
     assert owner_draft["review_status"] == "draft"
     assert owner_draft["base_version_id"] is None
@@ -680,9 +737,8 @@ def test_invalid_draft_cannot_be_submitted(client, team):
     checked = client.post(f"{API}/{pid}/validate", headers=h["michael"])
     assert checked.json()["valid"] is False
     assert _submit(client, h["michael"], pid, 2).status_code == 422
-    fixed = _edit(client, h["michael"], pid, 2, sms_signature="Michael Kang")
-    assert fixed.status_code == 200
-    assert _submit(client, h["michael"], pid, 3).status_code == 200
+    fixed = _make_publishable(client, h["michael"], pid, revision=2, sms_signature="Michael Kang")
+    assert _submit(client, h["michael"], pid, fixed["revision"]).status_code == 200
 
 
 def test_publish_is_immutable_and_version_numbers_increase(client, team, session):
@@ -762,10 +818,13 @@ def test_rollback_and_cross_persona_version_activation(client, team):
     assert a_detail["active_version"]["content_hash"] == a_v1["content_hash"]
     assert client.get(f"{API}/{b}", headers=h["hob"]).json()["active_version_id"] == b_v1["id"]
 
-    # Non-HOB members and foreign HOBs cannot activate.
-    for actor in ("michael", "broker2", "bobbie"):
+    # Personal Personas are self-managed: the owner may activate their own versions.
+    # Other members and foreign HOBs still cannot.
+    for actor in ("broker2", "bobbie"):
         assert _activate(client, h[actor], a, 2).status_code in {403, 404}
     assert _activate(client, h["foreign_hob"], a, 2).status_code == 404
+    assert _activate(client, h["michael"], a, 2).status_code == 200
+    assert _activate(client, h["michael"], a, 1).status_code == 200
     events = client.get(f"{API}/{a}/events", headers=h["hob"]).json()
     assert "persona.version_restored" in {row["event_type"] for row in events}
 

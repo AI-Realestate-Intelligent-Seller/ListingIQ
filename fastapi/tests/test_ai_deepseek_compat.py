@@ -17,6 +17,7 @@ from app.ai import client as ai_client
 from app.core.config import settings
 from app.models import Conversation, Message
 from app.sms import bobbie, service
+from test_ai_review_evidence import LEGACY_AGENT  # noqa: E402  trusted test identity
 
 GOOD = {
     'action': 'continue', 'intent': 'price_question', 'outcome': 'positive',
@@ -126,7 +127,7 @@ def test_deepseek_disposition_matches_committed_baseline(
         calendar_state, fetch, confidence, intent_len):
     deepseek['replies'] = [content]
 
-    result = bobbie.analyze_conversation_disposition(CONVERSATION, HISTORY)
+    result = bobbie.analyze_conversation_disposition(CONVERSATION, HISTORY, agent_context=LEGACY_AGENT)
 
     assert result['action'] == action
     assert result['lead_status'] == lead_status
@@ -160,7 +161,6 @@ REVIEW_BASELINE = [
     ('missing_valid', json.dumps({'issues': [], 'rewrite_instruction': '', 'reason': 'x'}),
      False, 0, 0, 0, 'x'),
     ('valid_string', _review(valid='true'), False, 1, 9, 6, 'pushy'),
-    ('not_json', 'Looks fine to me.', True, 0, 0, 0, 'Reviewer unavailable'),
 ]
 
 
@@ -171,7 +171,7 @@ def test_deepseek_review_matches_committed_baseline(
     deepseek['replies'] = [content]
 
     result = bobbie.review_ai_reply(CONVERSATION, HISTORY, 'Draft SMS text.',
-                                    {'next_step': 'answer_and_qualify'})
+                                    {'next_step': 'answer_and_qualify'}, agent_context=LEGACY_AGENT)
 
     assert result['valid'] is valid
     assert len(result['issues']) == issue_count
@@ -182,9 +182,9 @@ def test_deepseek_review_matches_committed_baseline(
 
 def test_deepseek_structured_requests_are_the_committed_request_bodies(deepseek):
     deepseek['replies'] = [_disposition()]
-    bobbie.analyze_conversation_disposition(CONVERSATION, HISTORY)
+    bobbie.analyze_conversation_disposition(CONVERSATION, HISTORY, agent_context=LEGACY_AGENT)
     deepseek['replies'] = [_review(valid=True, issues=[])]
-    bobbie.review_ai_reply(CONVERSATION, HISTORY, 'Draft.', {})
+    bobbie.review_ai_reply(CONVERSATION, HISTORY, 'Draft.', {}, agent_context=LEGACY_AGENT)
 
     disposition, review = deepseek['bodies']
     assert {key: value for key, value in disposition.items() if key != 'messages'} == {
@@ -194,7 +194,8 @@ def test_deepseek_structured_requests_are_the_committed_request_bodies(deepseek)
     assert [message['role'] for message in disposition['messages']] == ['system', 'user']
     assert {key: value for key, value in review.items() if key != 'messages'} == {
         'model': 'deepseek-v4-flash', 'stream': False, 'temperature': 0,
-        'max_tokens': 160, 'thinking': {'type': 'disabled'},
+        # Raised from 160: the hard-block/advisory review JSON is longer.
+        'max_tokens': 400, 'thinking': {'type': 'disabled'},
     }
 
 
@@ -222,32 +223,43 @@ def test_deepseek_keeps_a_caller_requested_json_mode(deepseek):
     assert deepseek['bodies'][0]['response_format'] == {'type': 'json_object'}
 
 
+def test_deepseek_unparseable_review_withholds_the_draft(deepseek):
+    # Formerly kept the draft as valid ("Reviewer unavailable"); now it fails closed.
+    deepseek['replies'] = ['Looks fine to me.']
+    with pytest.raises(bobbie.ReviewUnavailableError):
+        bobbie.review_ai_reply(CONVERSATION, HISTORY, 'Draft SMS text.',
+                               {'next_step': 'answer_and_qualify'}, agent_context=LEGACY_AGENT)
+
+
 def test_deepseek_review_rejection_still_runs_the_repair(deepseek, monkeypatch):
-    monkeypatch.setattr(bobbie.knowledge, 'needs_bobbie_knowledge', lambda _text: False)
+    monkeypatch.setattr(bobbie.knowledge, 'needs_agent_knowledge', lambda _text: False)
     # Over-long issues used to make the strict validator drop the review and
     # keep the rejected draft. The committed behaviour repairs it.
     deepseek['replies'] = [
         _review(issues=['x' * 150] * 8, rewrite_instruction='Answer the price question.'),
         'Fair question. Could I stop by to give you a real number?',
+        _review(valid=True, issues=[]),
     ]
 
     result = bobbie.review_and_repair_ai_reply(
-        CONVERSATION, HISTORY, 'Rejected draft.', {'next_step': 'answer_and_qualify'})
+        CONVERSATION, HISTORY, 'Rejected draft.', {'next_step': 'answer_and_qualify'}, agent_context=LEGACY_AGENT)
 
     assert result == 'Fair question. Could I stop by to give you a real number?'
-    assert len(deepseek['bodies']) == 2
+    # review + regeneration + review of the regeneration
+    assert len(deepseek['bodies']) == 3
     assert 'tools' in deepseek['bodies'][1]
+    assert 'Fair question. Could I stop by' in json.dumps(deepseek['bodies'][2])
 
 
-@pytest.mark.parametrize('draft', ['', 'x ' * 200], ids=['empty_draft_retry', 'policy_repair'])
+@pytest.mark.parametrize('draft', ['', 'Call me at 312 555 0199 anytime.'], ids=['empty_draft_retry', 'policy_repair'])
 def test_deepseek_follow_up_after_tool_calls_is_the_committed_request(deepseek, monkeypatch, draft):
-    monkeypatch.setattr(bobbie.knowledge, 'needs_bobbie_knowledge', lambda _text: False)
+    monkeypatch.setattr(bobbie.knowledge, 'needs_agent_knowledge', lambda _text: False)
     monkeypatch.setattr(bobbie.knowledge, 'search_bobbie_knowledge',
                         lambda query, limit: {'query': query, 'results': []})
     tool_calls = [
         {'id': 'c1', 'type': 'function', 'function': {'name': 'get_lead_details', 'arguments': '{}'}},
         {'id': 'c2', 'type': 'function',
-         'function': {'name': 'search_bobbie_knowledge', 'arguments': '{"query":"bobbie"}'}},
+         'function': {'name': 'search_agent_knowledge', 'arguments': '{"query":"bobbie"}'}},
     ]
     replies = iter([
         {'role': 'assistant', 'content': None, 'tool_calls': tool_calls},
@@ -273,14 +285,15 @@ def test_deepseek_follow_up_after_tool_calls_is_the_committed_request(deepseek, 
 
     monkeypatch.setattr(requests, 'post', fake_post)
 
-    reply = bobbie.generate_ai_reply(CONVERSATION, HISTORY)
+    reply = bobbie.generate_ai_reply(CONVERSATION, HISTORY, agent_context=LEGACY_AGENT)
 
     first, after_tools, follow = deepseek['bodies']
     assert reply == 'Short answer. What timing works for you?'
     # The committed follow-up request: no tools, no tool_choice, its own sampling.
     assert {key: value for key, value in follow.items() if key != 'messages'} == {
         'model': 'deepseek-v4-flash', 'stream': False, 'temperature': 0.1,
-        'max_tokens': 80, 'thinking': {'type': 'disabled'},
+        # Raised from 80: a token cap must not act as a hidden SMS length limit.
+        'max_tokens': 400, 'thinking': {'type': 'disabled'},
     }
     assert follow['messages'][:-1] == after_tools['messages']
     assert follow['messages'][-1]['role'] == 'system'
@@ -301,7 +314,7 @@ def test_deepseek_meeting_acceptance_with_long_reason_hands_off_to_a_person(
     session.add_all([
         Message(conversation_id=conversation.id, direction='outbound', text='Could I stop by?',
                 status='delivered', event_type='ai.reply', created_at=datetime.utcnow()),
-        Message(conversation_id=conversation.id, direction='inbound', text='Sure, come by.',
+        Message(conversation_id=conversation.id, direction='inbound', text='Sure, come by Saturday morning.',
                 status='received', event_type='message.received', created_at=datetime.utcnow()),
     ])
     session.commit()
@@ -314,7 +327,7 @@ def test_deepseek_meeting_acceptance_with_long_reason_hands_off_to_a_person(
                         lambda _session, _conversation, text, event_type, *rest:
                         sent.append((text, event_type)) or Message(id=1))
 
-    service.process_ai_reply(conversation.id, 'Sure, come by.')
+    service.process_ai_reply(conversation.id, 'Sure, come by Saturday morning.')
 
     session.expire_all()
     updated = session.get(Conversation, conversation.id)
@@ -322,5 +335,5 @@ def test_deepseek_meeting_acceptance_with_long_reason_hands_off_to_a_person(
     assert updated.ai_enabled is False
     assert updated.lead_status == 'location_discussion'
     assert len(sent) == 1
-    assert 'someone from our team' in sent[0][0].lower()
+    assert 'Our team will reach out to coordinate' in sent[0][0] and 'Saturday morning' in sent[0][0]
     assert len(deepseek['bodies']) == 1, 'hand-off happens before any reply is drafted'

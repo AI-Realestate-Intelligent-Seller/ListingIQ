@@ -5,6 +5,7 @@ from datetime import datetime
 from sqlalchemy import (
     DDL,
     JSON,
+    LargeBinary,
     CheckConstraint,
     Column,
     DateTime,
@@ -88,6 +89,18 @@ class Persona(Base):
         cascade="save-update, merge",
         passive_deletes="all",
     )
+    draft_examples = relationship(
+        "PersonaDraftExample",
+        back_populates="persona",
+        cascade="all, delete-orphan",
+        order_by="PersonaDraftExample.position",
+    )
+    import_jobs = relationship(
+        "PersonaImportJob",
+        back_populates="persona",
+        cascade="all, delete-orphan",
+        order_by="PersonaImportJob.created_at.desc()",
+    )
     submissions = relationship(
         "PersonaSubmission",
         back_populates="persona",
@@ -150,6 +163,7 @@ class PersonaVersion(Base):
     style_config = Column(JSON, nullable=False, default=dict)
     style_instructions = Column(Text, nullable=False, default="")
     preferred_language = Column(String(40), nullable=False, default="en")
+    profile_config = Column(JSON, nullable=False, default=dict)
     content_hash = Column(String(64), nullable=False)
     style_schema_version = Column(Integer, nullable=False, default=1)
     prompt_schema_version = Column(Integer, nullable=False, default=1)
@@ -160,6 +174,13 @@ class PersonaVersion(Base):
 
     persona = relationship(
         "Persona", back_populates="versions", foreign_keys=[persona_id]
+    )
+    examples = relationship(
+        "PersonaVersionExample",
+        back_populates="version",
+        cascade="save-update, merge",
+        passive_deletes="all",
+        order_by="PersonaVersionExample.position",
     )
 
 
@@ -247,6 +268,13 @@ class PersonaSubmission(Base):
     published_version = relationship(
         "PersonaVersion", foreign_keys=[published_version_id]
     )
+    examples = relationship(
+        "PersonaSubmissionExample",
+        back_populates="submission",
+        cascade="save-update, merge",
+        passive_deletes="all",
+        order_by="PersonaSubmissionExample.position",
+    )
 
 
 SUBMISSION_IMMUTABLE_FIELDS = (
@@ -306,6 +334,7 @@ class PersonaDraft(Base):
     style_config = Column(JSON, nullable=False, default=dict)
     style_instructions = Column(Text, nullable=False, default="")
     preferred_language = Column(String(40), nullable=False, default="en")
+    profile_config = Column(JSON, nullable=False, default=dict)
     review_status = Column(String(20), nullable=False, default="draft", index=True)
     submitted_by_user_id = Column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
@@ -320,6 +349,186 @@ class PersonaDraft(Base):
 
     persona = relationship("Persona", back_populates="draft", foreign_keys=[persona_id])
     base_version = relationship("PersonaVersion", foreign_keys=[base_version_id])
+
+
+class PersonaDraftExample(Base):
+    """Owner-editable examples; every mutation advances the parent draft revision."""
+
+    __tablename__ = "persona_draft_examples"
+    __table_args__ = (
+        CheckConstraint("position >= 0", name="ck_persona_draft_examples_position"),
+        CheckConstraint("channel IN ('sms', 'email')", name="ck_persona_draft_examples_channel"),
+        CheckConstraint(
+            "provenance IN ('authentic', 'user_written', 'illustrative')",
+            name="ck_persona_draft_examples_provenance",
+        ),
+        Index("ix_persona_draft_examples_persona_position", "persona_id", "position"),
+        Index("ix_persona_draft_examples_persona_channel", "persona_id", "channel"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    persona_id = Column(Integer, ForeignKey("personas.id", ondelete="CASCADE"), nullable=False, index=True)
+    position = Column(Integer, nullable=False, default=0)
+    scenario = Column(String(120), nullable=False)
+    channel = Column(String(20), nullable=False)
+    language = Column(String(40), nullable=False, default="en")
+    customer_message = Column(Text, nullable=False)
+    preferred_response = Column(Text, nullable=False)
+    context = Column(Text, nullable=False, default="")
+    style_explanation = Column(Text, nullable=False, default="")
+    provenance = Column(String(30), nullable=False)
+    # Import review warnings (consent, provenance). Server-set; never cleared by edits.
+    review_flags = Column(JSON, nullable=False, default=list, server_default=text("'[]'"))
+    owner_approved = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    persona = relationship("Persona", back_populates="draft_examples")
+
+
+class PersonaSubmissionExample(Base):
+    """Frozen example copied from a specific draft revision for HOB review."""
+
+    __tablename__ = "persona_submission_examples"
+    __table_args__ = (
+        UniqueConstraint("submission_id", "position", name="uq_persona_submission_examples_position"),
+        Index("ix_persona_submission_examples_submission", "submission_id", "position"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    submission_id = Column(Integer, ForeignKey("persona_submissions.id", ondelete="RESTRICT"), nullable=False, index=True)
+    source_example_id = Column(Integer, nullable=True)
+    position = Column(Integer, nullable=False)
+    scenario = Column(String(120), nullable=False)
+    channel = Column(String(20), nullable=False)
+    language = Column(String(40), nullable=False)
+    customer_message = Column(Text, nullable=False)
+    preferred_response = Column(Text, nullable=False)
+    context = Column(Text, nullable=False, default="")
+    style_explanation = Column(Text, nullable=False, default="")
+    provenance = Column(String(30), nullable=False)
+    # Import review warnings (consent, provenance). Server-set; never cleared by edits.
+    review_flags = Column(JSON, nullable=False, default=list, server_default=text("'[]'"))
+    owner_approved = Column(Integer, nullable=False)
+
+    submission = relationship("PersonaSubmission", back_populates="examples")
+
+
+class PersonaVersionExample(Base):
+    """Immutable example belonging to exactly one published Persona version."""
+
+    __tablename__ = "persona_version_examples"
+    __table_args__ = (
+        UniqueConstraint("version_id", "position", name="uq_persona_version_examples_position"),
+        Index("ix_persona_version_examples_version", "version_id", "position"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    version_id = Column(Integer, ForeignKey("persona_versions.id", ondelete="RESTRICT"), nullable=False, index=True)
+    source_submission_example_id = Column(Integer, nullable=True)
+    position = Column(Integer, nullable=False)
+    scenario = Column(String(120), nullable=False)
+    channel = Column(String(20), nullable=False)
+    language = Column(String(40), nullable=False)
+    customer_message = Column(Text, nullable=False)
+    preferred_response = Column(Text, nullable=False)
+    context = Column(Text, nullable=False, default="")
+    style_explanation = Column(Text, nullable=False, default="")
+    provenance = Column(String(30), nullable=False)
+    # Import review warnings (consent, provenance). Server-set; never cleared by edits.
+    review_flags = Column(JSON, nullable=False, default=list, server_default=text("'[]'"))
+    owner_approved = Column(Integer, nullable=False)
+
+    version = relationship("PersonaVersion", back_populates="examples")
+
+
+class PersonaImportJob(Base):
+    """Durable, owner-scoped processing state for one Persona source document."""
+
+    __tablename__ = "persona_import_jobs"
+    __table_args__ = (
+        UniqueConstraint("persona_id", "file_hash", name="uq_persona_import_jobs_file_hash"),
+        CheckConstraint(
+            "status IN ('queued', 'processing', 'completed', 'failed', 'applied')",
+            name="ck_persona_import_jobs_status",
+        ),
+        Index("ix_persona_import_jobs_owner_created", "owner_user_id", "created_at"),
+        Index("ix_persona_import_jobs_status_updated", "status", "updated_at"),
+    )
+
+    id = Column(String(32), primary_key=True)
+    persona_id = Column(Integer, ForeignKey("personas.id", ondelete="CASCADE"), nullable=False, index=True)
+    brokerage_id = Column(String(255), nullable=False, index=True)
+    owner_user_id = Column(Integer, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True)
+    base_revision = Column(Integer, nullable=False)
+    file_name = Column(String(255), nullable=False)
+    media_type = Column(String(100), nullable=False)
+    file_size = Column(Integer, nullable=False)
+    file_hash = Column(String(64), nullable=False)
+    # Nullable since 0037: an object-storage upload need not duplicate the file here.
+    document_bytes = Column(LargeBinary, nullable=True)
+    storage_backend = Column(String(20), nullable=False, default="database", server_default=text("'database'"))
+    storage_key = Column(String(900), nullable=True)
+    document_text = Column(Text, nullable=True)
+    status = Column(String(20), nullable=False, default="queued", index=True)
+    current_stage = Column(String(50), nullable=True)
+    stages = Column(JSON, nullable=False, default=dict)
+    extraction = Column(JSON, nullable=True)
+    proposal = Column(JSON, nullable=True)
+    assessment = Column(JSON, nullable=True)
+    error_code = Column(String(80), nullable=True)
+    error_message = Column(String(500), nullable=True)
+    retryable = Column(Integer, nullable=False, default=0)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    # "local" reads the ListingIQ template without AI; "ai" only after the owner asks.
+    extraction_mode = Column(String(20), nullable=False, default="local", server_default=text("'local'"))
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    applied_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    persona = relationship("Persona", back_populates="import_jobs")
+
+
+class PersonaKnowledgeIndexJob(Base):
+    """Durable outbox entry for one immutable published Persona version."""
+
+    __tablename__ = "persona_knowledge_index_jobs"
+    __table_args__ = (
+        UniqueConstraint("version_id", name="uq_persona_knowledge_index_jobs_version"),
+        CheckConstraint("status IN ('pending', 'indexing', 'ready', 'failed')",
+                        name="ck_persona_knowledge_index_jobs_status"),
+        Index("ix_persona_knowledge_index_jobs_status_next", "status", "next_attempt_at"),
+        Index("ix_persona_knowledge_index_jobs_owner", "owner_user_id", "brokerage_id"),
+    )
+
+    id = Column(String(32), primary_key=True)
+    persona_id = Column(Integer, ForeignKey("personas.id", ondelete="RESTRICT"), nullable=False, index=True)
+    version_id = Column(Integer, ForeignKey("persona_versions.id", ondelete="RESTRICT"), nullable=False, index=True)
+    owner_user_id = Column(Integer, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True)
+    brokerage_id = Column(String(255), nullable=False, index=True)
+    source_document_id = Column(String(64), nullable=False)
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    content_hash = Column(String(64), nullable=False)
+    chunk_count = Column(Integer, nullable=False, default=0)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    max_attempts = Column(Integer, nullable=False, default=3)
+    worker_id = Column(String(100), nullable=True)
+    error_message = Column(String(500), nullable=True)
+    next_attempt_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    claimed_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+for _immutable_model, _message in (
+    (PersonaSubmissionExample, "Submitted Persona examples are immutable"),
+    (PersonaVersionExample, "Published Persona examples are immutable"),
+):
+    event.listen(_immutable_model, "before_update", lambda *_args, message=_message: (_ for _ in ()).throw(ValueError(message)), propagate=True)
+    event.listen(_immutable_model, "before_delete", lambda *_args, message=_message: (_ for _ in ()).throw(ValueError(message)), propagate=True)
 
 
 class PersonaDefault(Base):

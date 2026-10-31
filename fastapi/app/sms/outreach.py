@@ -1,14 +1,14 @@
-"""Initial outreach copy and approved lead context — port of outreach.js."""
+"""Initial outreach copy and approved lead context."""
 
 import re
 
-from ..core.config import settings
+from .runtime_context import AgentRuntimeContext
 
 
-def outreach_signature() -> str:
-    """Bobbie's name, plus her brokerage only once the business has approved it."""
-    brokerage = (settings.get('sms') or {}).get('approved_brokerage') or ''
-    return f'Bobbie Fisher – {brokerage}' if brokerage else 'Bobbie Fisher'
+def outreach_signature(context: AgentRuntimeContext) -> str:
+    """Use only the resolved account identity and current trusted brokerage."""
+    return (f'{context.agent_name} – {context.brokerage_name}'
+            if context.brokerage_name else context.agent_name)
 
 
 def _clean_sentence(value: str = '') -> str:
@@ -29,9 +29,10 @@ def build_single_lead_context(property_address: str, outreach_reason: str) -> di
     }
 
 
-def build_initial_outreach(name: str, property_address: str, outreach_reason: str) -> str:
+def build_initial_outreach(name: str, property_address: str, outreach_reason: str,
+                           context: AgentRuntimeContext) -> str:
     first_name = str(name).strip().split()[0] if str(name).strip() else ''
     address = _clean_sentence(property_address)
     reason = _clean_sentence(outreach_reason)
     return (f'Hey {first_name}, I’m reaching out about {address}. {reason}. '
-            f'Would you be open to a brief conversation? {outreach_signature()}')
+            f'Would you be open to a brief conversation? {outreach_signature(context)}')

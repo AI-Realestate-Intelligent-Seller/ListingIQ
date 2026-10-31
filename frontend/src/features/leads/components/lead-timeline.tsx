@@ -67,7 +67,7 @@ function eventLabel(event: LeadEvent): string {
     case "stage_changed":
       return `Stage changed: ${event.from_value ?? "?"} → ${event.to_value ?? "?"}`;
     case "handover_to_ai":
-      return "Handed back to AI (Bobbie)";
+      return "Handed back to AI";
     case "handover_to_agent":
       return "Handed to the agent";
     case "meeting_booked":
@@ -82,7 +82,11 @@ function eventLabel(event: LeadEvent): string {
 }
 
 function eventBy(event: LeadEvent): string | null {
-  if (event.actor_type === "ai") return "Bobbie";
+  if (event.actor_type === "ai") {
+    // The AI speaks as the assigned agent's Persona; older events carry no name.
+    const name = typeof event.meta?.ai_agent_name === "string" ? event.meta.ai_agent_name : "";
+    return name ? `AI for ${name}` : "AI";
+  }
   if (event.actor_type === "system") return null;
   return event.actor_name ?? null;
 }

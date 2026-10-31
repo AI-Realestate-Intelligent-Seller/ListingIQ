@@ -131,16 +131,23 @@ os.environ.setdefault('FRONTEND_URL', 'http://localhost:3000')
 # Staged lead uploads go to a throwaway directory, never the app's data folder.
 _TEST_UPLOADS = Path(tempfile.gettempdir()) / f'ListingIQ_uploads_{uuid.uuid4().hex}'
 os.environ['LEAD_UPLOAD_DIR'] = str(_TEST_UPLOADS)
+_TEST_PERSONA_STORAGE = Path(tempfile.gettempdir()) / f'ListingIQ_personas_{uuid.uuid4().hex}'
+os.environ['PERSONA_STORAGE_BACKEND'] = 'local'
+os.environ['PERSONA_STORAGE_ROOT'] = str(_TEST_PERSONA_STORAGE)
+os.environ['PERSONA_INDEX_WORKER_ENABLED'] = 'false'
 
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app import db  # noqa: E402
 from app.auth import hash_password  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import (AiRun, Booking, Campaign, Conversation, FeatureFlag, Invitation, Lead, LeadEvent,  # noqa: E402
-                        Message, OutboundSmsJob, PlatformAuditLog, User)
+from app.models import (AiRun, Booking, Campaign, Conversation, FeatureFlag, InboundSmsEvent, Invitation, Lead,  # noqa: E402
+                        LeadEvent, Message, OutboundSmsJob, PlatformAuditLog, User)
 from app.personas.models import (Persona, PersonaDefault, PersonaDraft, PersonaEvent,  # noqa: E402
-                                 PersonaSubmission, PersonaVersion)
+                                 PersonaDraftExample, PersonaSubmission,
+                                 PersonaSubmissionExample, PersonaVersion,
+                                 PersonaVersionExample, PersonaImportJob,
+                                 PersonaKnowledgeIndexJob)
 
 
 @pytest.fixture(scope='session', autouse=True)
@@ -151,6 +158,7 @@ def _database():
     db.engine.dispose()
     _TEST_DB.unlink(missing_ok=True)
     shutil.rmtree(_TEST_UPLOADS, ignore_errors=True)
+    shutil.rmtree(_TEST_PERSONA_STORAGE, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)
@@ -158,7 +166,12 @@ def clean_tables():
     session = db.SessionLocal()
     try:
         session.query(PersonaEvent).delete()
+        session.query(PersonaKnowledgeIndexJob).delete()
         session.query(PersonaDefault).delete()
+        session.query(PersonaImportJob).delete()
+        session.query(PersonaDraftExample).delete()
+        session.query(PersonaSubmissionExample).delete()
+        session.query(PersonaVersionExample).delete()
         session.query(PersonaDraft).delete()
         session.query(PersonaSubmission).delete()
         # Break the intentional active-version cycle before deleting immutable
@@ -171,6 +184,7 @@ def clean_tables():
         session.query(LeadEvent).delete()
         session.query(OutboundSmsJob).delete()
         session.query(Lead).delete()
+        session.query(InboundSmsEvent).delete()
         session.query(Message).delete()
         session.query(Conversation).delete()
         # After leads and conversations: both carry a campaign_id.

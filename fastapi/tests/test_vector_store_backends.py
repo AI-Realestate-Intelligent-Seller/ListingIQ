@@ -43,6 +43,19 @@ class FakeModels:
         def __init__(self, points):
             self.points = points
 
+    class MatchValue:
+        def __init__(self, value):
+            self.value = value
+
+    class FieldCondition:
+        def __init__(self, key, match):
+            self.key = key
+            self.match = match
+
+    class Filter:
+        def __init__(self, must):
+            self.must = must
+
 
 class FakeQdrantClient:
     def __init__(self, **kwargs):
@@ -68,10 +81,17 @@ class FakeQdrantClient:
         for point in points:
             self.data[collection_name]['points'][point.id] = point
 
-    def query_points(self, collection_name, query, limit, with_payload):
+    def query_points(self, collection_name, query, limit, with_payload, query_filter=None):
         assert with_payload is True
         self.last_query = query
         stored = list(self.data[collection_name]['points'].values())
+        if query_filter is not None:
+            for condition in query_filter.must:
+                key = condition.key.removeprefix('metadata.')
+                stored = [
+                    point for point in stored
+                    if (point.payload.get('metadata') or {}).get(key) == condition.match.value
+                ]
 
         if isinstance(query, FakeModels.Document):
             matches = [
@@ -249,6 +269,26 @@ def test_qdrant_cloud_search_sends_raw_query_and_model(cloud_store):
     assert hits[0]['id'] == 'a'
     assert hits[0]['text'] == 'raw chunk body'
     assert hits[0]['score'] == pytest.approx(0.1)
+
+
+def test_qdrant_search_enforces_server_side_metadata_filters(cloud_store):
+    store, _ = cloud_store
+    assert store.add_texts(
+        'agent_knowledge',
+        ids=['agent-a', 'agent-b'],
+        texts=['A facts', 'B facts'],
+        metadatas=[
+            {'owner_user_id': 10, 'brokerage_id': 'one'},
+            {'owner_user_id': 11, 'brokerage_id': 'one'},
+        ],
+    )
+
+    hits = store.search_text(
+        'agent_knowledge', 'facts', k=5,
+        filters={'owner_user_id': 10, 'brokerage_id': 'one'},
+    )
+
+    assert [hit['id'] for hit in hits] == ['agent-a']
 
 
 def test_self_hosted_qdrant_vector_contract_is_unchanged(self_hosted_store):

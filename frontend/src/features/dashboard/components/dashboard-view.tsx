@@ -21,6 +21,7 @@ import { AgentLeadsView } from "@/features/assignments/components/agent-leads-vi
 import { getAgentOverview, getBrokerOverviewWithProgress, getMyBroker } from "@/features/assignments/api/assignments-api";
 import type { AgentOverview, BrokerOverview } from "@/features/assignments/types/assignments.types";
 import { CalendarContainer } from "@/features/calendar/calendar-container";
+import { PersonaView, UnsavedChangesDialog } from "@/features/personas/components/persona-view";
 import { NotificationBell} from "./notification-bell";
 import { UpcomingEvents } from "./upcoming-events";
 import {RealtimeProvider} from"../realtimeProvider/realtimeProvider"
@@ -55,14 +56,13 @@ function InviteDropdown({ name, label, value, placeholder = "Select", options,
 
   return (
     <div className={`invite-dropdown${open ? " open" : ""}`} ref={rootRef}>
-      <input type="hidden" name={name} value={value} />
+      <input type="hidden" name={name} value={value} required={required} />
       <button
         type="button"
         className="invite-dropdown-trigger"
         aria-label={label}
         aria-haspopup="listbox"
         aria-expanded={open}
-        aria-required={required}
         disabled={disabled}
         onClick={() => setOpen((current) => !current)}
       >
@@ -181,6 +181,8 @@ export function DashboardView() {
   const params = useParams<{ role?: string }>();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [view, setView] = useState<DashboardTab>("overview");
+  const personaDirtyRef = useRef(false);
+  const [pendingPersonaNavigation, setPendingPersonaNavigation] = useState<NotificationAction | null>(null);
   const [isInviting, setIsInviting] = useState(false);
   const [inviteSuccess, setInviteSuccess] = useState("");
   const [inviteError, setInviteError] = useState("");
@@ -235,6 +237,8 @@ export function DashboardView() {
     const session = readAuthSession();
     if (!session) return;
     const controller = new AbortController();
+    // The request state is reset when the signed-in user changes.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setIsLoadingBrokers(true);
     getTeamDirectory(session.access_token, controller.signal)
       .then((response) => setInviteBrokers(response.members.filter((member) => member.role === "broker")))
@@ -421,7 +425,15 @@ useEffect(() => {
     navigateDashboard({ view: "followups", conversation_id: conversationId });
   }
 
+  // The ref intentionally keeps this navigation callback stable for push and
+  // storage listeners while still consulting the latest Persona edit state.
+  // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const navigateDashboard = useCallback((action: NotificationAction) => {
+    // Any navigation, including re-opening My AI Persona, would discard unsaved Persona edits.
+    if (personaDirtyRef.current) {
+      setPendingPersonaNavigation(action);
+      return;
+    }
     const session = readAuthSession();
     const role = session?.user.role;
     let target = action.view;
@@ -459,6 +471,10 @@ useEffect(() => {
     window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
   }, []);
 
+  const handlePersonaDirty = useCallback((dirty: boolean) => {
+    personaDirtyRef.current = dirty;
+  }, []);
+
   useEffect(() => {
     if (!user) return;
     let pendingAction: NotificationAction | null = null;
@@ -471,7 +487,6 @@ useEffect(() => {
     const initialAction = actionFromUrl(window.location.pathname + window.location.search) ?? pendingAction ?? savedAction;
     if (initialAction) {
       // Hydrate navigation from browser URL/storage after authentication.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       navigateDashboard(initialAction);
     }
     const handlePushNavigation = (event: MessageEvent) => {
@@ -633,6 +648,18 @@ useEffect(() => {
     <span>Calendar</span>
   </button>
 ) : null}
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === "persona"}
+            className={view === "persona" ? "active" : undefined}
+            onClick={() => openTab("persona")}
+          >
+            <svg className="dashboard-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
+              <path d="M10 2.5l1.5 4 4 1.5-4 1.5-1.5 4-1.5-4-4-1.5 4-1.5 1.5-4zM15.5 13l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7.7-1.8z" />
+            </svg>
+            <span>My AI Persona</span>
+          </button>
         </nav>
         <button type="button" onClick={logout}>Log out</button>
       </aside>
@@ -759,6 +786,8 @@ useEffect(() => {
         ) : null}
 
       {view === "calendar" ? <CalendarContainer key={notificationNavigationId} focusBookingId={focusBookingId} /> : null}
+        {view === "persona" ? <PersonaView key={notificationNavigationId} user={user} onDirtyChange={handlePersonaDirty} onExit={() => openTab("overview")} /> : null}
+        {pendingPersonaNavigation ? <UnsavedChangesDialog onStay={() => setPendingPersonaNavigation(null)} onDiscard={() => { const action = pendingPersonaNavigation; personaDirtyRef.current = false; setPendingPersonaNavigation(null); navigateDashboard(action); }} /> : null}
         {view === "overview" ? (
         <>
         <section className="dashboard-panel">

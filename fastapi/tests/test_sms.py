@@ -140,7 +140,8 @@ def test_fit_complete_sms_keeps_short_replies_untouched():
     ('I have been selling homes since 2011 in this area.', 'unsupported_tenure'),
 ])
 def test_policy_blocks_unsupported_claims(draft, expected):
-    assert expected in find_reply_policy_violations(draft)
+    # Third-person self-reference is judged against the trusted agent name production passes.
+    assert expected in find_reply_policy_violations(draft, agent_name='Bobbie Fisher')
 
 
 def test_policy_allows_an_honest_buyer_denial():
@@ -198,10 +199,12 @@ def test_merge_lead_status_never_downgrades_a_terminal_status():
 # Outreach + closing detection
 # --------------------------------------------------------------------------
 
-def test_initial_outreach_uses_the_first_name_and_property(monkeypatch):
-    from app.core.config import settings
-    monkeypatch.setitem(settings['sms'], 'approved_brokerage', '')  # the brokerage-neutral default
-    text = build_initial_outreach('Maya Chen', '123 Maple Ave.', 'It came off the market.')
+def test_initial_outreach_uses_the_first_name_and_property():
+    from app.sms.runtime_context import AgentRuntimeContext
+    context = AgentRuntimeContext(user_id=1, brokerage_id='b1', conversation_id=None, active_persona_id=None,
+                                  active_persona_version_id=None, agent_name='Bobbie Fisher', brokerage_name='',
+                                  persona=None)
+    text = build_initial_outreach('Maya Chen', '123 Maple Ave.', 'It came off the market.', context)
     assert text.startswith('Hey Maya,')
     assert '123 Maple Ave' in text
     assert text.endswith('Would you be open to a brief conversation? Bobbie Fisher')

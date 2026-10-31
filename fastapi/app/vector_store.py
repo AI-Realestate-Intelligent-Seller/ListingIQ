@@ -89,10 +89,12 @@ class VectorStoreInterface(Protocol):
                   documents: list | None = None,
                   metadatas: list | None = None,
                   embedding_texts: list | None = None) -> bool: ...
-    def search_text(self, collection: str, text: str, k: int = 5) -> list: ...
+    def search_text(self, collection: str, text: str, k: int = 5,
+                    filters: dict | None = None) -> list: ...
     def upsert_embedding(self, collection: str, id: str, vector: list | None = None,
                          metadata: dict | None = None, text: str | None = None) -> bool: ...
-    def search(self, collection: str, vector: list, k: int = 5) -> list: ...
+    def search(self, collection: str, vector: list, k: int = 5,
+               filters: dict | None = None) -> list: ...
     def add_many(self, collection: str, ids: list, vectors: list,
                  documents: list | None = None, metadatas: list | None = None) -> bool: ...
     def collection_metadata(self, collection: str) -> dict | None: ...
@@ -100,6 +102,7 @@ class VectorStoreInterface(Protocol):
     def delete(self, collection: str, id: str) -> bool: ...
     def count(self, collection: str) -> int: ...
     def collections(self) -> list: ...
+    def ensure_payload_indexes(self, collection: str, fields: dict[str, str]) -> bool: ...
 
 
 def _valid_qdrant_config(url: str | None, api_key: str | None) -> bool:
@@ -179,9 +182,11 @@ class ChromaVectorStore:
         return self.add_many(
             collection, ids, vectors, documents=documents, metadatas=metadatas)
 
-    def search_text(self, collection: str, text: str, k: int = 5) -> list:
+    def search_text(self, collection: str, text: str, k: int = 5,
+                    filters: dict | None = None) -> list:
         return self.search(
-            collection, _local_embedding_provider().embed_one(text), k=k)
+            collection, _local_embedding_provider().embed_one(text), k=k,
+            filters=filters)
 
     # -- storage -----------------------------------------------------------
     def _collection(self, name: str, create: bool = True):
@@ -237,18 +242,26 @@ class ChromaVectorStore:
             logger.error('[vector-store] upsert failed for %s/%s: %s', collection, id, error)
             return False
 
-    def search(self, collection: str, vector: list, k: int = 5) -> list:
+    def search(self, collection: str, vector: list, k: int = 5,
+               filters: dict | None = None) -> list:
         if self.client is None:
             return []
         try:
             handle = self._collection(collection, create=False)
             if handle is None:
                 return []
-            found = handle.query(
+            where = None
+            if filters:
+                clauses = [{str(key): value} for key, value in filters.items()]
+                where = clauses[0] if len(clauses) == 1 else {'$and': clauses}
+            query_options = dict(
                 query_embeddings=[vector],
                 n_results=max(1, k),
                 include=['documents', 'metadatas', 'distances'],
             )
+            if where is not None:
+                query_options['where'] = where
+            found = handle.query(**query_options)
         except Exception as error:
             logger.error('[vector-store] search failed for %s: %s', collection, error)
             return []
@@ -337,6 +350,11 @@ class ChromaVectorStore:
             return [item.name for item in self.client.list_collections()]
         except Exception:
             return []
+
+    def ensure_payload_indexes(self, collection: str, fields: dict[str, str]) -> bool:
+        """Chroma exact-match metadata filters need no separate schema."""
+        del collection, fields
+        return True
 
 
 
@@ -469,13 +487,14 @@ class QdrantVectorStore:
             metadatas=metadatas,
         )
 
-    def search_text(self, collection: str, text: str, k: int = 5) -> list:
+    def search_text(self, collection: str, text: str, k: int = 5,
+                    filters: dict | None = None) -> list:
         query = (
             self._document(text)
             if self.cloud_inference
             else _local_embedding_provider().embed_one(text)
         )
-        return self.search(collection, query, k=k)
+        return self.search(collection, query, k=k, filters=filters)
 
     def _collection_exists(self, collection: str) -> bool:
         if self.client is None:
@@ -539,18 +558,29 @@ class QdrantVectorStore:
             metadatas=[metadata or {}],
         )
 
-    def search(self, collection: str, vector, k: int = 5) -> list:
+    def search(self, collection: str, vector, k: int = 5,
+               filters: dict | None = None) -> list:
         if self.client is None or not self._collection_exists(collection):
             return []
         if self.cloud_inference and not isinstance(vector, qdrant_models.Document):
             logger.error('[vector-store] Qdrant Cloud search requires raw text inference')
             return []
         try:
+            query_filter = None
+            if filters:
+                query_filter = qdrant_models.Filter(must=[
+                    qdrant_models.FieldCondition(
+                        key=f'metadata.{key}',
+                        match=qdrant_models.MatchValue(value=value),
+                    )
+                    for key, value in filters.items()
+                ])
             response = self.client.query_points(
                 collection_name=collection,
                 query=vector,
                 limit=max(1, k),
                 with_payload=True,
+                query_filter=query_filter,
             )
             points = response.points
         except Exception as error:
@@ -686,6 +716,29 @@ class QdrantVectorStore:
             return [item.name for item in self.client.get_collections().collections]
         except Exception:
             return []
+
+    def ensure_payload_indexes(self, collection: str, fields: dict[str, str]) -> bool:
+        """Create the nested metadata indexes used by authorization filters."""
+        if self.client is None or not self._ensure_collection(collection):
+            return False
+        schemas = {
+            'keyword': qdrant_models.PayloadSchemaType.KEYWORD,
+            'integer': qdrant_models.PayloadSchemaType.INTEGER,
+        }
+        try:
+            for field, kind in fields.items():
+                self.client.create_payload_index(
+                    collection_name=collection,
+                    field_name=f'metadata.{field}',
+                    field_schema=schemas[kind],
+                    wait=True,
+                )
+            return True
+        except Exception as error:
+            # Qdrant treats an existing compatible index as idempotent on
+            # supported versions. Any other failure leaves the job retryable.
+            logger.error('[vector-store] payload index creation failed for %s: %s', collection, error)
+            return False
 
 
 def create_vector_store(config: dict | None = None) -> VectorStoreInterface:

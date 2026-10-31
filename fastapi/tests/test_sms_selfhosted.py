@@ -234,7 +234,7 @@ def test_bobbie_hands_meetings_to_a_person_without_touching_the_calendar(
     ])
     session.commit()
 
-    monkeypatch.setattr(bobbie, 'analyze_conversation_disposition', lambda *_: {
+    monkeypatch.setattr(bobbie, 'analyze_conversation_disposition', lambda *_, **__: {
         'action': 'continue',
         'intent': 'schedule_visit',
         'outcome': 'positive',
@@ -272,7 +272,7 @@ def test_bobbie_hands_meetings_to_a_person_without_touching_the_calendar(
     assert len(sent) == 1
     text, event_type = sent[0]
     assert event_type == 'ai.reply'
-    assert 'someone from our team' in text.lower()
+    assert 'Our team will reach out to coordinate' in text
     assert not any(char.isdigit() for char in text), 'Bobbie must not propose a time'
 
     followup = client.get(
@@ -280,7 +280,7 @@ def test_bobbie_hands_meetings_to_a_person_without_touching_the_calendar(
         headers=auth_header('agent@linchpinglobal.net'),
     )
     assert followup.status_code == 200, followup.text
-    assert followup.json()['reason_label'] == 'Location to confirm'
+    assert followup.json()['reason_label'] == 'Appointment to confirm'
     assert followup.json()['reason'] == 'location_discussion'
     assert followup.json()['awaiting_broker_reply'] is True
 

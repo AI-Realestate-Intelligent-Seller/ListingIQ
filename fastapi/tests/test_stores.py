@@ -90,15 +90,23 @@ def test_client_degrades_when_the_path_is_unusable():
     assert client.collections() == []
 
 
-def test_rag_service_uses_the_vector_store(tmp_path, monkeypatch):
-    monkeypatch.setitem(settings['vector_store'], 'path', str(tmp_path / 'chroma'))
-    from app.rag import RagService
+def test_rag_service_is_read_only_and_owner_scoped(tmp_path, monkeypatch):
+    """The legacy RAG facade can no longer write ownerless points; reads go through
+    the owner/brokerage/version-scoped agent search."""
+    from app import rag as rag_module
+    from app.sms.runtime_context import AgentRuntimeContext
 
-    rag = RagService()
-    rag.client = VectorStore(path=str(tmp_path / 'chroma'))
-    assert rag.index_document('doc-1', 'Commission depends on a written agreement.',
-                              {'source': 'fees'}) is True
-    assert rag.prompt_context('commission agreement')[0]['source'] == 'fees'
+    rag = rag_module.RagService()
+    assert not hasattr(rag, 'index_document')
+    calls = []
+    monkeypatch.setattr(rag_module, 'search_agent_knowledge',
+                        lambda query, context, limit=4: calls.append((query, context, limit)) or {
+                            'matches': [{'text': 'Commission depends on a written agreement.',
+                                         'owner_user_id': context.user_id}]})
+    context = AgentRuntimeContext(user_id=7, brokerage_id='b1', conversation_id=3, active_persona_id=1,
+                                  active_persona_version_id=2, agent_name='Agent', brokerage_name='', persona=None)
+    assert rag.prompt_context('commission agreement', context)[0]['owner_user_id'] == 7
+    assert calls == [('commission agreement', context, 5)]
 
 
 def test_relative_paths_resolve_against_the_backend_directory():

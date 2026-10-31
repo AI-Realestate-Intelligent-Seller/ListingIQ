@@ -23,7 +23,7 @@ const LEAD_STATUS_LABELS: Record<string, string> = {
   want_more_info: "Wants info",
   interested: "Interested",
   ready_to_sell: "Ready to sell",
-  location_discussion: "Location discussion",
+  location_discussion: "Appointment to confirm",
   not_interested: "Not interested",
   no_response: "No response",
   dnc: "Do not contact",

@@ -1,0 +1,301 @@
+{
+ "proposal": {
+  "draft_patch": {
+   "full_name": "Dana Lee",
+   "professional_title": "Associate Broker, Lee Homes",
+   "specialties": [
+    "condos",
+    "two-flats"
+   ],
+   "service_areas": [
+    "Lakeview",
+    "Uptown"
+   ],
+   "biography": "Twelve years on the North Side."
+  },
+  "style_patch": {},
+  "profile_patch": {
+   "identity": {
+    "license_number": "475.123456",
+    "licensing_jurisdiction": "Illinois",
+    "licensing_status": "Active"
+   },
+   "communication": {
+    "language_switching": "When I switch languages: "
+   }
+  },
+  "examples": [
+   {
+    "scenario": "Introducing myself to a new client",
+    "channel": "sms",
+    "language": "en",
+    "customer_message": "",
+    "preferred_response": "Hi! Dana Lee here — Lee Homes, North Side. 😊",
+    "context": "Answer to: How do you introduce yourself to a new client?",
+    "style_explanation": "",
+    "provenance": "illustrative",
+    "review_flags": [
+     "Channel was not stated in the document; stored as SMS until you confirm it",
+     "Language was not stated in the document; stored as English until you confirm it",
+     "The document does not say whether this example is authentic or illustrative; confirm its source",
+     "First-touch outreach: confirm the recipient's consent, quiet hours and opt-out wording comply with SMS/email rules before this is used"
+    ]
+   },
+   {
+    "scenario": "Property value question",
+    "channel": "sms",
+    "language": "en",
+    "customer_message": "",
+    "preferred_response": "Great question… let me pull 3 recent sales first:\n1. Same block\n2. Same size\nThen I'll text you a range, OK?",
+    "context": "Answer to: How would you reply when someone asks about their property's value?\nReply to a customer; their message was not included",
+    "style_explanation": "",
+    "provenance": "illustrative",
+    "review_flags": [
+     "Channel was not stated in the document; stored as SMS until you confirm it",
+     "Language was not stated in the document; stored as English until you confirm it",
+     "The document does not say whether this example is authentic or illustrative; confirm its source"
+    ]
+   },
+   {
+    "scenario": "Interested but hesitant",
+    "channel": "sms",
+    "language": "en",
+    "customer_message": "",
+    "preferred_response": "No rush at all. Want me to check back in a month?",
+    "context": "Answer to: What would you say to someone who is interested but hesitant?\nReply to a customer; their message was not included",
+    "style_explanation": "",
+    "provenance": "illustrative",
+    "review_flags": [
+     "Channel was not stated in the document; stored as SMS until you confirm it",
+     "Language was not stated in the document; stored as English until you confirm it",
+     "The document does not say whether this example is authentic or illustrative; confirm its source"
+    ]
+   },
+   {
+    "scenario": "Commission or pricing objection",
+    "channel": "sms",
+    "language": "en",
+    "customer_message": "",
+    "preferred_response": "Totally fair. Here's what that fee covers — pricing, marketing & a buyer who can close.",
+    "context": "Answer to: How would you respond to a commission or pricing objection?\nReply to a customer; their message was not included",
+    "style_explanation": "",
+    "provenance": "illustrative",
+    "review_flags": [
+     "Channel was not stated in the document; stored as SMS until you confirm it",
+     "Language was not stated in the document; stored as English until you confirm it",
+     "The document does not say whether this example is authentic or illustrative; confirm its source"
+    ]
+   },
+   {
+    "scenario": "Following up after no reply",
+    "channel": "sms",
+    "language": "en",
+    "customer_message": "",
+    "preferred_response": "Hey Sam, just bumping this up :) still thinking about selling?",
+    "context": "Answer to: How would you follow up with someone who hasn't replied?",
+    "style_explanation": "",
+    "provenance": "illustrative",
+    "review_flags": [
+     "Channel was not stated in the document; stored as SMS until you confirm it",
+     "Language was not stated in the document; stored as English until you confirm it",
+     "The document does not say whether this example is authentic or illustrative; confirm its source",
+     "First-touch outreach: confirm the recipient's consent, quiet hours and opt-out wording comply with SMS/email rules before this is used"
+    ]
+   },
+   {
+    "scenario": "Upset customer",
+    "channel": "sms",
+    "language": "en",
+    "customer_message": "",
+    "preferred_response": "I'm so sorry!! I'll call you myself in 10 minutes.",
+    "context": "Answer to: How would you respond to an upset customer?\nReply to a customer; their message was not included",
+    "style_explanation": "",
+    "provenance": "illustrative",
+    "review_flags": [
+     "Channel was not stated in the document; stored as SMS until you confirm it",
+     "Language was not stated in the document; stored as English until you confirm it",
+     "The document does not say whether this example is authentic or illustrative; confirm its source"
+    ]
+   },
+   {
+    "scenario": "Suggesting an appointment",
+    "channel": "sms",
+    "language": "ko",
+    "customer_message": "",
+    "preferred_response": "안녕하세요 사장님! 내일 오후 2시 괜찮으세요?",
+    "context": "Answer to: How would you suggest an appointment?\nReply to a customer; their message was not included",
+    "style_explanation": "",
+    "provenance": "illustrative",
+    "review_flags": [
+     "Channel was not stated in the document; stored as SMS until you confirm it",
+     "Language was not stated; the reply is written in Korean. Confirm the language",
+     "The document does not say whether this example is authentic or illustrative; confirm its source"
+    ]
+   },
+   {
+    "scenario": "Price drop alert",
+    "channel": "sms",
+    "language": "en",
+    "customer_message": "Any news?",
+    "preferred_response": "Yes — 2 new listings near you.",
+    "context": "",
+    "style_explanation": "",
+    "provenance": "user_written",
+    "review_flags": [
+     "Marked authentic by extraction; imported examples stay unconfirmed until the owner confirms authenticity"
+    ]
+   },
+   {
+    "scenario": "Email recap after a showing",
+    "channel": "email",
+    "language": "en",
+    "customer_message": "",
+    "preferred_response": "Hi Sam,\n\nThanks for today. Notes attached.\n\nDana",
+    "context": "after a showing",
+    "style_explanation": "",
+    "provenance": "illustrative",
+    "review_flags": [
+     "First-touch outreach: confirm the recipient's consent, quiet hours and opt-out wording comply with SMS/email rules before this is used"
+    ]
+   },
+   {
+    "scenario": "Spanish-speaking buyer",
+    "channel": "sms",
+    "language": "es",
+    "customer_message": "¿Sigue disponible?",
+    "preferred_response": "¡Sí! ¿Le gustaría verla mañana?",
+    "context": "",
+    "style_explanation": "",
+    "provenance": "illustrative",
+    "review_flags": []
+   }
+  ],
+  "evidence": [
+   {
+    "field_path": "draft.full_name",
+    "source_excerpt": "Dana Lee",
+    "confidence": "medium",
+    "needs_owner_confirmation": true
+   },
+   {
+    "field_path": "draft.professional_title",
+    "source_excerpt": "Associate Broker, Lee Homes",
+    "confidence": "medium",
+    "needs_owner_confirmation": true
+   },
+   {
+    "field_path": "profile_config.identity.license_number",
+    "source_excerpt": "Number: 475.123456 Jurisdiction: Illinois Status: Active",
+    "confidence": "high",
+    "needs_owner_confirmation": false
+   },
+   {
+    "field_path": "profile_config.identity.licensing_jurisdiction",
+    "source_excerpt": "Number: 475.123456 Jurisdiction: Illinois Status: Active",
+    "confidence": "high",
+    "needs_owner_confirmation": false
+   },
+   {
+    "field_path": "profile_config.identity.licensing_status",
+    "source_excerpt": "Number: 475.123456 Jurisdiction: Illinois Status: Active",
+    "confidence": "high",
+    "needs_owner_confirmation": false
+   },
+   {
+    "field_path": "draft.specialties",
+    "source_excerpt": "condos, two-flats",
+    "confidence": "medium",
+    "needs_owner_confirmation": true
+   },
+   {
+    "field_path": "draft.service_areas",
+    "source_excerpt": "Lakeview, Uptown",
+    "confidence": "medium",
+    "needs_owner_confirmation": true
+   },
+   {
+    "field_path": "draft.biography",
+    "source_excerpt": "Twelve years on the North Side.",
+    "confidence": "high",
+    "needs_owner_confirmation": false
+   },
+   {
+    "field_path": "profile_config.communication.language_switching",
+    "source_excerpt": "When I switch languages: ",
+    "confidence": "high",
+    "needs_owner_confirmation": false
+   },
+   {
+    "field_path": "examples[0]",
+    "source_excerpt": "Hi! Dana Lee here — Lee Homes, North Side. 😊",
+    "confidence": "high",
+    "needs_owner_confirmation": false
+   },
+   {
+    "field_path": "examples[1]",
+    "source_excerpt": "Great question… let me pull 3 recent sales first:\n1. Same block\n2. Same size\nThen I'll text you a range, OK?",
+    "confidence": "high",
+    "needs_owner_confirmation": false
+   },
+   {
+    "field_path": "examples[2]",
+    "source_excerpt": "No rush at all. Want me to check back in a month?",
+    "confidence": "high",
+    "needs_owner_confirmation": false
+   },
+   {
+    "field_path": "examples[3]",
+    "source_excerpt": "Totally fair. Here's what that fee covers — pricing, marketing & a buyer who can close.",
+    "confidence": "high",
+    "needs_owner_confirmation": false
+   },
+   {
+    "field_path": "examples[4]",
+    "source_excerpt": "Hey Sam, just bumping this up :) still thinking about selling?",
+    "confidence": "high",
+    "needs_owner_confirmation": false
+   },
+   {
+    "field_path": "examples[5]",
+    "source_excerpt": "I'm so sorry!! I'll call you myself in 10 minutes.",
+    "confidence": "high",
+    "needs_owner_confirmation": false
+   },
+   {
+    "field_path": "examples[6]",
+    "source_excerpt": "안녕하세요 사장님! 내일 오후 2시 괜찮으세요?",
+    "confidence": "high",
+    "needs_owner_confirmation": false
+   },
+   {
+    "field_path": "examples[7]",
+    "source_excerpt": "Yes — 2 new listings near you.",
+    "confidence": "high",
+    "needs_owner_confirmation": false
+   },
+   {
+    "field_path": "examples[8]",
+    "source_excerpt": "Hi Sam,\n\nThanks for today. Notes attached.\n\nDana",
+    "confidence": "high",
+    "needs_owner_confirmation": false
+   },
+   {
+    "field_path": "examples[9]",
+    "source_excerpt": "¡Sí! ¿Le gustaría verla mañana?",
+    "confidence": "high",
+    "needs_owner_confirmation": false
+   }
+  ],
+  "claims": [],
+  "unmapped_details": [],
+  "source_file": {
+   "name": "dana.docx",
+   "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+  }
+ },
+ "assessment": {
+  "missing_questions": [
+   "Confirm your professional role (for example broker or agent)"
+  ]
+ }
+}

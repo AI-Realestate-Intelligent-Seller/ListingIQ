@@ -14,6 +14,7 @@ from app.ai import client as ai_client
 from app.leads import reason_suggest
 from app.sms import bobbie, reply_suggest, service
 from app.sms.deepseek import AiUnavailableError
+from test_ai_review_evidence import LEGACY_AGENT  # noqa: E402  trusted test identity
 
 
 def test_ai_features_bind_to_the_provider_neutral_client():
@@ -73,7 +74,7 @@ def test_disposition_normalizes_a_valid_structured_response(monkeypatch, convers
 
     monkeypatch.setattr(bobbie, 'completion', fake_completion)
 
-    result = bobbie.analyze_conversation_disposition(conversation, history)
+    result = bobbie.analyze_conversation_disposition(conversation, history, agent_context=LEGACY_AGENT)
 
     assert result['action'] == 'continue'
     assert result['lead_status'] == 'interested'
@@ -94,7 +95,7 @@ def test_disposition_uses_the_deterministic_fallback_for_malformed_json(
         monkeypatch, conversation, history):
     monkeypatch.setattr(bobbie, 'completion', lambda *_args, **_kwargs: {'content': 'not json'})
 
-    result = bobbie.analyze_conversation_disposition(conversation, history)
+    result = bobbie.analyze_conversation_disposition(conversation, history, agent_context=LEGACY_AGENT)
 
     assert result['action'] == 'continue'
     assert result['calendar']['state'] == 'none'
@@ -150,7 +151,7 @@ def test_explicit_stop_bypasses_every_llm_stage(monkeypatch, conversation):
 def test_reply_generation_dispatches_tools_and_returns_the_followup_completion(
         monkeypatch, conversation, history):
     calls = []
-    monkeypatch.setattr(bobbie.knowledge, 'needs_bobbie_knowledge', lambda _text: False)
+    monkeypatch.setattr(bobbie.knowledge, 'needs_agent_knowledge', lambda _text: False)
 
     def fake_completion(messages, **options):
         calls.append((messages, options))
@@ -167,7 +168,7 @@ def test_reply_generation_dispatches_tools_and_returns_the_followup_completion(
 
     monkeypatch.setattr(bobbie, 'completion', fake_completion)
 
-    result = bobbie.generate_ai_reply(conversation, history)
+    result = bobbie.generate_ai_reply(conversation, history, agent_context=LEGACY_AGENT)
 
     assert result
     assert len(calls) == 2
@@ -184,7 +185,7 @@ def test_reply_generation_dispatches_tools_and_returns_the_followup_completion(
 def test_reply_generation_executes_multiple_tools_before_continuing(
         monkeypatch, conversation, history):
     calls = []
-    monkeypatch.setattr(bobbie.knowledge, 'needs_bobbie_knowledge', lambda _text: False)
+    monkeypatch.setattr(bobbie.knowledge, 'needs_agent_knowledge', lambda _text: False)
     monkeypatch.setattr(
         bobbie.knowledge,
         'search_bobbie_knowledge',
@@ -206,7 +207,7 @@ def test_reply_generation_executes_multiple_tools_before_continuing(
                         'id': 'tool-call-knowledge',
                         'type': 'function',
                         'function': {
-                            'name': 'search_bobbie_knowledge',
+                            'name': 'search_agent_knowledge',
                             'arguments': '{"query":"commission"}',
                         },
                     },
@@ -216,7 +217,7 @@ def test_reply_generation_executes_multiple_tools_before_continuing(
 
     monkeypatch.setattr(bobbie, 'completion', fake_completion)
 
-    result = bobbie.generate_ai_reply(conversation, history)
+    result = bobbie.generate_ai_reply(conversation, history, agent_context=LEGACY_AGENT)
 
     assert result
     assert len(calls) == 2
@@ -233,10 +234,10 @@ def test_empty_reply_is_retried_once_with_the_existing_contract(
         {'content': ''},
         {'content': 'What timing would work best for you?'},
     ])
-    monkeypatch.setattr(bobbie.knowledge, 'needs_bobbie_knowledge', lambda _text: False)
+    monkeypatch.setattr(bobbie.knowledge, 'needs_agent_knowledge', lambda _text: False)
     monkeypatch.setattr(bobbie, 'completion', lambda *_args, **_kwargs: next(replies))
 
-    assert bobbie.generate_ai_reply(conversation, history)
+    assert bobbie.generate_ai_reply(conversation, history, agent_context=LEGACY_AGENT)
 
 
 def test_reply_policy_violation_runs_the_existing_repair_call(
@@ -245,10 +246,10 @@ def test_reply_policy_violation_runs_the_existing_repair_call(
         {'content': 'I charge exactly 3% commission.'},
         {'content': 'I can explain the options after seeing the property.'},
     ])
-    monkeypatch.setattr(bobbie.knowledge, 'needs_bobbie_knowledge', lambda _text: False)
+    monkeypatch.setattr(bobbie.knowledge, 'needs_agent_knowledge', lambda _text: False)
     monkeypatch.setattr(bobbie, 'completion', lambda *_args, **_kwargs: next(replies))
 
-    result = bobbie.generate_ai_reply(conversation, history)
+    result = bobbie.generate_ai_reply(conversation, history, agent_context=LEGACY_AGENT)
 
     assert '3%' not in result
     assert result
@@ -256,7 +257,7 @@ def test_reply_policy_violation_runs_the_existing_repair_call(
 
 def test_reply_generation_propagates_provider_unavailability(
         monkeypatch, conversation, history):
-    monkeypatch.setattr(bobbie.knowledge, 'needs_bobbie_knowledge', lambda _text: False)
+    monkeypatch.setattr(bobbie.knowledge, 'needs_agent_knowledge', lambda _text: False)
 
     def unavailable(*_args, **_kwargs):
         raise AiUnavailableError('provider unavailable')
@@ -264,7 +265,7 @@ def test_reply_generation_propagates_provider_unavailability(
     monkeypatch.setattr(bobbie, 'completion', unavailable)
 
     with pytest.raises(AiUnavailableError):
-        bobbie.generate_ai_reply(conversation, history)
+        bobbie.generate_ai_reply(conversation, history, agent_context=LEGACY_AGENT)
 
 
 def test_review_accepts_valid_json_and_keeps_a_policy_checked_draft(
@@ -281,39 +282,52 @@ def test_review_accepts_valid_json_and_keeps_a_policy_checked_draft(
     result = bobbie.review_ai_reply(
         conversation, history, 'What timing would work best?',
         {'next_step': 'answer_and_qualify'},
-    )
+    agent_context=LEGACY_AGENT)
 
     assert result['valid'] is True
     assert result['issues'] == []
 
 
 @pytest.mark.parametrize('content', ['', 'not json', '{"valid":'])
-def test_malformed_review_response_keeps_the_policy_checked_draft(
+def test_malformed_review_response_withholds_the_draft(
         monkeypatch, conversation, history, content):
+    # Fail closed: an unreadable verdict is never treated as approval (release blocker fix).
     monkeypatch.setattr(bobbie, 'completion', lambda *_args, **_kwargs: {'content': content})
 
-    result = bobbie.review_ai_reply(
-        conversation, history, 'What timing would work best?',
-        {'next_step': 'answer_and_qualify'},
-    )
+    with pytest.raises(bobbie.ReviewUnavailableError):
+        bobbie.review_ai_reply(
+            conversation, history, 'What timing would work best?',
+            {'next_step': 'answer_and_qualify'},
+            agent_context=LEGACY_AGENT)
+    with pytest.raises(bobbie.ReviewUnavailableError):
+        bobbie.review_and_repair_ai_reply(
+            conversation, history, 'What timing would work best?',
+            {'next_step': 'answer_and_qualify'},
+            agent_context=LEGACY_AGENT)
 
-    assert result['valid'] is True
-    assert result['issues'] == []
-    assert 'unavailable' in result['reason'].lower()
+
+REJECTION = {
+    'valid': False,
+    'issues': ['did_not_answer_owner'],
+    'rewrite_instruction': 'Answer the condition first.',
+    'reason': 'The draft skipped the owner condition.',
+}
 
 
-def test_rejected_review_invokes_one_fresh_generation(
+def test_rejected_review_invokes_one_fresh_generation_that_is_reviewed_again(
         monkeypatch, conversation, history):
-    monkeypatch.setattr(bobbie, 'review_ai_reply', lambda *_args, **_kwargs: {
-        'valid': False,
-        'issues': ['did_not_answer_owner'],
-        'rewrite_instruction': 'Answer the condition first.',
-        'reason': 'The draft skipped the owner condition.',
-    })
-    seen = {}
+    verdicts = [REJECTION, {'valid': True, 'issues': [], 'rewrite_instruction': '', 'reason': 'ok'}]
+    reviewed = []
+
+    def fake_review(_conversation, _history, draft, *_args, **_kwargs):
+        reviewed.append(draft)
+        return verdicts.pop(0)
+
+    monkeypatch.setattr(bobbie, 'review_ai_reply', fake_review)
+    seen = []
 
     def fake_generate(*args, **kwargs):
-        seen['args'] = args
+        seen.append(args)
         return 'I understand the condition. What timing would work best?'
 
     monkeypatch.setattr(bobbie, 'generate_ai_reply', fake_generate)
@@ -321,10 +335,24 @@ def test_rejected_review_invokes_one_fresh_generation(
     result = bobbie.review_and_repair_ai_reply(
         conversation, history, 'Could I stop by?',
         {'next_step': 'answer_and_qualify'},
-    )
+        agent_context=LEGACY_AGENT)
 
-    assert result
-    assert 'Independent reviewer rejected' in seen['args'][3]
+    assert result == 'I understand the condition. What timing would work best?'
+    assert len(seen) == 1 and 'Independent reviewer found blocking issues' in seen[0][3]
+    assert reviewed == ['Could I stop by?', result]
+
+
+def test_persistent_rejection_is_bounded_and_returns_no_draft(monkeypatch, conversation, history):
+    monkeypatch.setattr(bobbie, 'review_ai_reply', lambda *_args, **_kwargs: dict(REJECTION))
+    generated = []
+    monkeypatch.setattr(bobbie, 'generate_ai_reply',
+                        lambda *args, **kwargs: generated.append(1) or f'Attempt {len(generated)}.')
+
+    with pytest.raises(bobbie.ReviewRejectedError):
+        bobbie.review_and_repair_ai_reply(
+            conversation, history, 'Could I stop by?', {'next_step': 'answer_and_qualify'},
+            agent_context=LEGACY_AGENT)
+    assert len(generated) == bobbie.MAX_REVIEW_REGENERATIONS
 
 
 def test_followup_generation_falls_back_without_failing_delivery_work(
@@ -334,7 +362,7 @@ def test_followup_generation_falls_back_without_failing_delivery_work(
 
     monkeypatch.setattr(bobbie, 'completion', unavailable)
 
-    result = bobbie.generate_no_response_followup(conversation, history, attempt=1, maximum=3)
+    result = bobbie.generate_no_response_followup(conversation, history, attempt=1, maximum=3, agent_context=LEGACY_AGENT)
 
     assert conversation.property_address in result
     assert len(result) <= 240

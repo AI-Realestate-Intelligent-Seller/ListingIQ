@@ -1,4 +1,4 @@
-"""Calendar access for the Bobbie pipeline.
+"""Calendar access for the agent SMS pipeline.
 
 By default the calendar runs in-process (calendar_service). Setting
 CALENDAR_API_URL delegates to the standalone Simulation/calendar.py service
@@ -12,6 +12,7 @@ import requests
 from ..core.config import settings
 from ..logger import get_logger, log_event
 from . import calendar_service
+from .runtime_context import AgentRuntimeContext
 
 logger = get_logger(__name__)
 
@@ -47,7 +48,14 @@ def fetch_availability(session=None, user_id: int | None = None) -> dict:
     return payload
 
 
-def create_booking(conversation, slot: dict, session=None) -> dict:
+def create_booking(
+    conversation,
+    slot: dict,
+    session=None,
+    agent_context: AgentRuntimeContext | None = None,
+) -> dict:
+    agent_name = agent_context.agent_name if agent_context else 'your agent'
+    title = f'Property visit with {agent_name}'
     log_event(logger, 'sms.calendar.booking.started', conversation_id=getattr(conversation, 'id', None),
               user_id=conversation.user_id, source='http' if _base_url() else 'in_process',
               start_at=slot.get('start_at'), end_at=slot.get('end_at'))
@@ -58,7 +66,7 @@ def create_booking(conversation, slot: dict, session=None) -> dict:
                 user_id=conversation.user_id,
                 phone=conversation.contact,
                 name=conversation.name or '',
-                title='Property visit with Bobbie',
+                title=title,
                 start_at=slot.get('start_at'),
                 end_at=slot.get('end_at'),
                 location_address=getattr(conversation, 'property_address', None),
@@ -67,7 +75,8 @@ def create_booking(conversation, slot: dict, session=None) -> dict:
             raise SlotTakenError(str(error)) from error
         # The confirmation SMS is sent by the caller through the normal pipeline,
         # so no separate delivery hop is involved.
-        result = {**booking, 'message': calendar_service.confirmation_message(booking),
+        result = {**booking, 'message': calendar_service.confirmation_message(
+                      booking, host=agent_name),
                   'confirmation_sent': False}
         log_event(logger, 'sms.calendar.booking.completed', conversation_id=getattr(conversation, 'id', None),
                   source='in_process', booking_id=booking.get('id'), start_at=booking.get('start_at'))
@@ -78,7 +87,7 @@ def create_booking(conversation, slot: dict, session=None) -> dict:
         json={
             'phone': conversation.contact,
             'name': conversation.name or '',
-            'title': 'Property visit with Bobbie',
+            'title': title,
             'start_at': slot.get('start_at'),
             'end_at': slot.get('end_at'),
             'location_address': getattr(conversation, 'property_address', None),

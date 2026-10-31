@@ -2,15 +2,16 @@
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..core.email import EmailDeliveryError, send_reply_notification_email
 from ..leads import events as lead_events
 from ..logger import get_logger, log_event
-from ..models import Campaign, Conversation, Lead, LeadEvent, Message, User
+from ..models import Campaign, Conversation, InboundSmsEvent, Lead, LeadEvent, Message, User
 from ..reminder.notification import notify_conversation_reply
 from ..sms import service
 from ..sms.followup_scheduler import cancel_followup_cadence
@@ -423,7 +424,55 @@ async def telnyx_webhook(
         handled_by=conversation.handled_by,
     )
 
-    message = Message(
+    if not inbound.get('telnyx_id'):
+        # Without a provider ID a redelivery cannot be recognised (legacy and
+        # simulator payloads), so these keep the original single-pass flow.
+        message = _new_inbound_message(conversation, inbound)
+        db.add(message)
+        db.commit()
+        db.refresh(message)
+        return _process_inbound(db, background, conversation, message, inbound)
+
+    outcome, event_id, message = _claim_inbound(db, conversation, inbound)
+    if outcome in ('duplicate', 'in_progress'):
+        log_event(
+            logger,
+            'sms.inbound.duplicate',
+            outcome=outcome,
+            provider_message_id=inbound['telnyx_id'],
+            conversation_id=conversation.id,
+            message_id=message.id if message else None,
+        )
+        if outcome == 'in_progress':
+            # Another request owns this event right now. A non-2xx makes Telnyx
+            # retry later, so the reply is not lost if that request fails.
+            raise HTTPException(
+                status_code=503,
+                detail='This message is already being processed',
+                headers={'Retry-After': '30'},
+            )
+        return {
+            'ok': True,
+            'duplicate': True,
+            'message_id': message.id if message else None,
+            'conversation_id': conversation.id,
+        }
+
+    try:
+        result = _process_inbound(db, background, conversation, message, inbound)
+        _finish_claim(db, event_id)
+    except Exception as error:
+        # The message stays stored. Mark the event failed so Telnyx's retry
+        # resumes processing on this same message instead of storing a new one.
+        _fail_claim(db, event_id, error)
+        raise
+    if outcome == 'retry':
+        result['retried'] = True
+    return result
+
+
+def _new_inbound_message(conversation: Conversation, inbound: dict) -> Message:
+    return Message(
         conversation_id=conversation.id,
         direction='inbound',
         from_number=inbound['from_number'],
@@ -435,10 +484,142 @@ async def telnyx_webhook(
         created_at=datetime.utcnow(),
     )
 
-    db.add(message)
-    db.commit()
-    db.refresh(message)
 
+# A claim still "processing" after this long belongs to a request that died
+# without recording a failure, so a retry may take it over.
+_CLAIM_STALE_AFTER = timedelta(seconds=60)
+
+
+def _claim_inbound(db: Session, conversation: Conversation, inbound: dict):
+    """Claim this provider message for one request.
+
+    Returns ``(outcome, event_id, message)``:
+
+    - ``new``: first delivery; the message was stored with the claim.
+    - ``retry``: an earlier attempt stored the message but failed (or died)
+      before finishing; this request resumes with that same message.
+    - ``duplicate``: already processed; do nothing.
+    - ``in_progress``: another request is processing it right now.
+
+    The unique key on ``inbound_sms_events`` makes this safe when duplicates
+    arrive at the same time: exactly one insert succeeds.
+    """
+    provider_id = inbound['telnyx_id']
+    from_number = inbound['from_number']
+    now = datetime.utcnow()
+    # Inbound rows stored before this table existed have no event. Treat them
+    # as already handled rather than replying to an old message again.
+    legacy = (
+        db.query(Message)
+        .filter(
+            Message.direction == 'inbound',
+            Message.telnyx_id == provider_id,
+            Message.from_number == from_number,
+        )
+        .order_by(Message.id.desc())
+        .first()
+    )
+    event = InboundSmsEvent(
+        provider_message_id=provider_id,
+        from_number=from_number,
+        conversation_id=conversation.id,
+        message_id=legacy.id if legacy else None,
+        status='processed' if legacy else 'processing',
+        attempts=1,
+        claimed_at=now,
+        processed_at=now if legacy else None,
+        created_at=now,
+    )
+    db.add(event)
+    try:
+        db.flush()
+        message = legacy
+        if legacy is None:
+            message = _new_inbound_message(conversation, inbound)
+            db.add(message)
+            db.flush()
+            event.message_id = message.id
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+    else:
+        db.refresh(message)
+        return ('duplicate' if legacy else 'new'), event.id, message
+
+    existing = (
+        db.query(InboundSmsEvent)
+        .filter(
+            InboundSmsEvent.provider_message_id == provider_id,
+            InboundSmsEvent.from_number == from_number,
+        )
+        .one()
+    )
+    message = db.get(Message, existing.message_id) if existing.message_id else None
+    if existing.status == 'processed' or message is None:
+        return 'duplicate', existing.id, message
+    if existing.status == 'processing' and existing.claimed_at > now - _CLAIM_STALE_AFTER:
+        return 'in_progress', existing.id, message
+
+    # Failed or abandoned: take it over. Matching on the attempt number means
+    # only one of several simultaneous retries wins.
+    taken = (
+        db.query(InboundSmsEvent)
+        .filter(
+            InboundSmsEvent.id == existing.id,
+            InboundSmsEvent.status == existing.status,
+            InboundSmsEvent.attempts == existing.attempts,
+        )
+        .update(
+            {
+                InboundSmsEvent.status: 'processing',
+                InboundSmsEvent.attempts: existing.attempts + 1,
+                InboundSmsEvent.claimed_at: now,
+            },
+            synchronize_session=False,
+        )
+    )
+    db.commit()
+    if not taken:
+        return 'in_progress', existing.id, message
+    log_event(
+        logger,
+        'sms.inbound.retry_resumed',
+        provider_message_id=provider_id,
+        message_id=message.id,
+        attempt=existing.attempts + 1,
+    )
+    return 'retry', existing.id, message
+
+
+def _finish_claim(db: Session, event_id: int) -> None:
+    db.query(InboundSmsEvent).filter(InboundSmsEvent.id == event_id).update(
+        {InboundSmsEvent.status: 'processed', InboundSmsEvent.processed_at: datetime.utcnow(),
+         InboundSmsEvent.last_error: None},
+        synchronize_session=False,
+    )
+    db.commit()
+
+
+def _fail_claim(db: Session, event_id: int, error: Exception) -> None:
+    try:
+        db.rollback()
+        db.query(InboundSmsEvent).filter(
+            InboundSmsEvent.id == event_id,
+            InboundSmsEvent.status == 'processing',
+        ).update(
+            {InboundSmsEvent.status: 'failed',
+             InboundSmsEvent.last_error: f'{type(error).__name__}: {error}'[:500]},
+            synchronize_session=False,
+        )
+        db.commit()
+    except Exception:  # the original error matters more; the claim goes stale instead
+        db.rollback()
+        logger.exception('Could not mark inbound SMS event %s as failed', event_id)
+
+
+def _process_inbound(db: Session, background: BackgroundTasks, conversation: Conversation,
+                     message: Message, inbound: dict) -> dict:
+    """Everything after the inbound message is stored: notify, email, classify, AI."""
     is_first_reply = not db.query(Message.id).filter(
         Message.conversation_id == conversation.id,
         Message.direction == 'inbound',

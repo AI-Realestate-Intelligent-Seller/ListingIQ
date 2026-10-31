@@ -16,8 +16,22 @@ import requests
 from app.core.config import settings
 from app.models import Conversation, Message
 from app.sms import bobbie, service
+from app.sms.runtime_context import AgentRuntimeContext
 
 PROVIDERS = [('deepseek', 'deepseek-v4-flash'), ('anthropic', 'claude-haiku-5-5')]
+# These recorded scenarios speak as Bobbie Fisher. Identity is no longer a module
+# constant: production resolves it from Conversation.user_id into a trusted
+# AgentRuntimeContext, so the tests construct that context explicitly. Without a
+# trusted brokerage in the account, no brokerage may be stated.
+LEGACY_AGENT = AgentRuntimeContext(
+    user_id=101, brokerage_id='brokerage-legacy', conversation_id=None,
+    active_persona_id=7, active_persona_version_id=70,
+    agent_name='Bobbie Fisher', brokerage_name='', persona=None, examples=(),
+)
+# The same agent once the account's trusted brokerage is Real Broker LLC
+# (replaces the retired BOBBIE_APPROVED_BROKERAGE setting).
+LEGACY_AGENT_REAL_BROKER = AgentRuntimeContext(
+    **{**LEGACY_AGENT.__dict__, 'brokerage_name': 'Real Broker LLC'})
 CONVERSATION = SimpleNamespace(
     contact='+10000000000', name='Owner', property_address='1 Test St',
     lead_status='processing', lead_context=json.dumps({'available': True}),
@@ -57,7 +71,7 @@ def _claude_text(content):
 @pytest.fixture
 def offline(monkeypatch):
     """Fake provider HTTP plus a counted, fake knowledge search."""
-    state = {'bodies': [], 'replies': [], 'searches': [], 'knowledge': KNOWLEDGE}
+    state = {'bodies': [], 'replies': [], 'searches': [], 'contexts': [], 'knowledge': KNOWLEDGE}
 
     class Reply:
         ok = True
@@ -84,8 +98,18 @@ def offline(monkeypatch):
             raise state['knowledge']
         return json.loads(json.dumps(state['knowledge']))
 
+    def fake_agent_search(query, context, limit=4, **_options):
+        # The generic, owner-scoped search receives only the trusted context.
+        assert isinstance(context, AgentRuntimeContext)
+        state['contexts'].append(context)
+        return fake_search(query, limit)
+
+    def refuse_legacy_search(*_args, **_kwargs):
+        raise AssertionError('the live pipeline must not search ownerless Bobbie knowledge')
+
     monkeypatch.setattr(requests, 'post', fake_post)
-    monkeypatch.setattr(bobbie.knowledge, 'search_bobbie_knowledge', fake_search)
+    monkeypatch.setattr(bobbie.knowledge, 'search_agent_knowledge', fake_agent_search)
+    monkeypatch.setattr(bobbie.knowledge, 'search_bobbie_knowledge', refuse_legacy_search)
     # The prompt states the time to the second; pin it so request bodies compare exactly.
     monkeypatch.setattr('app.sms.prompt._formatted_now',
                         lambda _tz: 'Monday, January 5, 2026 at 9:00:00 AM CST')
@@ -109,7 +133,7 @@ def _generator_knowledge(body):
     texts = ([item['text'] for item in body.get('system', [])] if 'system' in body
              else [item['content'] for item in body['messages'] if item['role'] == 'system'])
     context = next(text for text in texts if text.startswith(prefix))
-    return json.loads(context[len(prefix):])['bobbie_knowledge']
+    return json.loads(context[len(prefix):])['agent_knowledge']
 
 
 def _review_payload(body):
@@ -142,11 +166,12 @@ def _knowledge(tag, text=None):
 def _sequenced_search(monkeypatch, state, results):
     queue = list(results)
 
-    def search(query, limit=4):
+    def search(query, context, limit=4, **_options):
         state['searches'].append((query, limit))
+        state['contexts'].append(context)
         return copy.deepcopy(queue.pop(0))
 
-    monkeypatch.setattr(bobbie.knowledge, 'search_bobbie_knowledge', search)
+    monkeypatch.setattr(bobbie.knowledge, 'search_agent_knowledge', search)
 
 
 def _capture_sent(monkeypatch):
@@ -162,13 +187,13 @@ def _capture_sent(monkeypatch):
 def _knowledge_tool_turn(provider, *queries):
     if provider == 'anthropic':
         return {**_claude_text(''), 'stop_reason': 'tool_use', 'content': [
-            {'type': 'tool_use', 'id': f'toolu_{query}', 'name': 'search_bobbie_knowledge',
+            {'type': 'tool_use', 'id': f'toolu_{query}', 'name': 'search_agent_knowledge',
              'input': {'query': query}}
             for query in queries
         ]}
     return {'role': 'assistant', 'content': None, 'tool_calls': [
         {'id': f'call_{query}', 'type': 'function', 'function': {
-            'name': 'search_bobbie_knowledge', 'arguments': json.dumps({'query': query})}}
+            'name': 'search_agent_knowledge', 'arguments': json.dumps({'query': query})}}
         for query in queries
     ]}
 
@@ -176,10 +201,10 @@ def _knowledge_tool_turn(provider, *queries):
 def _generate_then_review(draft_reply, review_reply, state, **review_kwargs):
     state['replies'] = [draft_reply, review_reply]
     evidence = []
-    draft = bobbie.generate_ai_reply(CONVERSATION, HISTORY, evidence_out=evidence)
+    draft = bobbie.generate_ai_reply(CONVERSATION, HISTORY, evidence_out=evidence, agent_context=LEGACY_AGENT)
     result = bobbie.review_and_repair_ai_reply(
         CONVERSATION, HISTORY, draft, {'next_step': 'answer_and_qualify'},
-        knowledge_evidence=evidence, **review_kwargs)
+        knowledge_evidence=evidence, **{'agent_context': LEGACY_AGENT, **review_kwargs})
     return draft, result, evidence
 
 
@@ -198,7 +223,7 @@ def test_reviewer_receives_the_same_evidence_the_draft_used(offline, monkeypatch
     assert payload['approved_knowledge_evidence'][0]['document_status'] == KNOWLEDGE['document_status']
     assert payload['approved_knowledge_evidence'][0]['matches'][0]['page'] == 13
     assert payload['evidence_rules'] == bobbie.review_evidence_rules()
-    assert payload['proposed_bobbie_reply'] == SUPPORTED_DRAFT
+    assert payload['proposed_agent_reply'] == SUPPORTED_DRAFT
 
 
 # Test B: a supported draft accepted by the reviewer is sent unchanged, no regeneration.
@@ -217,16 +242,20 @@ def test_supported_claims_accepted_by_review_are_kept(offline, monkeypatch, prov
 def test_unsupported_claims_are_still_rejected(offline, monkeypatch, provider, model):
     use(monkeypatch, provider, model)
     offline['replies'] = ["I'm Bobbie Fisher, the #1 broker in Illinois. What price?", REJECTED,
-                          "I'm Bobbie Fisher with RE/MAX Premier. What price are you hoping for?"]
+                          "I'm Bobbie Fisher with RE/MAX Premier. What price are you hoping for?", VALID]
     evidence = []
-    draft = bobbie.generate_ai_reply(CONVERSATION, HISTORY, evidence_out=evidence)
+    draft = bobbie.generate_ai_reply(CONVERSATION, HISTORY, evidence_out=evidence, agent_context=LEGACY_AGENT)
 
     result = bobbie.review_and_repair_ai_reply(
         CONVERSATION, HISTORY, draft, {'next_step': 'answer_and_qualify'},
-        knowledge_evidence=evidence)
+        knowledge_evidence=evidence, agent_context=LEGACY_AGENT)
 
     assert result == "I'm Bobbie Fisher with RE/MAX Premier. What price are you hoping for?"
-    assert len(offline['bodies']) == 3
+    # draft + review + regeneration + review of the regenerated draft
+    assert len(offline['bodies']) == 4
+    second_review = _review_payload(offline['bodies'][3])
+    assert second_review['proposed_agent_reply'] == result
+    assert second_review['approved_knowledge_evidence'] == [_generator_knowledge(offline['bodies'][2])]
     rules = bobbie.REVIEW_EVIDENCE_RULES
     assert 'remains unsupported' in rules and 'does not by itself make' in rules
     assert 'Draft for verification' not in rules and 'document_status' in rules
@@ -239,7 +268,7 @@ def test_missing_or_empty_knowledge_keeps_the_original_review_request(
         offline, monkeypatch, provider, model, knowledge_case):
     use(monkeypatch, provider, model)
     if knowledge_case == 'not_needed':
-        monkeypatch.setattr(bobbie.knowledge, 'needs_bobbie_knowledge', lambda _text: False)
+        monkeypatch.setattr(bobbie.knowledge, 'needs_agent_knowledge', lambda _text: False)
     elif knowledge_case == 'empty_matches':
         offline['knowledge'] = {**KNOWLEDGE, 'matches': []}
     else:
@@ -247,7 +276,7 @@ def test_missing_or_empty_knowledge_keeps_the_original_review_request(
 
     _draft, _result, evidence = _generate_then_review(SUPPORTED_DRAFT, VALID, offline)
     offline['replies'] = [VALID]
-    bobbie.review_ai_reply(CONVERSATION, HISTORY, SUPPORTED_DRAFT, {'next_step': 'answer_and_qualify'})
+    bobbie.review_ai_reply(CONVERSATION, HISTORY, SUPPORTED_DRAFT, {'next_step': 'answer_and_qualify'}, agent_context=LEGACY_AGENT)
 
     with_fix, legacy = offline['bodies'][1], offline['bodies'][2]
     assert evidence == []
@@ -260,17 +289,21 @@ def test_missing_or_empty_knowledge_keeps_the_original_review_request(
 def test_reviewer_without_evidence_argument_is_unchanged(offline, monkeypatch, provider, model):
     use(monkeypatch, provider, model)
     offline['replies'] = [VALID, VALID]
-    bobbie.review_ai_reply(CONVERSATION, HISTORY, 'Draft.', {})
-    bobbie.review_ai_reply(CONVERSATION, HISTORY, 'Draft.', {}, knowledge_evidence=[])
+    bobbie.review_ai_reply(CONVERSATION, HISTORY, 'Draft.', {}, agent_context=LEGACY_AGENT)
+    bobbie.review_ai_reply(CONVERSATION, HISTORY, 'Draft.', {}, knowledge_evidence=[], agent_context=LEGACY_AGENT)
 
     assert offline['bodies'][0] == offline['bodies'][1]
-    assert set(_review_payload(offline['bodies'][0])) == {
-        'disposition', 'scheduling_context', 'recent_conversation', 'proposed_bobbie_reply'}
+    payload = _review_payload(offline['bodies'][0])
+    assert set(payload) == {
+        'disposition', 'scheduling_context', 'recent_conversation', 'trusted_agent', 'proposed_agent_reply'}
+    assert payload['trusted_agent'] == {'user_id': 101, 'brokerage_id': 'brokerage-legacy',
+                                        'name': 'Bobbie Fisher', 'active_persona_version_id': 70}
 
 
 # Test E: generation and policy repair send identical requests with or without evidence_out.
 @pytest.mark.parametrize('provider,model', PROVIDERS)
-@pytest.mark.parametrize('first_draft', ['x ' * 200, '', SUPPORTED_DRAFT],
+# A policy-blocked draft (invented phone number); length alone no longer triggers repair.
+@pytest.mark.parametrize('first_draft', ['Call me at 312 555 0199 anytime.', '', SUPPORTED_DRAFT],
                          ids=['policy_repair', 'empty_retry', 'clean'])
 def test_generation_and_policy_repair_requests_are_unchanged(
         offline, monkeypatch, provider, model, first_draft):
@@ -278,11 +311,11 @@ def test_generation_and_policy_repair_requests_are_unchanged(
     replies = [first_draft, 'Short answer. What price are you hoping for?']
 
     offline['replies'] = list(replies)
-    legacy_reply = bobbie.generate_ai_reply(CONVERSATION, HISTORY)
+    legacy_reply = bobbie.generate_ai_reply(CONVERSATION, HISTORY, agent_context=LEGACY_AGENT)
     legacy_bodies, offline['bodies'] = offline['bodies'], []
     offline['replies'] = list(replies)
     evidence = []
-    reply = bobbie.generate_ai_reply(CONVERSATION, HISTORY, evidence_out=evidence)
+    reply = bobbie.generate_ai_reply(CONVERSATION, HISTORY, evidence_out=evidence, agent_context=LEGACY_AGENT)
 
     assert reply == legacy_reply
     assert offline['bodies'] == legacy_bodies
@@ -294,21 +327,21 @@ def test_generation_and_policy_repair_requests_are_unchanged(
 @pytest.mark.parametrize('provider,model', PROVIDERS)
 def test_model_selected_search_results_are_included(offline, monkeypatch, provider, model):
     use(monkeypatch, provider, model)
-    monkeypatch.setattr(bobbie.knowledge, 'needs_bobbie_knowledge', lambda _text: False)
+    monkeypatch.setattr(bobbie.knowledge, 'needs_agent_knowledge', lambda _text: False)
     if provider == 'anthropic':
         tool_turn = {**_claude_text(''), 'stop_reason': 'tool_use', 'content': [
-            {'type': 'tool_use', 'id': 'toolu_kb', 'name': 'search_bobbie_knowledge',
+            {'type': 'tool_use', 'id': 'toolu_kb', 'name': 'search_agent_knowledge',
              'input': {'query': 'Bobbie background'}}]}
     else:
         tool_turn = {'role': 'assistant', 'content': None, 'tool_calls': [
             {'id': 'c1', 'type': 'function', 'function': {
-                'name': 'search_bobbie_knowledge', 'arguments': '{"query":"Bobbie background"}'}}]}
+                'name': 'search_agent_knowledge', 'arguments': '{"query":"Bobbie background"}'}}]}
     offline['replies'] = [tool_turn, SUPPORTED_DRAFT, VALID]
     evidence = []
 
-    draft = bobbie.generate_ai_reply(CONVERSATION, HISTORY, evidence_out=evidence)
+    draft = bobbie.generate_ai_reply(CONVERSATION, HISTORY, evidence_out=evidence, agent_context=LEGACY_AGENT)
     bobbie.review_and_repair_ai_reply(CONVERSATION, HISTORY, draft, {},
-                                      knowledge_evidence=evidence)
+                                      knowledge_evidence=evidence, agent_context=LEGACY_AGENT)
 
     assert offline['searches'] == [('Bobbie background', 4)]
     assert evidence == [KNOWLEDGE]
@@ -319,25 +352,56 @@ def test_model_selected_search_results_are_included(offline, monkeypatch, provid
 @pytest.mark.parametrize('provider,model', PROVIDERS)
 def test_regeneration_after_rejection_is_unchanged(offline, monkeypatch, provider, model):
     use(monkeypatch, provider, model)
-    replies = [REJECTED, 'Fresh reply. What price are you hoping for?']
+    replies = [REJECTED, 'Fresh reply. What price are you hoping for?', VALID]
     disposition = {'next_step': 'answer_and_qualify'}
 
     offline['replies'] = list(replies)
-    legacy = bobbie.review_and_repair_ai_reply(CONVERSATION, HISTORY, 'Draft.', disposition)
+    legacy = bobbie.review_and_repair_ai_reply(CONVERSATION, HISTORY, 'Draft.', disposition, agent_context=LEGACY_AGENT)
     legacy_bodies, legacy_searches = offline['bodies'], list(offline['searches'])
     offline['bodies'], offline['searches'] = [], []
     offline['replies'] = list(replies)
     fixed = bobbie.review_and_repair_ai_reply(CONVERSATION, HISTORY, 'Draft.', disposition,
-                                              knowledge_evidence=[KNOWLEDGE])
+                                              knowledge_evidence=[KNOWLEDGE], agent_context=LEGACY_AGENT)
 
-    assert fixed == legacy
-    assert len(offline['bodies']) == len(legacy_bodies) == 2
+    assert fixed == legacy == 'Fresh reply. What price are you hoping for?'
+    # review + one regeneration + a review of the regenerated reply
+    assert len(offline['bodies']) == len(legacy_bodies) == 3
     assert offline['bodies'][1] == legacy_bodies[1]  # the regeneration request itself
     assert offline['searches'] == legacy_searches and len(legacy_searches) == 1
     assert 'approved_knowledge_evidence' in _review_payload(offline['bodies'][0])
+    # The regenerated reply is reviewed with the evidence it was written from, not the old draft's.
+    regenerated_review = _review_payload(offline['bodies'][2])
+    assert regenerated_review['proposed_agent_reply'] == fixed
+    assert regenerated_review['approved_knowledge_evidence'] == [_generator_knowledge(offline['bodies'][1])]
+
+
+def as_trusted_owner(user_id, full_name='Bobbie Fisher', brokerage_name='Real Broker LLC'):
+    """Make a conversation owner's account carry this identity.
+
+    The pipeline resolves identity only from the trusted account behind
+    Conversation.user_id, so pipeline tests set it there (replacing the retired
+    BOBBIE_APPROVED_BROKERAGE setting).
+    """
+    from app import db
+    from app.models import User
+    with db.SessionLocal() as session:
+        user = session.get(User, user_id)
+        user.full_name, user.brokerage_name = full_name, brokerage_name
+        session.commit()
 
 
 # Test H: the full pipeline makes the same number of AI calls and searches as before.
+# The pipeline resolves identity from Conversation.user_id; the test broker is
+# "Test User" at "Linchpin Global", so the trusted account facts ride along.
+TRUSTED_TEST_FACTS = {'current_brokerage': 'Linchpin Global', 'agent_name': 'Test User'}
+
+
+def _without_trusted_facts(knowledge):
+    facts = dict(knowledge.pop('approved_facts'))
+    assert {key: facts[key] for key in TRUSTED_TEST_FACTS} == TRUSTED_TEST_FACTS
+    return knowledge
+
+
 def _thread(session, make_user):
     broker = make_user('review-evidence-broker@linchpinglobal.net', role='broker')
     conversation = Conversation(
@@ -370,14 +434,15 @@ DISPOSITION = json.dumps({
 
 
 @pytest.mark.parametrize('provider,model', PROVIDERS)
-@pytest.mark.parametrize('review,ai_calls,searches', [(VALID, 3, 1), (REJECTED, 4, 2)],
+# One retrieval per processing attempt; a regeneration reuses that evidence.
+@pytest.mark.parametrize('review,ai_calls,searches', [(VALID, 3, 1), (REJECTED, 5, 1)],
                          ids=['accepted', 'rejected'])
 def test_pipeline_call_and_search_counts_are_unchanged(
         offline, monkeypatch, make_user, session, provider, model, review, ai_calls, searches):
     use(monkeypatch, provider, model)
     conversation = _thread(session, make_user)
-    offline['replies'] = [DISPOSITION, SUPPORTED_DRAFT, review,
-                          "I'm Bobbie Fisher with RE/MAX Premier. What price are you hoping for?"]
+    regenerated = "I'm Bobbie Fisher with RE/MAX Premier. What price are you hoping for?"
+    offline['replies'] = [DISPOSITION, SUPPORTED_DRAFT, review, regenerated, VALID]
     sent = []
     monkeypatch.setattr(service, 'send_and_store_message',
                         lambda _s, _c, text, event_type, *rest:
@@ -385,13 +450,22 @@ def test_pipeline_call_and_search_counts_are_unchanged(
 
     service.process_ai_reply(conversation.id, QUESTION)
 
-    # disposition + reply + review (+ one regenerated reply after a rejection)
+    # disposition + reply + review (+ regenerated reply + its own review after a rejection)
     assert len(offline['bodies']) == ai_calls
     assert len(offline['searches']) == searches
     assert len(sent) == 1 and sent[0][1] == 'ai.reply'
     payload = _review_payload(offline['bodies'][2])
-    assert payload['approved_knowledge_evidence'] == [{'available': True, **KNOWLEDGE}]
+    assert payload['trusted_agent']['user_id'] == conversation.user_id
     assert _generator_knowledge(offline['bodies'][1]) == payload['approved_knowledge_evidence'][0]
+    assert payload['approved_knowledge_evidence'] == [
+        {'available': True, **KNOWLEDGE, 'approved_facts': payload['approved_knowledge_evidence'][0]['approved_facts']}]
+    _without_trusted_facts(payload['approved_knowledge_evidence'][0])
+    if review == REJECTED:
+        final_review = _review_payload(offline['bodies'][4])
+        assert final_review['proposed_agent_reply'] == regenerated == sent[0][0]
+        assert final_review['approved_knowledge_evidence'] == [_generator_knowledge(offline['bodies'][3])]
+    else:
+        assert sent[0][0] == SUPPORTED_DRAFT
 
 
 @pytest.mark.parametrize('provider,model', PROVIDERS)
@@ -415,18 +489,20 @@ def test_closing_reply_evidence_reaches_reviewer_without_extra_work(
     assert len(offline['bodies']) == 3  # disposition + closing draft + review
     assert offline['searches'] == [(QUESTION, 3)]
     payload = _review_payload(offline['bodies'][2])
-    assert payload['proposed_bobbie_reply'] == closing_reply
-    assert payload['approved_knowledge_evidence'] == [
-        _generator_knowledge(offline['bodies'][1])
-    ] == [{'available': True, **closing_knowledge}]
+    assert payload['proposed_agent_reply'] == closing_reply
+    assert payload['approved_knowledge_evidence'] == [_generator_knowledge(offline['bodies'][1])]
+    assert [_without_trusted_facts(dict(item)) for item in payload['approved_knowledge_evidence']] == [
+        {'available': True, **closing_knowledge}]
     assert sent == [(closing_reply, 'ai.closing')]
 
 
 @pytest.mark.parametrize('provider,model', PROVIDERS)
-def test_call_declined_retry_reviews_only_replacement_draft_evidence(
+def test_call_declined_retry_reuses_the_attempt_evidence_snapshot(
         offline, monkeypatch, make_user, session, provider, model):
     use(monkeypatch, provider, model)
     conversation = _thread(session, make_user)
+    # An earlier owner refusal is on record, so the model's call_declined stands.
+    monkeypatch.setattr(bobbie, 'owner_declined_meeting', lambda history: True)
     first_knowledge = _knowledge('discarded-draft')
     retry_knowledge = _knowledge('replacement-draft')
     _sequenced_search(monkeypatch, offline, [first_knowledge, retry_knowledge])
@@ -443,13 +519,12 @@ def test_call_declined_retry_reviews_only_replacement_draft_evidence(
     service.process_ai_reply(conversation.id, QUESTION)
 
     assert len(offline['bodies']) == 4  # disposition + discarded draft + replacement + review
-    assert offline['searches'] == [(QUESTION, 3), (QUESTION, 3)]
+    assert offline['searches'] == [(QUESTION, 3)]
     payload = _review_payload(offline['bodies'][3])
-    assert payload['proposed_bobbie_reply'] == replacement
-    assert payload['approved_knowledge_evidence'] == [
-        _generator_knowledge(offline['bodies'][2])
-    ] == [{'available': True, **retry_knowledge}]
-    assert payload['approved_knowledge_evidence'] != [{'available': True, **first_knowledge}]
+    assert payload['proposed_agent_reply'] == replacement
+    assert payload['approved_knowledge_evidence'] == [_generator_knowledge(offline['bodies'][2])]
+    used = [_without_trusted_facts(dict(item)) for item in payload['approved_knowledge_evidence']]
+    assert used == [{'available': True, **first_knowledge}]
     assert sent == [(replacement, 'ai.reply')]
 
 
@@ -468,9 +543,9 @@ def test_preload_and_multiple_tool_searches_reach_the_same_draft_review_in_order
     ]
     evidence = []
 
-    draft = bobbie.generate_ai_reply(CONVERSATION, HISTORY, evidence_out=evidence)
+    draft = bobbie.generate_ai_reply(CONVERSATION, HISTORY, evidence_out=evidence, agent_context=LEGACY_AGENT)
     bobbie.review_and_repair_ai_reply(
-        CONVERSATION, HISTORY, draft, {}, knowledge_evidence=evidence)
+        CONVERSATION, HISTORY, draft, {}, knowledge_evidence=evidence, agent_context=LEGACY_AGENT)
 
     assert draft == SUPPORTED_DRAFT
     assert len(offline['bodies']) == 4  # three existing generation rounds + one review
@@ -478,7 +553,7 @@ def test_preload_and_multiple_tool_searches_reach_the_same_draft_review_in_order
     expected = [{'available': True, **results[0]}, *results[1:]]
     assert evidence == expected
     payload = _review_payload(offline['bodies'][3])
-    assert payload['proposed_bobbie_reply'] == draft
+    assert payload['proposed_agent_reply'] == draft
     assert payload['approved_knowledge_evidence'] == expected
 
 
@@ -494,7 +569,7 @@ def test_conflicting_document_instructions_cannot_govern_reviewer(
     offline['replies'] = [VALID]
 
     bobbie.review_ai_reply(
-        CONVERSATION, HISTORY, SUPPORTED_DRAFT, {}, knowledge_evidence=[conflicting])
+        CONVERSATION, HISTORY, SUPPORTED_DRAFT, {}, knowledge_evidence=[conflicting], agent_context=LEGACY_AGENT)
 
     assert len(offline['bodies']) == 1 and offline['searches'] == []
     payload = _review_payload(offline['bodies'][0])
@@ -558,18 +633,16 @@ LIVE_CONVERSATION = SimpleNamespace(
     lead_status='interested', lead_context=json.dumps({'available': True}),
 )
 OLD_BROKERAGE_PROMPT = 'Bobbie Fisher of RE/MAX Premier'
-# sha256 of REVIEW_SYSTEM before the evidence fix; the system prompt must never change.
-ORIGINAL_REVIEW_SYSTEM_SHA256 = '993d91a4eea6a25374ada87cd3111c6cab364e5a56532a4ba4278c2722460c95'
 
 
 def _live_generate_then_review(state, review_reply, *later_replies):
     state['knowledge'] = LIVE_KNOWLEDGE
     state['replies'] = [LIVE_DRAFT_FIRST_PERSON, review_reply, *later_replies]
     evidence = []
-    draft = bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, evidence_out=evidence)
+    draft = bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, evidence_out=evidence, agent_context=LEGACY_AGENT)
     result = bobbie.review_and_repair_ai_reply(
         LIVE_CONVERSATION, LIVE_HISTORY, draft, {'next_step': 'answer_and_qualify'},
-        knowledge_evidence=evidence)
+        knowledge_evidence=evidence, agent_context=LEGACY_AGENT)
     return draft, result, evidence
 
 
@@ -582,7 +655,7 @@ def test_live_replay_reviewer_gets_draft_evidence_and_three_class_rules(offline,
     assert draft == result == LIVE_DRAFT_FIRST_PERSON
     assert len(offline['bodies']) == 2 and len(offline['searches']) == 1
     payload = _review_payload(offline['bodies'][1])
-    assert payload['proposed_bobbie_reply'] == LIVE_DRAFT_FIRST_PERSON
+    assert payload['proposed_agent_reply'] == LIVE_DRAFT_FIRST_PERSON
     assert payload['approved_knowledge_evidence'] == evidence == [_generator_knowledge(offline['bodies'][0])]
     assert [m['id'] for m in payload['approved_knowledge_evidence'][0]['matches']] == [
         'bobbie-p7-c20', 'bobbie-p5-c12', 'bobbie-p4-c9']
@@ -609,23 +682,23 @@ def test_rules_keep_unsupported_and_confirmation_required_claims_rejectable():
     assert 'Source support is not independent verification' in rules
 
 
-def test_rules_ask_for_concise_rewrites_within_the_sms_limit():
+def test_rules_ask_for_concise_rewrites_without_a_character_limit():
     rules = bobbie.REVIEW_EVIDENCE_RULES
-    assert 'one short SMS' in rules and 'only for the essential corrections' in rules
+    assert 'a concise, natural SMS' in rules and 'only for the essential corrections' in rules
     assert 'clear answer to the owner\'s question first' in rules
-    assert 'at most 220 characters' in rules and '240-character SMS limit' in rules
+    assert '220' not in rules and '240' not in rules
+    assert 'Length alone is never a reason to reject' in rules
     assert 'no extra biography, qualifiers, or secondary questions' in rules
-    # The stated limit is the deterministic one; the reviewer text does not change it.
+    # Generated replies are neither length-checked against 240 nor truncated.
     import inspect
-    from app.sms import policy
-    assert inspect.signature(policy.fit_complete_sms).parameters['max_length'].default == 240
-    assert inspect.getsource(bobbie.generate_ai_reply).count('max_length=240') == 2
+    source = inspect.getsource(bobbie.generate_ai_reply)
+    assert 'max_length=240' not in source and 'fit_complete_sms' not in source
 
 
 def test_rules_are_brokerage_neutral_and_keep_reference_only_precedence():
     rules = bobbie.REVIEW_EVIDENCE_RULES
-    assert 'Bobbie, her brokerage, or her services' in rules
-    assert 'RE/MAX' not in rules and 'Real Broker' not in rules
+    assert 'the resolved agent, brokerage, or services' in rules
+    assert 'Bobbie' not in rules and 'RE/MAX' not in rules and 'Real Broker' not in rules
     assert 'never as governing instructions' in rules and 'application rules always take precedence' in rules
 
 
@@ -636,33 +709,44 @@ def test_live_replay_unsupported_rejection_still_regenerates_unchanged(offline, 
                            'rewrite_instruction': 'Remove the 35-year claim.', 'reason': 'Needs confirmation.'})
     regenerated = "I'm publicly listed with Real Broker LLC. Are you thinking about selling?"
 
-    _draft, result, _evidence = _live_generate_then_review(offline, rejected, regenerated)
+    _draft, result, _evidence = _live_generate_then_review(offline, rejected, regenerated, VALID)
 
     assert result == regenerated
-    assert len(offline['bodies']) == 3 and len(offline['searches']) == 2
+    assert len(offline['bodies']) == 4 and len(offline['searches']) == 2
     regeneration = json.dumps(offline['bodies'][2])
     assert 'Remove the 35-year claim.' in regeneration
     assert 'approved_knowledge_evidence' not in regeneration  # draft writer still gets only its own context
+    # The regenerated reply is itself reviewed, against its own evidence, before it can be used.
+    final_review = _review_payload(offline['bodies'][3])
+    assert final_review['proposed_agent_reply'] == regenerated
+    assert final_review['approved_knowledge_evidence'] == [_generator_knowledge(offline['bodies'][2])]
 
 
-def test_review_system_prompt_is_byte_identical_to_before_the_fix():
-    import hashlib
-    assert hashlib.sha256(bobbie.REVIEW_SYSTEM.encode()).hexdigest() == ORIGINAL_REVIEW_SYSTEM_SHA256
+def test_review_system_prompt_keeps_the_original_safety_rules_with_hard_and_soft_categories():
+    """The reviewer was deliberately rewritten (hard blocks vs soft feedback); these
+    original guarantees must survive any future wording change."""
+    system = bobbie.REVIEW_SYSTEM
+    assert 'Bobbie' not in system and "an authorized real-estate agent's property-owner SMS" in system
+    assert 'a booking claim may only come from the calendar API' in system
+    assert "selecting one of the agent's immediately preceding live slots is already booking consent" in system
+    assert 'A bare "yes" answers the immediately preceding question, not an older invitation' in system
+    assert 'HARD BLOCK' in system and 'SOFT FEEDBACK' in system
+    assert 'never set valid to false for these' in system
 
 
 @pytest.mark.parametrize('provider,model', PROVIDERS)
 def test_live_replay_without_knowledge_review_request_matches_legacy(offline, monkeypatch, provider, model):
     use(monkeypatch, provider, model)
-    monkeypatch.setattr(bobbie.knowledge, 'needs_bobbie_knowledge', lambda _text: False)
+    monkeypatch.setattr(bobbie.knowledge, 'needs_agent_knowledge', lambda _text: False)
     offline['replies'] = [LIVE_DRAFT_FIRST_PERSON, VALID, VALID]
     evidence = []
-    draft = bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, evidence_out=evidence)
-    bobbie.review_and_repair_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, draft, {}, knowledge_evidence=evidence)
-    bobbie.review_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, draft, {})
+    draft = bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, evidence_out=evidence, agent_context=LEGACY_AGENT)
+    bobbie.review_and_repair_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, draft, {}, knowledge_evidence=evidence, agent_context=LEGACY_AGENT)
+    bobbie.review_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, draft, {}, agent_context=LEGACY_AGENT)
 
     assert evidence == [] and offline['bodies'][1] == offline['bodies'][2]
     assert set(_review_payload(offline['bodies'][1])) == {
-        'disposition', 'scheduling_context', 'recent_conversation', 'proposed_bobbie_reply'}
+        'disposition', 'scheduling_context', 'recent_conversation', 'trusted_agent', 'proposed_agent_reply'}
 
 
 @pytest.mark.parametrize('provider,model', PROVIDERS)
@@ -672,22 +756,25 @@ def test_draft_prompt_and_tool_description_name_no_brokerage(offline, monkeypatc
     offline['knowledge'] = LIVE_KNOWLEDGE
     offline['replies'] = [LIVE_DRAFT_FIRST_PERSON]
 
-    bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY)
+    bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, agent_context=LEGACY_AGENT)
 
-    prompt = bobbie.build_bobbie_prompt(LIVE_CONVERSATION)
-    assert prompt.startswith("Write only Bobbie Fisher's next complete SMS, in Bobbie's own first-person voice")
+    prompt = bobbie.build_agent_prompt(LIVE_CONVERSATION, LEGACY_AGENT)
+    # Global policy precedence comes first; the identity is the trusted agent's.
+    assert prompt.startswith('GLOBAL SYSTEM POLICIES')
+    assert "Write only Bobbie Fisher's next complete SMS. Speak in first person as Bobbie Fisher" in prompt
     assert OLD_BROKERAGE_PROMPT not in prompt
     assert 'RE/MAX' not in prompt and 'Premier' not in prompt and 'Real Broker' not in prompt
-    assert 'Use at most 220 characters' in prompt and 'Never call yourself an assistant' in prompt
+    assert 'Usually 1-3 concise sentences' in prompt and 'Never call yourself an assistant' in prompt
     body = json.dumps(offline['bodies'][0])
     assert OLD_BROKERAGE_PROMPT not in body
-    tool = next(t['function'] for t in bobbie.TOOLS if t['function']['name'] == 'search_bobbie_knowledge')
-    assert tool['description'] == "Search Bobbie Fisher's professional knowledge base before stating facts about Bobbie."
+    tool = next(t['function'] for t in bobbie.TOOLS if t['function']['name'] == 'search_agent_knowledge')
+    assert 'Bobbie' not in tool['description'] and 'agent responsible for this conversation' in tool['description']
+    # The model may supply only a query: owner, brokerage and version are injected server-side.
     assert tool['parameters'] == {'type': 'object', 'properties': {'query': {'type': 'string'}},
                                   'required': ['query'], 'additionalProperties': False}
     sent_names = ([t['name'] for t in offline['bodies'][0]['tools']] if provider == 'anthropic'
                   else [t['function']['name'] for t in offline['bodies'][0]['tools']])
-    assert sent_names == ['get_lead_details', 'search_bobbie_knowledge']
+    assert sent_names == ['get_lead_details', 'search_agent_knowledge']
 
 
 # ---------------------------------------------------------------------------
@@ -762,59 +849,62 @@ def test_live2_accepted_repaired_draft_is_sent_without_regeneration(offline, mon
     offline['knowledge'] = LIVE_KNOWLEDGE
     offline['replies'] = [LIVE2_REPAIRED_DRAFT, VALID]
     evidence = []
-    draft = bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, evidence_out=evidence)
+    draft = bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, evidence_out=evidence, agent_context=LEGACY_AGENT)
     result = bobbie.review_and_repair_ai_reply(
-        LIVE_CONVERSATION, LIVE_HISTORY, draft, {'next_step': 'answer_and_qualify'}, knowledge_evidence=evidence)
+        LIVE_CONVERSATION, LIVE_HISTORY, draft, {'next_step': 'answer_and_qualify'}, knowledge_evidence=evidence, agent_context=LEGACY_AGENT)
 
     assert result == draft == LIVE2_REPAIRED_DRAFT
     assert len(offline['bodies']) == 2 and len(offline['searches']) == 1
     payload = _review_payload(offline['bodies'][1])
-    assert payload['proposed_bobbie_reply'] == LIVE2_REPAIRED_DRAFT
+    assert payload['proposed_agent_reply'] == LIVE2_REPAIRED_DRAFT
     assert payload['evidence_rules'] == bobbie.review_evidence_rules()
 
 
 @pytest.mark.parametrize('provider,model', PROVIDERS)
-def test_live2_overlong_draft_still_gets_policy_repair_then_review(offline, monkeypatch, provider, model):
+def test_live2_long_first_person_draft_is_reviewed_without_a_length_repair(offline, monkeypatch, provider, model):
     use(monkeypatch, provider, model)
     offline['knowledge'] = LIVE_KNOWLEDGE
-    offline['replies'] = [LIVE2_OVERLONG_DRAFT, LIVE2_REPAIRED_DRAFT, VALID]
+    offline['replies'] = [LIVE2_OVERLONG_DRAFT, VALID]
     evidence = []
-    draft = bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, evidence_out=evidence)
+    draft = bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, evidence_out=evidence, agent_context=LEGACY_AGENT)
     result = bobbie.review_and_repair_ai_reply(
-        LIVE_CONVERSATION, LIVE_HISTORY, draft, {'next_step': 'answer_and_qualify'}, knowledge_evidence=evidence)
+        LIVE_CONVERSATION, LIVE_HISTORY, draft, {'next_step': 'answer_and_qualify'}, knowledge_evidence=evidence, agent_context=LEGACY_AGENT)
 
-    assert result == LIVE2_REPAIRED_DRAFT and len(offline['bodies']) == 3
-    repair = json.dumps(offline['bodies'][1])
-    assert 'Rewrite Bobbie' in repair and 'Fix these violations: over_length' in repair
+    # 273 characters once forced a policy repair; it is now reviewed as written.
+    assert result == draft == ' '.join(LIVE2_OVERLONG_DRAFT.split()) and len(offline['bodies']) == 2
+    assert 'Fix these violations' not in json.dumps(offline['bodies'])
 
 
 @pytest.mark.parametrize('provider,model', PROVIDERS)
 def test_live2_rejection_still_regenerates_exactly_as_before(offline, monkeypatch, provider, model):
     use(monkeypatch, provider, model)
     offline['knowledge'] = LIVE_KNOWLEDGE
-    offline['replies'] = [LIVE2_REPAIRED_DRAFT, LIVE2_REJECTION, LIVE2_FINAL_FIRST_PERSON]
+    offline['replies'] = [LIVE2_REPAIRED_DRAFT, LIVE2_REJECTION, LIVE2_FINAL_FIRST_PERSON, VALID]
     evidence = []
-    draft = bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, evidence_out=evidence)
+    draft = bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, evidence_out=evidence, agent_context=LEGACY_AGENT)
     result = bobbie.review_and_repair_ai_reply(
-        LIVE_CONVERSATION, LIVE_HISTORY, draft, {'next_step': 'answer_and_qualify'}, knowledge_evidence=evidence)
+        LIVE_CONVERSATION, LIVE_HISTORY, draft, {'next_step': 'answer_and_qualify'}, knowledge_evidence=evidence, agent_context=LEGACY_AGENT)
 
     assert result == LIVE2_FINAL_FIRST_PERSON
-    assert len(offline['bodies']) == 3 and len(offline['searches']) == 2
+    # draft + rejection + regeneration + review of the regeneration
+    assert len(offline['bodies']) == 4 and len(offline['searches']) == 2
     assert 'keep under 220 characters' in json.dumps(offline['bodies'][2])
+    assert _review_payload(offline['bodies'][3])['proposed_agent_reply'] == LIVE2_FINAL_FIRST_PERSON
 
 
 def test_live2_drafts_against_sms_policy():
     from app.sms.policy import find_reply_policy_violations
-    check = lambda text: find_reply_policy_violations(text, phone_source_known=False, max_length=240,
-                                                      history=LIVE_HISTORY)
+    # Production passes the trusted agent name; third-person self-reference is judged against it.
+    check = lambda text: find_reply_policy_violations(text, phone_source_known=False,
+                                                      history=LIVE_HISTORY, agent_name=LEGACY_AGENT.agent_name)
     assert check(LIVE2_REPAIRED_DRAFT) == []
     assert check(LIVE2_FINAL_SMS) == ['identity_switch']  # recorded third-person final, now caught
     assert check(LIVE2_FINAL_FIRST_PERSON) == []
-    assert 'over_length' in check(LIVE2_OVERLONG_DRAFT)
+    assert check(LIVE2_OVERLONG_DRAFT) == []  # length alone is not a policy violation
 
 
-def test_draft_prompt_targets_about_200_to_220_characters_without_changing_the_limit():
-    prompt = bobbie.build_bobbie_prompt(LIVE_CONVERSATION)
-    assert 'Use at most 220 characters (about 35 words) in one or two short sentences' in prompt
-    assert "aim for about 200-220 at most by answering the owner's actual question first" in prompt
-    assert 'leaving out secondary detail' in prompt
+def test_draft_prompt_favors_concise_sms_without_a_fixed_character_target():
+    prompt = bobbie.build_agent_prompt(LIVE_CONVERSATION, LEGACY_AGENT)
+    assert '220' not in prompt and '240' not in prompt
+    assert "Usually 1-3 concise sentences; use more only when the owner's message needs it" in prompt
+    assert "Answer the owner's actual question first" in prompt

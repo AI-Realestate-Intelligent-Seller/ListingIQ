@@ -27,6 +27,7 @@ from app.ai.schemas import (
 from app.core.config import settings
 from app.models import Conversation, Message
 from app.sms import bobbie, service
+from test_ai_review_evidence import LEGACY_AGENT  # noqa: E402  trusted test identity
 
 UNSUPPORTED = {'minLength', 'maxLength', 'minimum', 'maximum', 'multipleOf', 'maxItems'}
 CONVERSATION = SimpleNamespace(
@@ -80,7 +81,7 @@ def provider_http(monkeypatch):
     monkeypatch.setitem(settings['ai'], 'anthropic_api_key', 'offline-anthropic-key')
     monkeypatch.setitem(settings['ai'], 'base_url', 'https://api.deepseek.com')
     monkeypatch.setitem(settings['ai'], 'anthropic_base_url', 'https://api.anthropic.com')
-    monkeypatch.setattr(bobbie.knowledge, 'needs_bobbie_knowledge', lambda _text: False)
+    monkeypatch.setattr(bobbie.knowledge, 'needs_agent_knowledge', lambda _text: False)
     return state
 
 
@@ -155,9 +156,9 @@ def test_disposition_result_is_identical_for_claude_and_deepseek(provider_http, 
     provider_http['replies'] = [json.dumps(DISPOSITIONS[case])]
 
     use(monkeypatch, 'deepseek', 'deepseek-v4-flash')
-    via_deepseek = bobbie.analyze_conversation_disposition(CONVERSATION, history)
+    via_deepseek = bobbie.analyze_conversation_disposition(CONVERSATION, history, agent_context=LEGACY_AGENT)
     use(monkeypatch, 'anthropic', 'claude-haiku-5-5')
-    via_claude = bobbie.analyze_conversation_disposition(CONVERSATION, history)
+    via_claude = bobbie.analyze_conversation_disposition(CONVERSATION, history, agent_context=LEGACY_AGENT)
 
     assert via_claude == via_deepseek
     assert 'fallback' not in via_claude['reason'].lower()
@@ -177,9 +178,9 @@ def test_review_result_is_identical_for_claude_and_deepseek(provider_http, monke
     provider_http['replies'] = [json.dumps(REVIEWS[case])]
 
     use(monkeypatch, 'deepseek', 'deepseek-v4-flash')
-    via_deepseek = bobbie.review_ai_reply(CONVERSATION, history, 'Draft.', {})
+    via_deepseek = bobbie.review_ai_reply(CONVERSATION, history, 'Draft.', {}, agent_context=LEGACY_AGENT)
     use(monkeypatch, 'anthropic', 'claude-sonnet-5-5')
-    via_claude = bobbie.review_ai_reply(CONVERSATION, history, 'Draft.', {})
+    via_claude = bobbie.review_ai_reply(CONVERSATION, history, 'Draft.', {}, agent_context=LEGACY_AGENT)
 
     assert via_claude == via_deepseek
     assert via_claude['valid'] is REVIEWS[case]['valid']
@@ -191,9 +192,9 @@ def test_claude_receives_schema_while_deepseek_request_is_unchanged(provider_htt
     history = [{'direction': 'inbound', 'text': 'Maybe.'}]
 
     use(monkeypatch, 'anthropic', 'claude-haiku-5-5')
-    bobbie.analyze_conversation_disposition(CONVERSATION, history)
+    bobbie.analyze_conversation_disposition(CONVERSATION, history, agent_context=LEGACY_AGENT)
     use(monkeypatch, 'deepseek', 'deepseek-v4-flash')
-    bobbie.analyze_conversation_disposition(CONVERSATION, history)
+    bobbie.analyze_conversation_disposition(CONVERSATION, history, agent_context=LEGACY_AGENT)
 
     claude, = provider_http['claude']
     deepseek, = provider_http['deepseek']
@@ -222,7 +223,7 @@ def test_every_history_type_reaches_claude_in_order_without_invented_turns(
     use(monkeypatch, 'anthropic', 'claude-haiku-5-5')
     provider_http['replies'] = ['Happy to put numbers together. What timeline suits you?']
 
-    reply = bobbie.generate_ai_reply(CONVERSATION, MIXED_HISTORY)
+    reply = bobbie.generate_ai_reply(CONVERSATION, MIXED_HISTORY, agent_context=LEGACY_AGENT)
 
     body, = provider_http['claude']
     assert reply == 'Happy to put numbers together. What timeline suits you?'
@@ -244,7 +245,7 @@ def test_claude_request_never_ends_on_an_assistant_turn(provider_http, monkeypat
                {'direction': 'inbound', 'text': ''}]
 
     with pytest.raises(ai_client.AiUnavailableError, match='must end with a user message'):
-        bobbie.generate_ai_reply(CONVERSATION, history)
+        bobbie.generate_ai_reply(CONVERSATION, history, agent_context=LEGACY_AGENT)
     assert provider_http['claude'] == [], 'rejected before any HTTP request'
 
 
@@ -254,7 +255,7 @@ def test_deepseek_still_receives_the_same_trailing_history(provider_http, monkey
     history = [{'direction': 'outbound', 'text': 'Could I stop by?'},
                {'direction': 'inbound', 'text': ''}]
 
-    reply = bobbie.generate_ai_reply(CONVERSATION, history)
+    reply = bobbie.generate_ai_reply(CONVERSATION, history, agent_context=LEGACY_AGENT)
 
     assert reply == 'Thanks for the photo. What would you like to know?'
     assert provider_http['deepseek'][0]['messages'][-1] == {
@@ -268,11 +269,11 @@ def test_late_instruction_keeps_the_earlier_claude_request_unchanged(provider_ht
     history = [{'direction': 'outbound', 'text': 'Hi from Bobbie.'},
                {'direction': 'inbound', 'text': 'What would it sell for?'}]
 
-    bobbie.generate_ai_reply(CONVERSATION, history)
+    bobbie.generate_ai_reply(CONVERSATION, history, agent_context=LEGACY_AGENT)
 
     first, retry = provider_http['claude']
     instruction = _assert_follow_up_appends_only(first, retry)
-    assert 'Return one non-empty, complete Bobbie SMS' in instruction
+    assert 'Return one non-empty, complete agent SMS' in instruction
 
 
 def test_tool_turn_and_thinking_blocks_are_replayed_unchanged(provider_http, monkeypatch):
@@ -287,7 +288,7 @@ def test_tool_turn_and_thinking_blocks_are_replayed_unchanged(provider_http, mon
     ]
     history = [{'direction': 'inbound', 'text': 'How many bedrooms does it have?'}]
 
-    reply = bobbie.generate_ai_reply(CONVERSATION, history)
+    reply = bobbie.generate_ai_reply(CONVERSATION, history, agent_context=LEGACY_AGENT)
 
     first, second = provider_http['claude']
     assert reply == 'It is a 3-bedroom. What timing works for you?'
@@ -307,7 +308,7 @@ TOOL_TURN = [
     {'type': 'thinking', 'thinking': '', 'signature': 'sig-1'},
     {'type': 'redacted_thinking', 'data': 'opaque-2'},
     {'type': 'tool_use', 'id': 'toolu_lead', 'name': 'get_lead_details', 'input': {}},
-    {'type': 'tool_use', 'id': 'toolu_kb', 'name': 'search_bobbie_knowledge', 'input': {'query': 'Bobbie'}},
+    {'type': 'tool_use', 'id': 'toolu_kb', 'name': 'search_agent_knowledge', 'input': {'query': 'Bobbie'}},
 ]
 TOOL_HISTORY = [{'direction': 'outbound', 'text': 'Hi from Bobbie.'},
                 {'direction': 'inbound', 'text': 'Who is Bobbie, and how many bedrooms?'}]
@@ -333,7 +334,7 @@ def test_ordinary_reply_payload(provider_http, monkeypatch, model):
     use(monkeypatch, 'anthropic', model)
     provider_http['replies'] = ['Happy to help. What timing works for you?']
 
-    bobbie.generate_ai_reply(CONVERSATION, TOOL_HISTORY)
+    bobbie.generate_ai_reply(CONVERSATION, TOOL_HISTORY, agent_context=LEGACY_AGENT)
 
     body, = provider_http['claude']
     assert set(body) == {'model', 'max_tokens', 'messages', 'stream', 'thinking',
@@ -342,7 +343,7 @@ def test_ordinary_reply_payload(provider_http, monkeypatch, model):
     assert body['thinking'] == THINKING[model]
     assert body['output_config'] == {'effort': 'low'}
     assert body['tool_choice'] == {'type': 'auto'}
-    assert [tool['name'] for tool in body['tools']] == ['get_lead_details', 'search_bobbie_knowledge']
+    assert [tool['name'] for tool in body['tools']] == ['get_lead_details', 'search_agent_knowledge']
     assert body['tools'] == [{'name': item['function']['name'],
                               'description': item['function']['description'],
                               'input_schema': item['function']['parameters']}
@@ -359,7 +360,7 @@ def test_multiple_tool_calls_payload(provider_http, monkeypatch, model):
     monkeypatch.setattr(bobbie.knowledge, 'search_bobbie_knowledge',
                         lambda query, limit: {'query': query, 'results': []})
 
-    bobbie.generate_ai_reply(CONVERSATION, TOOL_HISTORY)
+    bobbie.generate_ai_reply(CONVERSATION, TOOL_HISTORY, agent_context=LEGACY_AGENT)
 
     first, second = provider_http['claude']
     assert _changed_fields(first, second) == {'messages'}
@@ -375,7 +376,8 @@ def test_multiple_tool_calls_payload(provider_http, monkeypatch, model):
 def test_follow_up_after_tool_calls_keeps_tools_system_and_history(
         provider_http, monkeypatch, model, follow_up):
     use(monkeypatch, 'anthropic', model)
-    draft = '' if follow_up == 'empty_draft_retry' else 'x ' * 200  # empty, or over 240 chars
+    # Empty, or blocked by policy (invented phone number); length alone no longer blocks.
+    draft = '' if follow_up == 'empty_draft_retry' else 'Call me at 312 555 0199 anytime.'
     provider_http['replies'] = [
         {**_text(''), 'content': TOOL_TURN, 'stop_reason': 'tool_use'},
         draft,
@@ -384,7 +386,7 @@ def test_follow_up_after_tool_calls_keeps_tools_system_and_history(
     monkeypatch.setattr(bobbie.knowledge, 'search_bobbie_knowledge',
                         lambda query, limit: {'query': query, 'results': []})
 
-    reply = bobbie.generate_ai_reply(CONVERSATION, TOOL_HISTORY)
+    reply = bobbie.generate_ai_reply(CONVERSATION, TOOL_HISTORY, agent_context=LEGACY_AGENT)
 
     first, after_tools, follow = provider_http['claude']
     assert reply == 'Short answer. What timing works for you?'
@@ -430,7 +432,7 @@ def _thread(session, make_user, *, handled_by='bobbie'):
     session.add_all([
         Message(conversation_id=conversation.id, direction='outbound', text='Could I stop by?',
                 status='delivered', event_type='outreach.initial', created_at=start),
-        Message(conversation_id=conversation.id, direction='inbound', text='Sure, come by.',
+        Message(conversation_id=conversation.id, direction='inbound', text='Sure, come by tomorrow afternoon.',
                 status='received', event_type='message.received',
                 created_at=start + timedelta(minutes=1)),
     ])
@@ -448,13 +450,14 @@ def test_claude_meeting_acceptance_hands_off_to_a_person(
                         lambda _s, _c, text, event_type, *rest:
                         sent.append((text, event_type)) or Message(id=1))
 
-    service.process_ai_reply(conversation.id, 'Sure, come by.')
+    service.process_ai_reply(conversation.id, 'Sure, come by tomorrow afternoon.')
 
     session.expire_all()
     updated = session.get(Conversation, conversation.id)
     assert updated.handled_by == 'broker' and updated.ai_enabled is False
     assert updated.lead_status == 'location_discussion'
-    assert len(sent) == 1 and 'someone from our team' in sent[0][0].lower()
+    assert len(sent) == 1 and 'Our team will reach out to coordinate' in sent[0][0]
+    assert 'tomorrow afternoon' in sent[0][0]
     assert len(provider_http['claude']) == 1
 
 

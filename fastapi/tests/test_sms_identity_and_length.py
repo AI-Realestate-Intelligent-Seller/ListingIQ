@@ -11,7 +11,9 @@ import pytest
 
 from app.sms import bobbie
 from app.sms.policy import find_reply_policy_violations, safe_grounded_fallback
-from test_ai_review_evidence import (  # noqa: F401  (offline is a fixture)
+from test_ai_review_evidence import (
+    _generator_knowledge,
+    LEGACY_AGENT,  # noqa: F401  (offline is a fixture)
     LIVE_CONVERSATION, LIVE_HISTORY, LIVE_KNOWLEDGE, PROVIDERS, VALID, _review_payload, offline, use,
 )
 
@@ -51,7 +53,9 @@ RUN3_REJECTION = json.dumps({
 
 
 def _violations(text):
-    return find_reply_policy_violations(text, phone_source_known=False, max_length=240, history=LIVE_HISTORY)
+    # Production judges third-person self-reference against the trusted agent name.
+    return find_reply_policy_violations(text, phone_source_known=False, history=LIVE_HISTORY,
+                                        agent_name=LEGACY_AGENT.agent_name)
 
 
 def test_recorded_lengths_match_the_live_runs():
@@ -82,7 +86,7 @@ def test_recorded_first_person_outputs_keep_their_identity(text):
     'Bobbie will reach out to you shortly.',
 ])
 def test_bobbie_specific_third_person_statements_are_blocked(text):
-    assert 'identity_switch' in find_reply_policy_violations(text)
+    assert 'identity_switch' in find_reply_policy_violations(text, agent_name=LEGACY_AGENT.agent_name)
 
 
 @pytest.mark.parametrize('text', [
@@ -95,15 +99,17 @@ def test_bobbie_specific_third_person_statements_are_blocked(text):
     FIRST_PERSON_SHORT,
 ])
 def test_first_person_quotes_and_other_people_are_not_identity_violations(text):
-    assert 'identity_switch' not in find_reply_policy_violations(text)
+    assert 'identity_switch' not in find_reply_policy_violations(text, agent_name=LEGACY_AGENT.agent_name)
 
 
-def test_draft_prompt_requires_bobbie_first_person_voice_and_a_word_budget():
-    prompt = bobbie.build_bobbie_prompt(LIVE_CONVERSATION)
-    assert "in Bobbie's own first-person voice (I, me, my); never refer to Bobbie as Bobbie, she, or her" in prompt
+def test_draft_prompt_requires_bobbie_first_person_voice_and_natural_length():
+    prompt = bobbie.build_agent_prompt(LIVE_CONVERSATION, LEGACY_AGENT)
+    assert ('Speak in first person as Bobbie Fisher (I, me, my); never refer to Bobbie Fisher in the third person'
+            in prompt)
     assert 'Never call yourself an assistant' in prompt
-    assert 'Use at most 220 characters (about 35 words)' in prompt
-    assert "answering the owner's actual question first, each part in a few words" in prompt
+    # No fixed character budget: concise by default, longer when the answer needs it.
+    assert '220' not in prompt and 'Usually 1-3 concise sentences' in prompt
+    assert "Answer the owner's actual question first" in prompt
 
 
 @pytest.mark.parametrize('provider,model', PROVIDERS)
@@ -113,17 +119,19 @@ def test_run3_replay_repair_sees_blocked_draft_keeps_voice_and_fallback_is_uncha
     offline['knowledge'] = LIVE_KNOWLEDGE
     offline['replies'] = [RUN3_DRAFT, RUN3_REPAIR]
 
-    reply = bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY)
+    reply = bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, agent_context=LEGACY_AGENT)
 
-    # A repair that still fails policy falls back exactly as before.
-    expected_fallback = safe_grounded_fallback(LIVE_HISTORY[-1]['text'], ['over_length', 'identity_switch'],
-                                               LIVE_HISTORY, {})
+    # A repair that still fails policy falls back exactly as before. Length is
+    # no longer a violation; the third-person voice still is.
+    expected_fallback = safe_grounded_fallback(LIVE_HISTORY[-1]['text'], ['identity_switch'],
+                                               LIVE_HISTORY, {}, LEGACY_AGENT.agent_name,
+                                               LEGACY_AGENT.brokerage_name)
     assert reply == expected_fallback
     assert len(offline['bodies']) == 2
     repair = json.dumps(offline['bodies'][1])
-    assert 'Fix these violations: over_length, identity_switch' in repair
-    assert "in Bobbie's own first-person voice (I, me, my)" in repair and 'about 35 words' in repair
-    assert 'the blocked draft was 261 characters' in repair
+    assert 'Fix these violations: identity_switch' in repair and 'over_length' not in repair
+    assert "in Bobbie Fisher's own first-person voice (I, me, my)" in repair and '220' not in repair
+    assert 'the blocked draft was:' in repair
     assert json.dumps(json.dumps(RUN3_DRAFT))[1:-1] in repair
 
 
@@ -134,7 +142,7 @@ def test_repair_never_echoes_a_draft_blocked_for_unsafe_content(offline, monkeyp
     unsafe = "I'm Bobbie Fisher. Call me at 555 123 4567 and I'll explain my background."
     offline['replies'] = [unsafe, FIRST_PERSON_SHORT]
 
-    reply = bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY)
+    reply = bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, agent_context=LEGACY_AGENT)
 
     assert reply == FIRST_PERSON_SHORT
     repair = json.dumps(offline['bodies'][1])
@@ -146,35 +154,40 @@ def test_run3_replay_end_to_end_reviewer_input_and_identity_repair(offline, monk
     use(monkeypatch, provider, model)
     offline['knowledge'] = LIVE_KNOWLEDGE
     # draft -> repair -> fallback -> reviewer rejects -> regenerated third person -> repaired first person
-    offline['replies'] = [RUN3_DRAFT, RUN3_REPAIR, RUN3_REJECTION, RUN3_FINAL, FIRST_PERSON_SHORT]
+    # -> the repaired regeneration is itself reviewed before it can be used
+    offline['replies'] = [RUN3_DRAFT, RUN3_REPAIR, RUN3_REJECTION, RUN3_FINAL, FIRST_PERSON_SHORT, VALID]
     evidence = []
-    draft = bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, evidence_out=evidence)
+    draft = bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, evidence_out=evidence, agent_context=LEGACY_AGENT)
 
     result = bobbie.review_and_repair_ai_reply(
-        LIVE_CONVERSATION, LIVE_HISTORY, draft, {'next_step': 'answer_and_qualify'}, knowledge_evidence=evidence)
+        LIVE_CONVERSATION, LIVE_HISTORY, draft, {'next_step': 'answer_and_qualify'}, knowledge_evidence=evidence, agent_context=LEGACY_AGENT)
 
     review = _review_payload(offline['bodies'][2])
-    assert review['proposed_bobbie_reply'] == draft  # the reviewer sees the real fallback text
+    assert review['proposed_agent_reply'] == draft  # the reviewer sees the real fallback text
     assert review['approved_knowledge_evidence'] == evidence and evidence
     assert result == FIRST_PERSON_SHORT and _violations(result) == []
-    assert len(offline['bodies']) == 5 and len(offline['searches']) == 2
+    assert len(offline['bodies']) == 6 and len(offline['searches']) == 2
     assert 'Fix these violations: identity_switch' in json.dumps(offline['bodies'][4])
+    final_review = _review_payload(offline['bodies'][5])
+    assert final_review['proposed_agent_reply'] == FIRST_PERSON_SHORT
+    assert final_review['approved_knowledge_evidence'] == [_generator_knowledge(offline['bodies'][3])]
 
 
 @pytest.mark.parametrize('provider,model', PROVIDERS)
-def test_run2_replay_first_person_repair_still_passes_review_unchanged(offline, monkeypatch, provider, model):
+def test_run2_replay_first_person_long_draft_goes_straight_to_review(offline, monkeypatch, provider, model):
     use(monkeypatch, provider, model)
     offline['knowledge'] = LIVE_KNOWLEDGE
-    offline['replies'] = [RUN2_DRAFT, RUN2_REPAIR, VALID]
+    offline['replies'] = [RUN2_DRAFT, VALID]
     evidence = []
-    draft = bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, evidence_out=evidence)
+    draft = bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, evidence_out=evidence, agent_context=LEGACY_AGENT)
 
     result = bobbie.review_and_repair_ai_reply(
-        LIVE_CONVERSATION, LIVE_HISTORY, draft, {'next_step': 'answer_and_qualify'}, knowledge_evidence=evidence)
+        LIVE_CONVERSATION, LIVE_HISTORY, draft, {'next_step': 'answer_and_qualify'}, knowledge_evidence=evidence, agent_context=LEGACY_AGENT)
 
-    assert result == RUN2_REPAIR and len(offline['bodies']) == 3
-    # The recorded 274 characters include a blank line; policy measures the cleaned 273.
-    assert 'the blocked draft was 273 characters' in json.dumps(offline['bodies'][1])
+    # The 273-character first-person draft was once repaired only for length; it is
+    # now reviewed and sent as written (whitespace normalized), with no repair call.
+    assert result == ' '.join(RUN2_DRAFT.split()) and len(offline['bodies']) == 2
+    assert _review_payload(offline['bodies'][1])['proposed_agent_reply'] == result
 
 
 # Product decision (27 Oct 2026): natural, direct first-person facts; no forced
@@ -189,7 +202,7 @@ DIRECT_REPLY = ("I'm with Real Broker LLC, and earlier I worked on brokerage gro
 def test_draft_prompt_asks_for_direct_first_person_facts_without_forced_hedges(monkeypatch):
     from app.core.config import settings
     monkeypatch.setitem(settings['sms'], 'approved_brokerage', '')  # the brokerage-neutral default
-    prompt = bobbie.build_bobbie_prompt(LIVE_CONVERSATION)
+    prompt = bobbie.build_agent_prompt(LIVE_CONVERSATION, LEGACY_AGENT)
     assert 'State supported facts in natural, concise first person without stock hedges such as' in prompt
     assert '"publicly listed", "public records show", or "pending confirmation"' in prompt
     assert 'never invent experience, titles, or years' in prompt
@@ -205,7 +218,7 @@ def test_rules_say_status_notes_do_not_forbid_stating_a_fact():
 
 @pytest.mark.parametrize('text', [RUN4_DRAFT, DIRECT_REPLY], ids=['run4_draft', 'direct_reply'])
 def test_direct_first_person_brokerage_replies_pass_sms_policy(text):
-    assert len(text) <= 220 and _violations(text) == []
+    assert _violations(text) == []
 
 
 @pytest.mark.parametrize('text,violation', [
@@ -223,12 +236,12 @@ def test_run4_replay_accepted_direct_draft_is_sent_without_regeneration(offline,
     offline['knowledge'] = LIVE_KNOWLEDGE
     offline['replies'] = [RUN4_DRAFT, VALID]
     evidence = []
-    draft = bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, evidence_out=evidence)
+    draft = bobbie.generate_ai_reply(LIVE_CONVERSATION, LIVE_HISTORY, evidence_out=evidence, agent_context=LEGACY_AGENT)
 
     result = bobbie.review_and_repair_ai_reply(
-        LIVE_CONVERSATION, LIVE_HISTORY, draft, {'next_step': 'answer_and_qualify'}, knowledge_evidence=evidence)
+        LIVE_CONVERSATION, LIVE_HISTORY, draft, {'next_step': 'answer_and_qualify'}, knowledge_evidence=evidence, agent_context=LEGACY_AGENT)
 
     assert result == draft == RUN4_DRAFT and len(offline['bodies']) == 2
     payload = _review_payload(offline['bodies'][1])
-    assert payload['proposed_bobbie_reply'] == RUN4_DRAFT
+    assert payload['proposed_agent_reply'] == RUN4_DRAFT
     assert 'must not be rejected for lacking that wording' in payload['evidence_rules']

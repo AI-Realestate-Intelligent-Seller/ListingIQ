@@ -14,7 +14,8 @@ import pytest
 from app.core.config import settings
 from app.sms import bobbie
 from app.sms.policy import asked_questions, find_reply_policy_violations, premature_meeting_question
-from test_ai_review_evidence import (  # noqa: F401  (offline is a fixture)
+from test_ai_review_evidence import (
+    LEGACY_AGENT,  # noqa: F401  (offline is a fixture)
     LIVE_KNOWLEDGE, PROVIDERS, VALID, _disposition, _generator_knowledge, _review_payload, offline, use,
 )
 from test_bio_question_fallback import HISTORY, QUESTION, _run
@@ -36,8 +37,8 @@ def _with_question(question):
 
 def test_live_before_draft_now_counts_as_a_repeated_price_question():
     history = _with_question(QUESTION)
-    assert 'repeated_question' in find_reply_policy_violations(LIVE_BEFORE_DRAFT, max_length=240, history=history)
-    assert 'repeated_question' not in find_reply_policy_violations(NO_REPEAT_REPAIR, max_length=240, history=history)
+    assert 'repeated_question' in find_reply_policy_violations(LIVE_BEFORE_DRAFT, history=history)
+    assert 'repeated_question' not in find_reply_policy_violations(NO_REPEAT_REPAIR, history=history)
 
 
 def test_asked_questions_lists_every_earlier_bobbie_question():
@@ -67,10 +68,10 @@ def test_repeated_price_question_is_repaired_before_review(offline, monkeypatch,
     assert sent == [(NO_REPEAT_REPAIR, 'ai.reply')]
     repair = json.dumps(offline['bodies'][2])
     assert 'Fix these violations: repeated_question' in repair
-    assert 'Do not ask any question Bobbie already asked in this conversation' in repair
+    assert 'Do not ask any question the agent already asked in this conversation' in repair
     # form-only violation, so the blocked draft's supported facts are shown back for reuse
-    assert f'the blocked draft was {len(LIVE_BEFORE_DRAFT)} characters' in repair
-    assert _review_payload(offline['bodies'][3])['proposed_bobbie_reply'] == NO_REPEAT_REPAIR
+    assert 'the blocked draft was:' in repair
+    assert _review_payload(offline['bodies'][3])['proposed_agent_reply'] == NO_REPEAT_REPAIR
 
 
 @pytest.mark.parametrize('provider,model', PROVIDERS)
@@ -118,13 +119,15 @@ def test_repeated_credentials_answer_is_not_resent_verbatim(offline, monkeypatch
 @pytest.mark.parametrize('provider,model', PROVIDERS)
 def test_approved_facts_reach_generator_and_reviewer_identically(offline, monkeypatch, provider, model):
     use(monkeypatch, provider, model)
-    monkeypatch.setitem(settings['sms'], 'approved_brokerage', 'Real Broker LLC')
+    from test_ai_review_evidence import LEGACY_AGENT_REAL_BROKER  # trusted account brokerage
     offline['knowledge'] = LIVE_KNOWLEDGE
     offline['replies'] = [NO_REPEAT_REPAIR, VALID]
     from test_ai_review_evidence import LIVE_CONVERSATION
     evidence = []
-    draft = bobbie.generate_ai_reply(LIVE_CONVERSATION, _with_question(QUESTION), evidence_out=evidence)
-    bobbie.review_ai_reply(LIVE_CONVERSATION, _with_question(QUESTION), draft, {}, knowledge_evidence=evidence)
+    draft = bobbie.generate_ai_reply(LIVE_CONVERSATION, _with_question(QUESTION), evidence_out=evidence,
+                                     agent_context=LEGACY_AGENT_REAL_BROKER)
+    bobbie.review_ai_reply(LIVE_CONVERSATION, _with_question(QUESTION), draft, {}, knowledge_evidence=evidence,
+                           agent_context=LEGACY_AGENT_REAL_BROKER)
 
     used = _generator_knowledge(offline['bodies'][0])
     assert used['approved_facts']['current_brokerage'] == 'Real Broker LLC'
@@ -132,7 +135,8 @@ def test_approved_facts_reach_generator_and_reviewer_identically(offline, monkey
     assert 'Exact tenure, titles and years of experience are not approved facts' in used['approved_facts']['authority']
     payload = _review_payload(offline['bodies'][1])
     assert payload['approved_knowledge_evidence'] == [used]
-    assert 'approved_facts entries are business-approved and outrank document_status' in payload['evidence_rules']
+    assert 'approved_facts entries come from the trusted authenticated account and outrank document_status' in (
+        payload['evidence_rules'])
     assert 'the issues name the claim and the excerpt id or approved_facts entry' in payload['evidence_rules']
 
 
@@ -141,7 +145,7 @@ def test_no_approved_facts_without_business_approval(offline, monkeypatch):
     offline['knowledge'] = LIVE_KNOWLEDGE
     offline['replies'] = [NO_REPEAT_REPAIR]
     from test_ai_review_evidence import LIVE_CONVERSATION
-    bobbie.generate_ai_reply(LIVE_CONVERSATION, _with_question(QUESTION))
+    bobbie.generate_ai_reply(LIVE_CONVERSATION, _with_question(QUESTION), agent_context=LEGACY_AGENT)
     assert 'approved_facts' not in _generator_knowledge(offline['bodies'][0])
 
 
@@ -154,9 +158,11 @@ LIVE_AFTER_DRAFT = ("I'm with Real Broker LLC now, and I've previously been with
 
 
 def test_stated_visit_offer_and_repeat_in_the_live_draft_are_both_caught():
-    violations = find_reply_policy_violations(LIVE_AFTER_DRAFT, max_length=240, history=_with_question(QUESTION),
+    violations = find_reply_policy_violations(LIVE_AFTER_DRAFT, history=_with_question(QUESTION),
                                               next_step='answer_and_qualify')
-    assert {'over_length', 'repeated_question', 'premature_meeting_request'} <= set(violations)
+    # Its 290-character length is no longer a violation; the repeat and the visit offer are.
+    assert {'repeated_question', 'premature_meeting_request'} <= set(violations)
+    assert 'over_provider_limit' not in violations
     assert premature_meeting_question(LIVE_AFTER_DRAFT, 'answer_and_qualify', QUESTION).startswith(
         "I'd also like to stop by")
 
@@ -165,12 +171,14 @@ def test_stated_visit_offer_and_repeat_in_the_live_draft_are_both_caught():
 def test_repair_always_carries_the_no_meeting_rule_at_answer_steps(
         offline, monkeypatch, make_user, session, provider, model):
     use(monkeypatch, provider, model)
-    overlong = NO_REPEAT_REPAIR + ' ' + NO_REPEAT_REPAIR  # only over_length: no meeting wording in the draft
+    # Only a repeated question: no meeting wording in the draft.
+    repeated = NO_REPEAT_REPAIR.replace('Are you hoping to sell soon?', 'What price were you hoping to get for it?')
 
-    sent = _run(offline, monkeypatch, make_user, session, [BIO_DISPOSITION, overlong, NO_REPEAT_REPAIR, VALID])
+    sent = _run(offline, monkeypatch, make_user, session, [BIO_DISPOSITION, repeated, NO_REPEAT_REPAIR, VALID])
 
     assert sent == [(NO_REPEAT_REPAIR, 'ai.reply')]
     repair = json.dumps(offline['bodies'][2])
     assert 'Do not mention, offer or ask about a visit, stop-by, call or meeting in this reply' in repair
     generation = json.dumps(offline['bodies'][1])
-    assert 'do not mention, offer or ask about a visit, stop-by, call or meeting in this reply' in generation
+    assert ('Meeting offer permitted in this reply: no. Do not mention, offer or ask about a visit, stop-by, '
+            'call or meeting.') in generation

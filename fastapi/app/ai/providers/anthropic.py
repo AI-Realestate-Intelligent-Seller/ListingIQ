@@ -445,4 +445,9 @@ class AnthropicProvider:
             raise ProviderUnavailableError(
                 'Anthropic provider is unavailable', retryable=True, **common,
             )
-        raise InvalidProviderRequestError('Anthropic rejected the request', **common)
+        error = InvalidProviderRequestError('Anthropic rejected the request', **common)
+        # Anthropic's validation message names the offending request field
+        # (for example a schema limit); kept short for operator diagnostics.
+        detail = payload.get('error', {}).get('message') if isinstance(payload, dict) and isinstance(payload.get('error'), dict) else None
+        error.provider_message = str(detail)[:300] if detail else None
+        raise error

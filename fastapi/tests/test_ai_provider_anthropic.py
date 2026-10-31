@@ -37,6 +37,7 @@ from app.ai.service import AIService, ai_service
 from app.leads import reason_suggest
 from app.models import Campaign, Conversation, Lead, Message, User
 from app.sms import bobbie, reply_suggest
+from test_ai_review_evidence import LEGACY_AGENT  # noqa: E402  trusted test identity
 
 
 class FakeResponse:
@@ -230,7 +231,7 @@ def test_anthropic_multiple_tool_calls_preserve_blocks_ids_results_and_thinking(
         {'type': 'thinking', 'thinking': 'private reasoning', 'signature': 'sig-1'},
         {'type': 'text', 'text': 'I will check.'},
         {'type': 'tool_use', 'id': 'tool-lead', 'name': 'get_lead_details', 'input': {}},
-        {'type': 'tool_use', 'id': 'tool-knowledge', 'name': 'search_bobbie_knowledge',
+        {'type': 'tool_use', 'id': 'tool-knowledge', 'name': 'search_agent_knowledge',
          'input': {'query': 'commission'}},
     ]
     responses = iter([
@@ -249,7 +250,7 @@ def test_anthropic_multiple_tool_calls_preserve_blocks_ids_results_and_thinking(
         AIToolDefinition('get_lead_details', 'Read approved lead details', {
             'type': 'object', 'properties': {},
         }),
-        AIToolDefinition('search_bobbie_knowledge', 'Search approved knowledge', {
+        AIToolDefinition('search_agent_knowledge', 'Search approved knowledge', {
             'type': 'object',
             'properties': {'query': {'type': 'string'}},
             'required': ['query'],
@@ -261,7 +262,7 @@ def test_anthropic_multiple_tool_calls_preserve_blocks_ids_results_and_thinking(
     ))
     assert [call.id for call in first.tool_calls] == ['tool-lead', 'tool-knowledge']
     assert [call.name for call in first.tool_calls] == [
-        'get_lead_details', 'search_bobbie_knowledge',
+        'get_lead_details', 'search_agent_knowledge',
     ]
     assert first.provider_metadata['_provider_state'] == first_content
     assert requests_seen[0]['tool_choice'] == {'type': 'any'}
@@ -470,7 +471,7 @@ def test_bobbie_20_turn_workflow_executes_parallel_tools_and_continues(monkeypat
     first_content = [
         {'type': 'thinking', 'thinking': 'private reasoning', 'signature': 'signature-1'},
         {'type': 'tool_use', 'id': 'lead-1', 'name': 'get_lead_details', 'input': {}},
-        {'type': 'tool_use', 'id': 'knowledge-1', 'name': 'search_bobbie_knowledge',
+        {'type': 'tool_use', 'id': 'knowledge-1', 'name': 'search_agent_knowledge',
          'input': {'query': 'commission'}},
     ]
     seen = _select_global_anthropic(monkeypatch, [
@@ -483,11 +484,11 @@ def test_bobbie_20_turn_workflow_executes_parallel_tools_and_continues(monkeypat
             'text': 'That makes sense. What timing would work best for you?',
         }], usage={'input_tokens': 720, 'output_tokens': 18}),
     ])
-    monkeypatch.setattr(bobbie.knowledge, 'needs_bobbie_knowledge', lambda _text: False)
+    monkeypatch.setattr(bobbie.knowledge, 'needs_agent_knowledge', lambda _text: False)
     monkeypatch.setattr(
         bobbie.knowledge,
-        'search_bobbie_knowledge',
-        lambda query, limit: {'query': query, 'limit': limit, 'results': []},
+        'search_agent_knowledge',
+        lambda query, context, limit: {'query': query, 'limit': limit, 'results': []},
     )
     conversation = SimpleNamespace(
         contact='+13125550123',
@@ -508,8 +509,11 @@ def test_bobbie_20_turn_workflow_executes_parallel_tools_and_continues(monkeypat
         }
         for index in range(20)
     ]
+    # The knowledge tool is offered only for agent questions, so the latest
+    # owner message asks one (matching the scripted 'commission' tool query).
+    history[-1]['text'] = "What's your commission?"
 
-    result = bobbie.generate_ai_reply(conversation, history)
+    result = bobbie.generate_ai_reply(conversation, history, agent_context=LEGACY_AGENT)
 
     assert result == 'That makes sense. What timing would work best for you?'
     assert len(seen) == 2
@@ -517,7 +521,7 @@ def test_bobbie_20_turn_workflow_executes_parallel_tools_and_continues(monkeypat
     assert seen[0]['thinking'] == {'type': 'disabled'}
     assert len(seen[0]['messages']) == 20
     assert [tool['name'] for tool in seen[0]['tools']] == [
-        'get_lead_details', 'search_bobbie_knowledge',
+        'get_lead_details', 'search_agent_knowledge',
     ]
     assert seen[1]['messages'][-2] == {'role': 'assistant', 'content': first_content}
     results = seen[1]['messages'][-1]['content']
@@ -533,17 +537,17 @@ def test_bobbie_tool_errors_are_returned_and_maximum_rounds_are_bounded(monkeypa
         responses.append(message_payload(content=[{
             'type': 'tool_use',
             'id': f'knowledge-{index}',
-            'name': 'search_bobbie_knowledge',
+            'name': 'search_agent_knowledge',
             'input': {'query': 'commission'},
         }], stop_reason='tool_use'))
     responses.append(message_payload(content=[{
         'type': 'text', 'text': 'I can have the brokerage clarify that for you.',
     }]))
     seen = _select_global_anthropic(monkeypatch, responses)
-    monkeypatch.setattr(bobbie.knowledge, 'needs_bobbie_knowledge', lambda _text: False)
+    monkeypatch.setattr(bobbie.knowledge, 'needs_agent_knowledge', lambda _text: False)
     monkeypatch.setattr(
         bobbie.knowledge,
-        'search_bobbie_knowledge',
+        'search_agent_knowledge',
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError('offline tool failure')),
     )
     conversation = SimpleNamespace(
@@ -554,7 +558,7 @@ def test_bobbie_tool_errors_are_returned_and_maximum_rounds_are_bounded(monkeypa
 
     result = bobbie.generate_ai_reply(
         conversation, [{'direction': 'inbound', 'text': 'What is the commission?'}],
-    )
+    agent_context=LEGACY_AGENT)
 
     assert result == 'I can have the brokerage clarify that for you.'
     assert len(seen) == 4
@@ -613,7 +617,7 @@ def test_anthropic_bobbie_disposition_preserves_structured_workflow(monkeypatch)
     result = bobbie.analyze_conversation_disposition(
         _bobbie_conversation(),
         [{'direction': 'inbound', 'text': 'Maybe, if the timing makes sense.'}],
-    )
+    agent_context=LEGACY_AGENT)
 
     assert result['action'] == 'continue'
     assert result['lead_status'] == 'interested'
@@ -628,6 +632,13 @@ def test_anthropic_bobbie_followup_and_review_keep_existing_contracts(monkeypatc
             'type': 'text',
             'text': 'Just checking whether selling is still something you would consider.',
         }]),
+        # The generated follow-up is itself reviewed before it may be sent.
+        message_payload(content=[{
+            'type': 'text',
+            'text': json.dumps({
+                'valid': True, 'issues': [], 'rewrite_instruction': '', 'reason': 'Low-pressure follow-up.',
+            }),
+        }]),
         message_payload(content=[{
             'type': 'text',
             'text': json.dumps({
@@ -641,18 +652,20 @@ def test_anthropic_bobbie_followup_and_review_keep_existing_contracts(monkeypatc
     conversation = _bobbie_conversation()
     history = [{'direction': 'outbound', 'text': 'Would you consider selling?'}]
 
-    followup = bobbie.generate_no_response_followup(conversation, history, attempt=1, maximum=3)
+    followup = bobbie.generate_no_response_followup(conversation, history, attempt=1, maximum=3, agent_context=LEGACY_AGENT)
     review = bobbie.review_ai_reply(
         conversation,
         history + [{'direction': 'inbound', 'text': 'What would happen next?'}],
         'I can explain the next steps.',
         {'next_step': 'answer_only'},
-    )
+    agent_context=LEGACY_AGENT)
 
     assert followup == 'Just checking whether selling is still something you would consider.'
     assert review['valid'] is True
     assert review['issues'] == []
-    assert len(seen) == 2
+    assert len(seen) == 3
+    assert_wire_schema(seen[1], bobbie.REVIEW_SCHEMA)
+    assert followup in json.dumps(seen[1])
 
 
 def test_anthropic_review_rejection_runs_plain_text_repair(monkeypatch):
@@ -667,19 +680,24 @@ def test_anthropic_review_rejection_runs_plain_text_repair(monkeypatch):
             'type': 'text',
             'text': 'Thanks for clarifying. What timing would work best for you?',
         }]),
+        message_payload(content=[{'type': 'text', 'text': json.dumps({
+            'valid': True, 'issues': [], 'rewrite_instruction': '', 'reason': 'Answers the owner.'})}]),
     ])
     history = [{'direction': 'inbound', 'text': 'I may sell later this year.'}]
     disposition = {'next_step': 'answer_and_qualify'}
 
     repaired = bobbie.review_and_repair_ai_reply(
         _bobbie_conversation(), history, 'Can we meet tomorrow?', disposition,
-    )
+    agent_context=LEGACY_AGENT)
 
     assert repaired == 'Thanks for clarifying. What timing would work best for you?'
-    assert len(seen) == 2
+    # review, plain-text regeneration, then a review of the regeneration
+    assert len(seen) == 3
     assert_wire_schema(seen[0], bobbie.REVIEW_SCHEMA)
     assert 'output_config' in seen[1]
     assert 'format' not in seen[1]['output_config']
+    assert_wire_schema(seen[2], bobbie.REVIEW_SCHEMA)
+    assert repaired in json.dumps(seen[2])
 
 
 def test_anthropic_calendar_resolution_uses_native_schema(monkeypatch):

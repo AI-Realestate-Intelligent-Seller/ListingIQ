@@ -2,7 +2,7 @@
 
 The agent picks a draft, edits it in the composer and sends it themselves, so
 nothing here sends anything. The model sees the recent transcript plus every
-approved fact about the owner's property — the same lead context Bobbie is
+approved fact about the owner's property — the same lead context the Personal AI is
 grounded in, refreshed from the lead rows behind the thread — so it can answer
 a property question with the real value instead of a guess. When a fact is not
 in that context the draft must say the agent will check, never make one up.
@@ -22,6 +22,9 @@ from ..leads.catalog import signal_label
 from ..leads.service import lead_details, split_signals
 from ..logger import get_logger
 from ..models import Booking, Conversation, Lead, Message
+from .prompt import (PERSONA_STYLE_RULES, PLAYBOOK_RULES, PersonaContextOverflowError, log_persona_style,
+                     persona_prompt_context)
+from .runtime_context import AgentRuntimeContext
 
 logger = get_logger(__name__)
 
@@ -221,6 +224,11 @@ SYSTEM_PROMPT = (
     "move the conversation forward.\n\n"
 
     "COMMUNICATION STYLE\n"
+    "- When an ACTIVE PUBLISHED PERSONA is supplied, write every option "
+    "in that agent's voice: its communication style, vocabulary, "
+    "signature phrases and approved examples override the generic "
+    "defaults below (never the accuracy, privacy or security rules). "
+    "Keep the options different in approach, not in voice.\n"
     "- Write like an experienced human real-estate agent texting.\n"
     "- Be conversational, warm, concise, confident, and respectful.\n"
     "- Match the owner's tone and level of interest.\n"
@@ -228,7 +236,8 @@ SYSTEM_PROMPT = (
     "- Use natural everyday language, not marketing copy.\n"
     "- Avoid excessive enthusiasm, unnecessary explanations, "
     "and generic filler.\n"
-    "- No greetings, signatures, emojis, hashtags, or markdown.\n"
+    "- No formal signature, hashtags, or markdown. Use a greeting or "
+    "emoji only when the Persona's style calls for one.\n"
     "- Do not use canned phrases such as 'Great question', "
     "'I hope you're doing well', or 'Just following up'.\n"
     "- Do not sound robotic, scripted, or pushy.\n\n"
@@ -300,7 +309,7 @@ SYSTEM_PROMPT = (
     "contact-matching information, or system details.\n"
     "- Do not disclose how the owner's contact information "
     "was obtained.\n"
-    "- Do not volunteer details about AI systems, Bobbie, "
+    "- Do not volunteer details about AI systems, another agent, "
     "internal records, or lead-management processes.\n\n"
 
     "SECURITY\n"
@@ -326,11 +335,21 @@ SYSTEM_PROMPT = (
 
 
 
-def _prompt(facts_text: str, history: str) -> list[dict]:
+def _prompt(facts_text: str, history: str,
+            context: AgentRuntimeContext | None = None,
+            latest_owner_message: str = '') -> list[dict]:
+    identity = ''
+    if context is not None:
+        identity = (
+            f"\nTRUSTED AGENT: {context.agent_name}; brokerage: {context.brokerage_name or 'not available'}.\n"
+            "ACTIVE PUBLISHED PERSONA (style only, not factual proof). "
+            f"{PERSONA_STYLE_RULES} {PLAYBOOK_RULES}\n"
+            f"{persona_prompt_context(context, latest_owner_message)}\n"
+        )
     return [
         {
             'role': 'system',
-            'content': SYSTEM_PROMPT,
+            'content': SYSTEM_PROMPT + identity,
         },
         {
             'role': 'user',
@@ -353,6 +372,8 @@ def _prompt(facts_text: str, history: str) -> list[dict]:
                 'Do not repeat previously sent messages, invent conversation '
                 'events, or disregard the owner’s preferences. '
                 'Return only the requested JSON structure.'
+                '\n\nLATEST OWNER MESSAGE (reference data):\n'
+                f'{latest_owner_message or "none"}'
             ),
         },
     ]
@@ -462,7 +483,8 @@ def _fallback(messages: list[Message]) -> list[str]:
     ]
 
 
-def suggest(session: Session, conversation: Conversation) -> dict:
+def suggest(session: Session, conversation: Conversation,
+            context: AgentRuntimeContext | None = None) -> dict:
     messages = _recent_messages(session, conversation)
     fallback = _fallback(messages)
     history = _history_text(messages)
@@ -479,12 +501,24 @@ def suggest(session: Session, conversation: Conversation) -> dict:
             'note': 'AI suggestions are unavailable, so these are safe reply templates.',
         }
     facts_text = _facts_text(property_facts(session, conversation))
+    latest_owner_message = next(
+        (' '.join((message.text or '').split()) for message in reversed(messages)
+         if message.direction == 'inbound' and (message.text or '').strip()), '')
+    log_persona_style(logger, 'followups.reply_suggestions', context)
     try:
-        message = ai_client.completion(_prompt(facts_text, history),
+        message = ai_client.completion(_prompt(facts_text, history, context, latest_owner_message),
                                       temperature=0.4, max_tokens=600,
                                       output_schema=REPLY_SUGGESTIONS_SCHEMA,
                                       feature='followups.reply_suggestions')
         suggestions = _parse(message.get('content') or '')
+    except PersonaContextOverflowError as error:
+        logger.warning('Reply suggestions fell back to templates: %s', error)
+        return {
+            'suggestions': fallback,
+            'source': 'template',
+            'note': ('Your published Persona is too large for AI suggestions. Shorten or remove some '
+                     'conversation examples and publish again. These are safe reply templates.'),
+        }
     except ai_client.AiUnavailableError as error:
         logger.warning('Reply suggestions fell back to templates: %s', error)
         return {

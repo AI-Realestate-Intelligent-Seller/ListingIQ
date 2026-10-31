@@ -86,10 +86,21 @@ REVIEW_SCHEMA = {
             'items': {'type': 'string', 'maxLength': 100},
             'maxItems': 6,
         },
+        # Only hard-block issues may reject a draft; advisory issues never do.
+        'blocking_issues': {
+            'type': 'array',
+            'items': {'type': 'string', 'maxLength': 100},
+            'maxItems': 6,
+        },
+        'advisory_issues': {
+            'type': 'array',
+            'items': {'type': 'string', 'maxLength': 100},
+            'maxItems': 6,
+        },
         'rewrite_instruction': {'type': 'string', 'maxLength': 400},
         'reason': {'type': 'string', 'maxLength': 240},
     },
-    'required': ['valid', 'issues', 'rewrite_instruction', 'reason'],
+    'required': ['valid', 'blocking_issues', 'advisory_issues', 'issues', 'rewrite_instruction', 'reason'],
     'additionalProperties': False,
 }
 

@@ -19,6 +19,7 @@ import {
   setHandover,
 } from "../api/sms-api";
 import { LEAD_LABELS, dateLabel, formatTime, initials } from "../lib/sms-format";
+import { useThreadAutoscroll } from "../lib/use-thread-autoscroll";
 import type {
   SmsConversation,
   SmsMessage,
@@ -159,11 +160,8 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
     setIsListOpen(false);
   }
 
-  // Keep the newest message in view.
-  useEffect(() => {
-    const thread = threadRef.current;
-    if (thread) thread.scrollTop = thread.scrollHeight;
-  }, [messages]);
+  // Follow new messages only when the reader is at the bottom; never on a plain refresh.
+  const followNextMessage = useThreadAutoscroll(threadRef, messages, activeId);
 
   async function handleSend(event: React.FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -174,6 +172,7 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
     const text = String(field.get("text") ?? "").trim();
     if (!text) return;
 
+    followNextMessage();
     setIsSending(true);
     setErrorMessage("");
     try {
@@ -380,7 +379,7 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
             {active.awaiting_broker_reply ? (
               <p className="sms-attention" role="status">
                 {active.lead_status === "location_discussion" ? (
-                  <><strong>Location to confirm.</strong> Agree the location before sending appointment details.</>
+                  <><strong>Appointment to confirm.</strong> The visit is at the property; confirm the time with the owner before sending appointment details.</>
                 ) : (
                   <><strong>Waiting for you.</strong> Bobbie has stepped back on this
                     thread, so this reply will not be answered automatically.</>

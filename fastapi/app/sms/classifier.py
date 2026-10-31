@@ -50,6 +50,70 @@ WANT_MORE_INFO = re.compile(
 )
 
 
+# Owner says they want to sell ("I just want to sell it quickly", "looking to sell").
+SELL_INTENT = re.compile(
+    r"\b(?:want|wanna|need|looking|trying|hoping|plan(?:ning)?|ready|going|like|prefer)\s+to\s+sell\b"
+    r"|\bwanna\s+sell\b"
+    r"|\bsell\s+(?:it|this|the\s+\w+|my\s+\w+)\s+(?:quickly|quick|fast|asap|soon|now)\b",
+    re.I,
+)
+SELL_NEGATION = re.compile(
+    r"\b(?:don['’]?t|do\s+not|not|never|no\s+longer|won['’]?t|isn['’]?t|aren['’]?t)\b[^.?!]{0,25}$", re.I)
+SELL_URGENCY = re.compile(
+    r'\b(?:quick(?:ly)?|fast|asap|as soon as possible|soon|immediately|right away|urgent(?:ly)?'
+    r'|this (?:week|month)|next (?:week|month))\b',
+    re.I,
+)
+# A money amount: "$675,000", "675000$", "675k", "$1.2M", "675 thousand".
+MONEY = re.compile(
+    r'(?<![\w.])(\$\s?)?(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s?(k|m|mm|million|thousand)?\b\s?(\$|dollars|usd)?',
+    re.I,
+)
+PRICE_CONTEXT = re.compile(
+    r'\b(?:price|asking|ask|list|sell|get|want|for|around|about|like|at|offer|worth|value|guarantee|target'
+    r'|hoping|expect(?:ing)?)\b[^.?!]{0,20}$',
+    re.I,
+)
+_MULTIPLIERS = {'k': 1_000, 'thousand': 1_000, 'm': 1_000_000, 'mm': 1_000_000, 'million': 1_000_000}
+
+
+def _stated_price(text: str) -> int | None:
+    """The owner's stated dollar figure, only when it reads as a property price."""
+    for match in MONEY.finditer(text):
+        dollar_before, number, suffix, dollar_after = match.groups()
+        try:
+            amount = float(number.replace(',', '')) * _MULTIPLIERS.get((suffix or '').lower(), 1)
+        except ValueError:
+            continue
+        explicit = bool(dollar_before or dollar_after or suffix)
+        if not explicit and not PRICE_CONTEXT.search(text[:match.start()]):
+            continue
+        if 10_000 <= amount <= 100_000_000:
+            return round(amount)
+    return None
+
+
+def seller_signals(text: str = '') -> dict:
+    """Deterministic read of selling intent, urgency and the owner's own target price.
+
+    A stated price is the owner's expectation, never a verified valuation.
+    """
+    value = str(text or '')
+    intent_match = next((match for match in SELL_INTENT.finditer(value)
+                         if not SELL_NEGATION.search(value[:match.start()])), None)
+    selling_intent = bool(intent_match) and not DIRECT_REJECTION.search(value)
+    price = _stated_price(value)
+    urgency = 'high' if SELL_URGENCY.search(value) else None
+    return {
+        'selling_intent': selling_intent,
+        'urgency': urgency if selling_intent else None,
+        'target_price': price,
+        'target_price_text': f'${price:,}' if price else None,
+        # Enough to stop qualifying and offer a call or visit.
+        'strong': selling_intent and bool(price or urgency),
+    }
+
+
 def is_opt_out(text: str = '') -> bool:
     return bool(OPT_OUT.search(str(text or '').strip()))
 
@@ -74,9 +138,10 @@ def classify_lead_message(text: str = '') -> dict | None:
         return {'lead_status': 'interested'}
     if DIRECT_REJECTION.search(value) and not QUALIFIED_PROCESS_OBJECTION.search(value):
         return {'lead_status': 'not_interested', 'terminal': True}
-    if READY_TO_SELL.search(value):
+    signals = seller_signals(value)
+    if READY_TO_SELL.search(value) or signals['strong']:
         return {'lead_status': 'ready_to_sell'}
-    if INTERESTED.search(value) or CALL_OPENNESS.search(value):
+    if INTERESTED.search(value) or CALL_OPENNESS.search(value) or signals['selling_intent']:
         return {'lead_status': 'interested'}
     if WANT_MORE_INFO.search(value):
         return {'lead_status': 'want_more_info'}

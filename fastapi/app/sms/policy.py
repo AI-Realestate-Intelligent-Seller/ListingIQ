@@ -1,6 +1,6 @@
-"""Output safety guards for Bobbie's SMS replies.
+"""Output safety guards for Personal AI SMS replies.
 
-Direct port of the prototype's bobbie-policy.js. These are deterministic checks
+These are deterministic checks
 applied to every generated draft; conversation intent and calendar state are
 decided by the configured AI provider in bobbie.py.
 """
@@ -10,6 +10,7 @@ import os
 import re
 
 from ..core.config import settings
+from .classifier import seller_signals
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +65,7 @@ def ai_debug_safely(function):
 EMAIL_ADDRESS = re.compile(r'\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b', re.I)
 PHONE_NUMBER = re.compile(r'(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b')
 DELIVERY_PROMISE = re.compile(
-    r"\b(?:i['’]?ll|i will|i can(?!['’]?t|\s+not)|we['’]?ll|we will|have Bobbie)\b[^.!?]{0,90}"
+    r"\b(?:i['’]?ll|i will|i can(?!['’]?t|\s+not)|we['’]?ll|we will|have (?:the )?agent)\b[^.!?]{0,90}"
     r"\b(?:email|send|pull|get|prepare|share)\b[^.!?]{0,90}"
     r"\b(?:email|comps?|comparables?|recent sales|sales data|details|breakdown|range|estimate|report)\b"
     r"|\b(?:i['’]?ll|i will) (?:send|get) (?:that|those|them|it) (?:over|to you)\b"
@@ -92,8 +93,8 @@ UNSUPPORTED_PRODUCTION = re.compile(
     r"|\b(?:i|we)(?:['’]?ve| have) handled\s+(?:\w+\s+){0,2}?(?:sales|transactions|listings|deals|closings|homes|properties)\b",
     re.I
 )
-# First-person work history is allowed ("I've worked with RE/MAX Premier on brokerage
-# growth"); a claim of local track record or a client count is not.
+# First-person work history is allowed when authorized evidence supports it;
+# an unsupported local track record or client count is not.
 UNSUPPORTED_LOCAL_EXPERIENCE = re.compile(
     r"\b(?:i['’]?ve|i have|i)\s+(?:worked|helped|work|served|represented)\b[^.?!]{0,60}?"
     r"(?:\b(?:in|around|across|throughout|near)\s+(?:your|this|the|our)\s+(?:area|neighbou?rhood|community|town"
@@ -120,29 +121,36 @@ UNSUPPORTED_OUTCOME = re.compile(
     r'|sell for the right price|attract the right buyer quickly)\b',
     re.I,
 )
-IDENTITY_ASSISTANT = re.compile(r"\bBobbie Fisher['’]?s (?:AI )?assistant\b", re.I)
-IDENTITY_THIRD_PERSON = re.compile(
-    r'\bBobbie(?:\s+Fisher)?\s+(?:would|will|can|could|needs?|has|had|focuses|is|was|previously|currently'
-    r'|recently|also|works|worked|joined|specializes|helps|leads|led)\b'
-    r"|\bBobbie(?:\s+Fisher)?['’]s\s+(?:background|experience|career|work|team|brokerage|office|role|history)\b"
-    r'|\b(?:she|her)\s+(?:would|will|can|needs?|has|focuses|is)\b',
+# Promising a sale price, sale, or timeline outcome. Negated forms ("I can't
+# guarantee") do not match.
+UNSUPPORTED_GUARANTEE = re.compile(
+    r"\b(?:i|we)(?:['’]ll| will| can| do)?\s+guarantee\b"
+    r"|\bguaranteed?\s+(?:to\s+(?:sell|get)|(?:a\s+)?(?:sale|price|offer|buyer)|\$\s?\d)",
     re.I,
 )
-# Bobbie introducing herself ("I'm Bobbie Fisher currently…") and quoted owner
-# text are not third-person self-reference, so they are removed before matching.
-IDENTITY_SELF_INTRODUCTION = re.compile(
-    r"\b(?:I['’]m|I am|this is|it['’]s|here['’]s)\s+Bobbie(?:\s+Fisher)?\b", re.I)
+GUARANTEE_NEGATION = re.compile(
+    r"\b(?:can['’]?t|cannot|can not|won['’]?t|don['’]?t|do not|never|no one can|nobody can|not)\b[^.?!]{0,15}$", re.I)
+
+
+def _unsupported_guarantee(text: str) -> str:
+    for match in UNSUPPORTED_GUARANTEE.finditer(text):
+        if not GUARANTEE_NEGATION.search(text[:match.start()]):
+            return match.group(0)
+    return ''
+
+
+IDENTITY_ASSISTANT = re.compile(r"\b(?:my|the agent['’]?s) (?:AI )?assistant\b", re.I)
 QUOTED_TEXT = re.compile(r'"[^"]*"|“[^”]*”')
 
 
-# The owner asks whether a person, Bobbie herself, or an AI is texting.
+# The owner asks whether a person or an AI is texting.
 AI_IDENTITY_QUESTION = re.compile(
     r"\b(?:are|r)\s+(?:you|u)\s+(?:an?\s+|really\s+|actually\s+)?(?:ai|a\.i\.|bot|robot|chat\s?bot|human|real(?!\s+estate)"
-    r"|(?:a\s+)?(?:real\s+)?person|automated|(?:a\s+)?machine|bobbie)\b"
+    r"|(?:a\s+)?(?:real\s+)?person|automated|(?:a\s+)?machine)\b"
     r"|\bis\s+this\s+(?:an?\s+|really\s+|actually\s+)?(?:ai|bot|robot|automated|(?:a\s+)?(?:real\s+)?(?:person|human)"
-    r"|real(?!\s+estate)|bobbie)\b"
+    r"|real(?!\s+estate))\b"
     r"|\bam\s+i\s+(?:talking|speaking|texting|chatting)\s+(?:to|with)\s+(?:an?\s+|the\s+)?(?:ai|bot|robot|machine"
-    r"|computer|(?:real\s+)?(?:person|human)|bobbie)\b"
+    r"|computer|(?:real\s+)?(?:person|human))\b"
     r"|\b(?:automated|auto-?generated|computer[-\s]generated)\s+(?:message|reply|text|response)s?\b",
     re.I,
 )
@@ -150,16 +158,50 @@ AI_DISCLOSURE = re.compile(r'\b(?:AI|A\.I\.|automated|artificial intelligence)\b
 # Never claim a human is personally texting or deny being automated.
 FALSE_HUMAN_CLAIM = re.compile(
     r"\b(?:I['’]?m|I\s+am)\s+(?:not\s+(?:an?\s+)?(?:ai|bot|robot|machine|automated)|(?:a\s+)?real\s+(?:person|human)"
-    r"|(?:a\s+)?human|really\s+Bobbie|actually\s+Bobbie)\b"
+    r"|(?:a\s+)?human)\b"
     r"|\bnot\s+(?:an?\s+)?(?:ai|bot|robot|automated)\b"
-    r"|\b(?:this\s+is|it['’]s)\s+(?:really|actually)\s+(?:me|Bobbie)\b"
+    r"|\b(?:this\s+is|it['’]s)\s+(?:really|actually)\s+me\b"
     r"|\bpersonally\s+(?:texting|typing|writing|replying)\b",
     re.I,
 )
 
 
-def is_ai_identity_question(text: str = '') -> bool:
-    return bool(AI_IDENTITY_QUESTION.search(QUOTED_TEXT.sub(' ', str(text or ''))))
+def _agent_name_pattern(agent_name: str = '') -> str:
+    """Regex for the agent's full name or first name alone ("Dana" / "Dana Rivera")."""
+    parts = [part for part in re.split(r'\s+', str(agent_name or '').strip()) if part]
+    if not parts:
+        return ''
+    return re.escape(parts[0]) + ''.join(rf'(?:\s+{re.escape(part)})?' for part in parts[1:])
+
+
+def is_ai_identity_question(text: str = '', agent_name: str = '') -> bool:
+    """Is the owner asking whether a person, the agent personally, a bot or an AI is texting?"""
+    value = QUOTED_TEXT.sub(' ', str(text or ''))
+    if AI_IDENTITY_QUESTION.search(value):
+        return True
+    name = _agent_name_pattern(agent_name)
+    if not name:
+        return False
+    personal = re.compile(
+        rf"\b(?:are|r)\s+(?:you|u)\s+(?:really\s+|actually\s+)?{name}\b"
+        rf"|\bis\s+this\s+(?:really\s+|actually\s+)?{name}\b"
+        rf"|\bam\s+i\s+(?:talking|speaking|texting|chatting)\s+(?:to|with)\s+{name}\b",
+        re.I,
+    )
+    return bool(personal.search(value))
+
+
+def _false_human_claim(text: str, agent_name: str = '') -> bool:
+    """Denying automation, or claiming the agent is personally typing ("this is really Dana")."""
+    if FALSE_HUMAN_CLAIM.search(text):
+        return True
+    name = _agent_name_pattern(agent_name)
+    if not name:
+        return False
+    return bool(re.search(
+        rf"\b(?:I['’]?m|I\s+am)\s+(?:really|actually)\s+{name}\b"
+        rf"|\b(?:this\s+is|it['’]s)\s+(?:really|actually)\s+{name}\b",
+        text, re.I))
 
 
 def _latest_owner_text(history: list | None) -> str:
@@ -169,9 +211,34 @@ def _latest_owner_text(history: list | None) -> str:
     return ''
 
 
-def _third_person_identity(text: str) -> bool:
-    remainder = IDENTITY_SELF_INTRODUCTION.sub('I', QUOTED_TEXT.sub(' ', text))
-    return bool(IDENTITY_THIRD_PERSON.search(remainder))
+def _third_person_identity(text: str, agent_name: str = '') -> bool:
+    """The agent talking about themselves by name, e.g. "Dana would" or "Dana Rivera's team".
+
+    Matches the full name or the first name alone, as the original Bobbie check
+    did. Self-introductions ("I'm Dana Rivera") and quoted owner text are removed
+    first because they are not third-person self-reference.
+    """
+    parts = [part for part in re.split(r'\s+', str(agent_name or '').strip()) if part]
+    if not parts:
+        return False
+    first = re.escape(parts[0])
+    rest = ''.join(rf'(?:\s+{re.escape(part)})?' for part in parts[1:])
+    name = rf'{first}{rest}'
+    introduction = re.compile(
+        rf"\b(?:I['’]m|I am|this is|it['’]s|here['’]s)\s+{name}\b", re.I)
+    third_person = re.compile(
+        rf'\b{name}\s+(?:would|will|can|could|needs?|has|had|focuses|is|was|previously|currently'
+        rf'|recently|also|works|worked|joined|specializes|helps|leads|led)\b'
+        rf"|\b{name}['’]s\s+(?:background|experience|career|work|team|brokerage|office|role|history|services)\b",
+        re.I,
+    )
+    unquoted = QUOTED_TEXT.sub(' ', text)
+    # "<name>'s assistant" is checked before introductions are stripped, so
+    # "This is Dana Rivera's AI assistant" is still caught.
+    assistant = re.compile(rf"\b{name}['’]s\s+(?:AI\s+)?assistant\b", re.I)
+    return bool(assistant.search(unquoted) or third_person.search(introduction.sub('I', unquoted)))
+
+
 PHONE_SOURCE_CLAIM_SUBJECT = re.compile(r'\b(?:number|contact info|contact information)\b', re.I)
 PHONE_SOURCE_CLAIM_ORIGIN = re.compile(r'\b(?:public|property|listing|county|tax)\s+(?:record|records|data)\b', re.I)
 
@@ -186,8 +253,68 @@ def clean_reply(value: str = '') -> str:
     return re.sub(r'\s+', ' ', text).strip()
 
 
+def strip_trailing_signature(reply: str = '', agent_name: str = '', brokerage_name: str = '') -> str:
+    """Remove a trailing name/brokerage sign-off from a conversational reply.
+
+    The first outreach identifies the agent and brokerage; the model tends to
+    copy that sign-off from the thread onto every later reply. Only a sign-off
+    standing alone after the final sentence is removed (for example
+    "... Claude Tester – Claude Test Brokerage"); a sentence that names the
+    agent ("This is Claude Tester with ...") and any other text, including
+    opt-out or disclosure wording, is never touched.
+    """
+    text = str(reply or '')
+    name = ' '.join(str(agent_name or '').split())
+    if not name:
+        return text
+    brokerage = ' '.join(str(brokerage_name or '').split())
+    tail = (r'(?:[-–—]\s*)?' + re.escape(name)
+            + (r'(?:\s*(?:[-–—|,]|\bwith\b|\bat\b)\s*' + re.escape(brokerage) + ')?' if brokerage else '')
+            + r'\s*\.?\s*$')
+    match = re.search(r'(?<=[.!?])\s+' + tail, text, re.I)
+    if not match or not text[:match.start()].strip():
+        return text
+    return text[:match.start()].rstrip()
+
+
+# Hard provider ceiling for one outbound message (the same 1600-character cap the
+# manual send API enforces). This is a carrier/provider limit, not a style limit:
+# AI replies are never rejected or trimmed for being longer than one segment.
+SMS_PROVIDER_MAX_CHARS = 1600
+
+# GSM 03.38 basic character set plus its extension table (extension chars count twice).
+_GSM7_BASIC = set(
+    '@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !"#¤%&\'()*+,-./0123456789:;<=>?'
+    '¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà')
+_GSM7_EXTENDED = set('^{}\\[~]|€\f')
+
+
+def estimate_sms_segments(text: str = '') -> dict:
+    """Estimated carrier segments for reporting only; never a reason to reject a reply."""
+    value = str(text or '')
+    if all(char in _GSM7_BASIC or char in _GSM7_EXTENDED for char in value):
+        units = sum(2 if char in _GSM7_EXTENDED else 1 for char in value)
+        encoding, single, multi = 'GSM-7', 160, 153
+    else:
+        # UCS-2 counts UTF-16 code units; curly quotes or emoji force this encoding.
+        units = len(value.encode('utf-16-le')) // 2
+        encoding, single, multi = 'UCS-2', 70, 67
+    segments = 0 if units == 0 else (1 if units <= single else -(-units // multi))
+    estimate = {'encoding': encoding, 'characters': len(value), 'segments': segments}
+    try:
+        price = float(os.getenv('SMS_COST_PER_SEGMENT_USD') or 0)
+    except ValueError:
+        price = 0.0
+    if price > 0:
+        estimate['estimated_cost_usd'] = round(price * segments, 4)
+    return estimate
+
+
 def fit_complete_sms(value: str, max_length: int = 240) -> str:
-    """Trim to a complete sentence rather than cutting a word in half."""
+    """Trim to a complete sentence rather than cutting a word in half.
+
+    Not used on AI replies any more: generated SMS are never silently truncated.
+    """
     text = clean_reply(value)
     if len(text) <= max_length:
         return text
@@ -236,7 +363,7 @@ def _question_intent(value: str = '') -> str:
 
 
 def asked_questions(history: list | None = None) -> list:
-    """Every question Bobbie has already sent in this conversation, oldest first."""
+    """Every question the agent has already sent in this conversation, oldest first."""
     asked = []
     for item in history or []:
         if item.get('direction') == 'outbound':
@@ -247,14 +374,15 @@ def asked_questions(history: list | None = None) -> list:
 # Re-asking these topics is a repeat even when worded differently
 # ("What price were you hoping to get for it?" vs "…for 1 Test St?").
 REPEAT_BY_INTENT = {'scheduled_meeting', 'pricing'}
-# Steps at which Bobbie must not yet ask for a visit, call or meeting.
+# Steps at which the agent must not yet ask for a visit, call or meeting.
 NO_MEETING_STEPS = {'answer_and_qualify', 'answer_only'}
 
 
 # The prompt deliberately answers valuation, comps and fee questions with an
 # in-person look, so a visit invitation is expected there.
 VISIT_ANSWERS_QUESTION = re.compile(
-    r'\b(?:price|pricing|value|valuation|worth|sell for|comps?|comparables?|fees?|commission)\b', re.I)
+    r'\b(?:price|pricing|value|valuation|worth|sell for|comps?|comparables?|fees?|commission)\b'
+    r'|\bhow much\b[^.?!]{0,40}\b(?:sell|get|list)\b', re.I)
 
 
 # A first-person visit offer stated rather than asked ("I'd like to stop by…").
@@ -267,9 +395,99 @@ MEETING_OFFER = re.compile(
 )
 
 
-def premature_meeting_question(reply: str = '', next_step: str | None = None, latest_owner_text: str = '') -> str:
+def meeting_offer_permitted(next_step: str | None = None, latest_owner_text: str = '',
+                            calendar_state: str = 'none') -> bool:
+    """Single rule for whether this reply may offer a call or visit.
+
+    The generator's instructions, the deterministic policy check and the
+    reviewer payload all use this value, so they cannot disagree.
+    """
+    if calendar_state == 'call_declined' or next_step == 'close':
+        return False
+    if calendar_state == 'call_accepted':
+        # The owner already agreed to meet; asking when suits them is expected.
+        return True
+    if next_step not in NO_MEETING_STEPS:
+        return True
+    latest = latest_owner_text or ''
+    # Valuation/fee questions, a stated price, and a seller who already gave a
+    # price or urgency are answered with an appointment offer rather than
+    # another question.
+    signals = seller_signals(latest)
+    return bool(VISIT_ANSWERS_QUESTION.search(latest) or signals['strong'] or signals['target_price'])
+
+
+# The owner refuses an in-person visit ("I don't want anyone coming to the house").
+VISIT_REFUSAL = re.compile(
+    r"\b(?:don['’]?t|do not|won['’]?t|not)\s+(?:want|need|like|allow|accept|do)\b[^.?!]{0,30}"
+    r"\b(?:anyone|anybody|someone|people|visits?|visiting|com(?:e|ing) (?:by|over|out|to|in)|stop(?:ping)? by"
+    r"|in[- ]person|walk-?throughs?|inside|showings?)\b"
+    r"|\bno (?:visits?|walk-?throughs?|showings?|one (?:coming|in)|in[- ]person)\b",
+    re.I,
+)
+# The owner also refuses calls or any meeting, so a phone alternative is not wanted either.
+PHONE_REFUSAL = re.compile(
+    r"\b(?:no|don['’]?t|do not|not|won['’]?t)\b[^.?!]{0,20}\b(?:calls?|calling|phone|talk|meet\w*)\b", re.I)
+
+
+# Any owner wording that refuses, defers or limits a meeting, call or visit.
+# Deliberately broad: it only decides whether a model's call_declined label is
+# kept, so a false match keeps the safer "declined" state.
+MEETING_REFUSAL = re.compile(
+    r"\b(?:no|not|don['’]?t|do not|won['’]?t|will not|never|rather not|can['’]?t|cannot|stop)\b[^.?!]{0,30}"
+    r"\b(?:calls?|calling|phone|talk(?:ing)?|meet\w*|visits?|visiting|com(?:e|ing)|stop(?:ping)? by|appointments?"
+    r"|walk-?throughs?|in[- ]person|schedul\w*|see (?:the|my|our) (?:house|home|place|property))\b"
+    r"|\bno,? thanks?\b|\bno thank you\b|\bnot interested\b|\b(?:just|only) (?:text|texting)\b|\btext only\b"
+    r"|\b(?:keep it|stick) to text\b|\bnot (?:right )?now\b|\bnot yet\b|\bmaybe later\b|\bnot ready\b"
+    r"|\btoo busy\b|\bleave me alone\b|\bpass\b",
+    re.I,
+)
+
+
+def owner_declined_meeting(history: list | None = None) -> bool:
+    """Whether any owner message in the thread refuses or defers a meeting, call or visit.
+
+    A question, challenge or objection ("Why should I trust your approach?")
+    is not a refusal.
+    """
+    for item in history or []:
+        if item.get('direction') != 'inbound':
+            continue
+        text = QUOTED_TEXT.sub(' ', str(item.get('text') or ''))
+        if MEETING_REFUSAL.search(text) or VISIT_REFUSAL.search(text):
+            return True
+    return False
+
+
+def visit_only_refusal(text: str = '') -> bool:
+    """The owner declined an in-person visit but not a phone conversation."""
+    value = QUOTED_TEXT.sub(' ', str(text or ''))
+    return bool(VISIT_REFUSAL.search(value)) and not PHONE_REFUSAL.search(value)
+
+
+# The owner asks the automated thread to negotiate or to give legal, tax or
+# financial advice. The AI declines by text and a human takes over.
+ESCALATION_REQUEST = re.compile(
+    r"\b(?:can|could|will|would)\s+(?:you|u)\b[^.?!]{0,30}\bnegotiat\w*"
+    r"|\bnegotiat\w*\b[^.?!]{0,30}\b(?:for|on behalf of)\s+(?:me|us)\b"
+    r"|\b(?:legal|tax|financial|investment)\s+advice\b"
+    r"|\b(?:should|do)\s+i\s+(?:need|get|hire|talk to)\s+(?:a|an)\s+(?:lawyer|attorney|accountant|cpa)\b",
+    re.I,
+)
+
+
+def escalation_reason(latest_owner_text: str = '') -> str:
+    """'negotiation' or 'professional_advice' when a human must take the thread, else ''."""
+    match = ESCALATION_REQUEST.search(QUOTED_TEXT.sub(' ', str(latest_owner_text or '')))
+    if not match:
+        return ''
+    return 'negotiation' if 'negotiat' in match.group(0).lower() else 'professional_advice'
+
+
+def premature_meeting_question(reply: str = '', next_step: str | None = None, latest_owner_text: str = '',
+                               calendar_state: str = 'none') -> str:
     """The visit/meeting request or offer made before the disposition allows one, if any."""
-    if next_step not in NO_MEETING_STEPS or VISIT_ANSWERS_QUESTION.search(latest_owner_text or ''):
+    if calendar_state != 'call_declined' and meeting_offer_permitted(next_step, latest_owner_text, calendar_state):
         return ''
     question = next((question for question in _questions(reply)
                      if _question_intent(question) == 'scheduled_meeting'), '')
@@ -280,7 +498,7 @@ def premature_meeting_question(reply: str = '', next_step: str | None = None, la
 
 
 def find_conversation_repetition(reply: str, history: list | None = None) -> str:
-    """Bobbie must progress the conversation, never re-ask an answered question."""
+    """The agent must progress the conversation, never re-ask an answered question."""
     prior = [clean_reply(item.get('text') or '') for item in (history or [])
              if item.get('direction') == 'outbound']
     prior = [item for item in prior if item]
@@ -288,11 +506,11 @@ def find_conversation_repetition(reply: str, history: list | None = None) -> str
     current_questions = _questions(current)
     for previous in prior:
         if current.lower() == previous.lower():
-            ai_debug('REPEAT', 'repeated_reply: identical to an earlier Bobbie message',
+            ai_debug('REPEAT', 'repeated_reply: identical to an earlier agent message',
                      text=current, previous=previous)
             return 'repeated_reply'
         if len(_normalized_tokens(current)) >= 6 and similarity(current, previous) >= 0.86:
-            ai_debug('REPEAT', 'repeated_reply: similarity >= 0.86 to an earlier Bobbie message',
+            ai_debug('REPEAT', 'repeated_reply: similarity >= 0.86 to an earlier agent message',
                      text=current, previous=previous, similarity=round(similarity(current, previous), 3))
             return 'repeated_reply'
         for current_question in current_questions:
@@ -312,20 +530,60 @@ def find_conversation_repetition(reply: str, history: list | None = None) -> str
     return ''
 
 
+def remove_repeated_questions(reply: str, history: list | None = None) -> str:
+    """The reply without the questions that repeat an earlier agent question.
+
+    Used to repair a ``repeated_question`` block surgically: the rest of an
+    otherwise useful answer is kept as written instead of being regenerated.
+    """
+    current = clean_reply(reply)
+    prior = [question for item in (history or []) if item.get('direction') == 'outbound'
+             for question in _questions(clean_reply(item.get('text') or ''))]
+    kept = current
+    for question in _questions(current):
+        intent = _question_intent(question)
+        if any(similarity(question, previous) >= 0.72
+               or (intent in REPEAT_BY_INTENT and intent == _question_intent(previous)) for previous in prior):
+            kept = kept.replace(question, ' ')
+    return clean_reply(kept)
+
+
+# Owner conversations are about a residential property, so any business or
+# commercial experience is off-limits. "Laundry room" and "business days" are
+# ordinary residential wording and are not matched.
+BUSINESS_EXPERIENCE = re.compile(
+    r"\b(?:laundromats?|coin[- ]?(?:op|laundr\w*)"
+    r"|business(?:es)?\s+(?:sales?|brokerage|brokers?|owners?|acquisitions?|for sale|experience|background|deals?)"
+    r"|(?:sold|sell(?:ing)?|bought|buy(?:ing)?|own(?:ed|ing)?|ran|run(?:ning)?)\s+(?:a |my |several |many |\d+\+?\s+)?"
+    r"(?:small\s+)?business(?:es)?"
+    r"|small[- ]business(?:es)?"
+    r"|commercial\s+(?:real estate|propert\w*|sales?|deals?|buildings?|space|listings?|clients?)"
+    r"|investment\s+propert\w*)\b",
+    re.I,
+)
+
+EXPERIENCE_FALLBACK = ('Fair question. I don\u2019t want to overstate anything by text, so I won\u2019t quote sales '
+                       'numbers I can\u2019t back up here. Would it help if I went over specific, verified examples '
+                       'with you directly?')
+
+
 def find_reply_policy_violations(reply: str, phone_source_known: bool | None = None,
-                                 max_length: int = 240, history: list | None = None,
-                                 next_step: str | None = None) -> list:
+                                 max_length: int | None = None, history: list | None = None,
+                                 next_step: str | None = None,
+                                 agent_name: str = '', calendar_state: str = 'none') -> list:
+    """Hard deterministic blocks only. Length is checked against the provider
+    ceiling (``SMS_PROVIDER_MAX_CHARS``), never against a style target."""
     text = clean_reply(reply)
     violations = []
-    if len(text) > max_length:
-        violations.append('over_length')
-    if FALSE_HUMAN_CLAIM.search(text):
+    if len(text) > (max_length or SMS_PROVIDER_MAX_CHARS):
+        violations.append('over_provider_limit')
+    if _false_human_claim(text, agent_name):
         violations.append('false_human_claim')
-    if is_ai_identity_question(_latest_owner_text(history)):
-        # A truthful "automated on Bobbie Fisher's behalf" answer must name Bobbie.
+    if is_ai_identity_question(_latest_owner_text(history), agent_name):
+        # A truthful answer must disclose automation; the system prompt supplies identity.
         if not AI_DISCLOSURE.search(text):
             violations.append('missing_ai_disclosure')
-    elif IDENTITY_ASSISTANT.search(text) or _third_person_identity(text):
+    elif IDENTITY_ASSISTANT.search(text) or _third_person_identity(text, agent_name):
         violations.append('identity_switch')
     if EMAIL_ADDRESS.search(text):
         violations.append('invented_email')
@@ -345,8 +603,12 @@ def find_reply_policy_violations(reply: str, phone_source_known: bool | None = N
         violations.append('unsupported_local_experience')
     if UNSUPPORTED_OUTCOME.search(text):
         violations.append('unsupported_outcome')
+    if _unsupported_guarantee(text):
+        violations.append('unsupported_guarantee')
     if PRECISE_TENURE.search(text):
         violations.append('unsupported_tenure')
+    if BUSINESS_EXPERIENCE.search(text):
+        violations.append('business_experience')
     if EXAMPLE_FACT_LEAK.search(text):
         violations.append('example_fact_leak')
     if (phone_source_known is False
@@ -356,50 +618,92 @@ def find_reply_policy_violations(reply: str, phone_source_known: bool | None = N
     repetition = find_conversation_repetition(text, history or [])
     if repetition:
         violations.append(repetition)
-    if premature_meeting_question(text, next_step, _latest_owner_text(history)):
+    if premature_meeting_question(text, next_step, _latest_owner_text(history), calendar_state):
         violations.append('premature_meeting_request')
     return list(dict.fromkeys(violations))
 
 
-# Questions about Bobbie herself, including how long she has been somewhere,
-# as opposed to how long a property sale will take.
+# Questions about the resolved agent, as opposed to a property-sale timeline.
+# Owners ask about the agent directly ("you") or in the third person ("she",
+# "he", or by name; the name part is added per agent in _agent_question).
 AGENT_TENURE_QUESTION = re.compile(
-    r"\bhow long (?:has|have|had|did|was|were)\s+(?:bobbie|she|you|her)\b[^?.!]{0,40}"
+    r"\bhow long (?:has|have|had|did|was|were)\s+(?:you|the agent|she|he|her|him)\b[^?.!]{0,40}"
     r"\b(?:been|with|at|worked|working|in real estate|an? (?:agent|broker|realtor))\b",
     re.I,
 )
 AGENT_BACKGROUND_QUESTION = re.compile(
-    r"\bwho(?:\s+is|['’]s)\s+(?:bobbie|she)\b|\btell me about (?:bobbie|yourself|her)\b"
+    r"\bwho(?:\s+is|['’]s)\s+(?:she|he)\b|\btell me about (?:yourself|your background|her|him)\b"
     r"|\b(?:which|what)\s+(?:brokerage|company|firm|office)\b"
-    r"|\b(?:bobbie|she|you)\b[^?.!]{0,40}\b(?:brokerage|re/?max|real broker|background|licensed)\b",
+    r"|\b(?:you|she|he)\b[^?.!]{0,40}\b(?:brokerage|company|firm|background|licensed|experience)\b",
     re.I,
 )
 
 
-def _agent_background_fallback(latest: str) -> str:
-    """Approved facts only: the current brokerage if approved, history without an invented tenure."""
-    approved = (settings.get('sms') or {}).get('approved_brokerage') or ''
-    current = f'I’m with {approved} now' if approved else 'I’d rather not guess at my current brokerage here'
-    earlier = ', and my RE/MAX Premier work was earlier' if re.search(r're/?max', latest, re.I) else ''
+def _agent_question(latest: str, agent_name: str = '') -> bool:
+    """A question about the agent's identity, brokerage, background or tenure."""
+    if AGENT_TENURE_QUESTION.search(latest) or AGENT_BACKGROUND_QUESTION.search(latest):
+        return True
+    name = _agent_name_pattern('' if agent_name == 'the agent' else agent_name)
+    if not name:
+        return False
+    return bool(re.search(
+        rf"\bwho(?:\s+is|['’]s)\s+{name}\b|\btell me about {name}\b"
+        rf"|\bhow long (?:has|had|did|was)\s+{name}\b[^?.!]{{0,40}}"
+        rf"\b(?:been|with|at|worked|working|in real estate|an? (?:agent|broker|realtor))\b"
+        rf"|\b{name}\b[^?.!]{{0,40}}\b(?:brokerage|company|firm|background|licensed|experience)\b",
+        latest, re.I))
+
+
+def _agent_background_fallback(latest: str, brokerage_name: str = '') -> str:
+    """Trusted account facts only, without invented history or tenure."""
+    current = f'I’m with {brokerage_name} now' if brokerage_name else 'I don’t have a verified brokerage to share here'
     tenure = (' I don’t have a verified exact tenure to share, so I won’t guess.'
               if AGENT_TENURE_QUESTION.search(latest) or re.search(r'\bhow long\b', latest, re.I) else '')
-    return f'{current}{earlier}.{tenure}'
+    return f'{current}.{tenure}'
 
 
 def safe_grounded_fallback(latest_inbound: str = '', violations: list | None = None,
-                           history: list | None = None, plan: dict | None = None) -> str:
+                           history: list | None = None, plan: dict | None = None,
+                           agent_name: str = 'the agent', brokerage_name: str = '') -> str:
     """Last-resort reply that never claims anything outside approved context."""
     violations = violations or []
     plan = plan or {}
     latest = str(latest_inbound or '')
     candidates = []
 
-    if 'missing_ai_disclosure' in violations or 'false_human_claim' in violations or is_ai_identity_question(latest):
-        candidates.append('These replies are automated (AI) on Bobbie Fisher’s behalf. '
+    if ('missing_ai_disclosure' in violations or 'false_human_claim' in violations
+            or is_ai_identity_question(latest, '' if agent_name == 'the agent' else agent_name)):
+        candidates.append(f'These replies are automated (AI) on {agent_name}’s behalf. '
                           'I can still help with questions about your property.')
-    agent_question = bool(AGENT_TENURE_QUESTION.search(latest) or AGENT_BACKGROUND_QUESTION.search(latest))
-    if agent_question:
-        candidates.append(_agent_background_fallback(latest))
+    agent_question = _agent_question(latest, agent_name)
+    from .knowledge import is_experience_question  # local import: knowledge loads the vector store
+    if is_experience_question(latest):
+        # Before seller-intent wording: "selling homes like mine" asks about the agent.
+        candidates.append(EXPERIENCE_FALLBACK)
+    elif agent_question:
+        candidates.append(_agent_background_fallback(latest, brokerage_name))
+    if re.search(r'\bguarantee', latest, re.I) or 'unsupported_guarantee' in violations:
+        candidates.append('I can’t guarantee a sale price; buyers and the market set the final number. '
+                          'I’d want to see the property and recent comparable sales before giving you a realistic view.')
+    if visit_only_refusal(latest) and plan.get('calendar_state') != 'call_declined':
+        candidates.append('Understood, no visit needed. We could do a quick phone call instead to talk through '
+                          'your goals and the local market. Would that work for you?')
+    signals = seller_signals(latest)
+    if signals['strong'] and not visit_only_refusal(latest):
+        goal = ' and '.join(part for part in (
+            'you’re hoping to sell quickly' if signals['urgency'] else 'you’re looking to sell',
+            f'are aiming for around {signals["target_price_text"]}' if signals['target_price'] else '',
+        ) if part)
+        permitted = meeting_offer_permitted(plan.get('next_step'), latest, plan.get('calendar_state') or 'none')
+        if permitted:
+            assessment = (' I’d suggest a quick visit to look at the property’s condition and review comparable '
+                          'sales before recommending a listing price. When would be a convenient time?')
+        elif signals['target_price']:
+            assessment = (' I’d need to see the property and review comparable sales before recommending a '
+                          'listing price.')
+        else:
+            assessment = ''
+        candidates.append(f'Got it—{goal}.{assessment}')
     if plan.get('next_step') == 'offer_call':
         candidates.append('Thanks—that gives me enough to understand what you need. '
                           'Would you be open to me stopping by to take a quick look at the property?')
@@ -434,7 +738,7 @@ def safe_grounded_fallback(latest_inbound: str = '', violations: list | None = N
         candidates.append('I’d compare the prior price with current competition and buyer feedback '
                           'before recommending a position.')
     if (re.search(r'\b(?:timeline|timeframe|how long)\b', latest, re.I)
-            and not AGENT_TENURE_QUESTION.search(latest)):
+            and not agent_question):
         candidates.append('Timing depends on price, condition, and current demand, so I don’t have '
                           'verified data to promise a timeframe.')
     if re.search(r'\bnext step\b', latest, re.I):
@@ -455,8 +759,11 @@ def safe_grounded_fallback(latest_inbound: str = '', violations: list | None = N
 
 _FALLBACK_RULES = (
     ('These replies are automated', 'AI-identity question or disclosure violation'),
+    ('Understood, no visit needed', 'owner declined a visit; phone alternative'),
     ('I’m with ', 'agent background/tenure question (approved brokerage)'),
     ('I’d rather not guess at my current brokerage', 'agent background/tenure question (no approved brokerage)'),
+    ('I can’t guarantee a sale price', 'guarantee question or unsupported_guarantee'),
+    ('Got it—you’re', 'seller intent with target price or urgency'),
     ('Thanks—that gives me enough', 'next_step=offer_call'),
     ('I have a property lead record', 'phone-source question or unsupported_phone_source'),
     ('I don’t have a verified callback number', 'callback question or invented_phone'),
@@ -490,7 +797,7 @@ def _debug_fallback_choice(selected, candidates, latest, violations, plan) -> No
 
 
 def explain_policy_violations(reply: str, violations: list, history: list | None = None,
-                              max_length: int = 240) -> dict:
+                              max_length: int | None = None) -> dict:
     """Debug only: the text each violation matched. Does not affect the policy result."""
     text = clean_reply(reply)
 
@@ -500,13 +807,16 @@ def explain_policy_violations(reply: str, violations: list, history: list | None
 
     reasons = {}
     for violation in violations:
-        if violation == 'over_length':
-            reasons[violation] = f'{len(text)} chars > {max_length}'
+        if violation == 'over_provider_limit':
+            reasons[violation] = f'{len(text)} chars > provider limit {max_length or SMS_PROVIDER_MAX_CHARS}'
+        elif violation == 'unsupported_guarantee':
+            reasons[violation] = repr(_unsupported_guarantee(text))
         elif violation == 'identity_switch':
+            # The name-based patterns are built per agent in _third_person_identity;
+            # this debug note only needs to say which kind of switch it was.
             assistant = IDENTITY_ASSISTANT.search(text)
-            remainder = IDENTITY_SELF_INTRODUCTION.sub('I', QUOTED_TEXT.sub(' ', text))
             reasons[violation] = (f'assistant identity {assistant.group(0)!r}' if assistant
-                                  else f'third person {found(IDENTITY_THIRD_PERSON, remainder)}')
+                                  else "third-person or assistant reference to the agent's own name")
         elif violation == 'false_human_claim':
             reasons[violation] = found(FALSE_HUMAN_CLAIM)
         elif violation == 'missing_ai_disclosure':
@@ -531,6 +841,8 @@ def explain_policy_violations(reply: str, violations: list, history: list | None
             reasons[violation] = found(UNSUPPORTED_OUTCOME)
         elif violation == 'unsupported_tenure':
             reasons[violation] = found(PRECISE_TENURE)
+        elif violation == 'business_experience':
+            reasons[violation] = found(BUSINESS_EXPERIENCE)
         elif violation == 'example_fact_leak':
             reasons[violation] = found(EXAMPLE_FACT_LEAK)
         elif violation == 'unsupported_phone_source':

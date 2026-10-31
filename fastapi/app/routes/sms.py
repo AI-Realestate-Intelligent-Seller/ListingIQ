@@ -26,9 +26,10 @@ from ..schemas import (
 )
 from ..sms import calendar_client, calendar_service
 from ..sms import service
-from ..sms.knowledge import search_bobbie_knowledge
+from ..sms.knowledge import search_agent_knowledge
 from ..sms.knowledge_index import bobbie_knowledge
 from ..sms.outreach import build_initial_outreach, build_single_lead_context
+from ..sms.runtime_context import AgentResolutionError, resolve_agent_runtime_context, resolve_user_runtime_context
 from .auth import get_current_user, get_db
 from ..reminder.notification import list_notifications, update_notification_read_status, mark_conversation_notifications_read, read_all_notifications
 
@@ -149,18 +150,20 @@ def calendar_bookings(current_user: User = Depends(get_current_user), session: S
 
 
 @router.get('/knowledge/search')
-def knowledge_search(q: str, limit: int = 4, current_user: User = Depends(get_current_user)):
-    """Bobbie's approved knowledge base, for debugging what she can ground on."""
+def knowledge_search(q: str, limit: int = 4, current_user: User = Depends(get_current_user),
+                     session: Session = Depends(get_db)):
+    """The authenticated user's own active-version knowledge diagnostics."""
     _require_sms_access(current_user)
     try:
-        return search_bobbie_knowledge(q, limit)
+        context = resolve_user_runtime_context(session, current_user)
+        return search_agent_knowledge(q, context, limit)
     except Exception as error:
         raise HTTPException(status_code=503, detail=f'Knowledge base unavailable: {error}')
 
 
 @router.get('/knowledge/status')
 def knowledge_status(current_user: User = Depends(get_current_user)):
-    """Which document is indexed, how many chunks, and which retrieval is active."""
+    """Legacy Bobbie index status retained for migration diagnostics only."""
     _require_sms_access(current_user)
     try:
         return bobbie_knowledge.stats()
@@ -170,7 +173,7 @@ def knowledge_status(current_user: User = Depends(get_current_user)):
 
 @router.post('/knowledge/reindex')
 def knowledge_reindex(current_user: User = Depends(get_current_user)):
-    """Re-extract and re-embed the knowledge PDF. HOB only — it is expensive."""
+    """Rebuild only the isolated legacy Bobbie collection; never the shared collection."""
     if current_user.role != 'hob':
         raise HTTPException(status_code=403, detail='Only a Head of Brokerage can rebuild the knowledge base.')
     try:
@@ -227,7 +230,12 @@ def create_conversation(
     session.commit()
     session.refresh(conversation)
 
-    text = build_initial_outreach(payload.name, payload.property_address, payload.outreach_reason)
+    try:
+        agent_context = resolve_agent_runtime_context(session, conversation)
+    except AgentResolutionError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    text = build_initial_outreach(
+        payload.name, payload.property_address, payload.outreach_reason, agent_context)
 
     if not payload.ai_enabled:
         # Thread created for manual texting only; nothing is sent yet.
@@ -270,6 +278,9 @@ def send_message(
     """Send a message the broker typed. This takes the thread off Bobbie."""
     _require_sms_access(current_user)
     conversation = _owned_conversation(session, conversation_id, current_user)
+    # Opt-out is final for every sender, including a person typing by hand.
+    if conversation.dnc_alert or conversation.lead_status == 'dnc':
+        raise HTTPException(status_code=409, detail='This owner has opted out and cannot be contacted.')
     text = payload.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail='Message text is required')

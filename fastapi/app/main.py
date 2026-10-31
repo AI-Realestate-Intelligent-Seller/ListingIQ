@@ -1,5 +1,6 @@
 
 import logging
+import os
 import time
 
 from fastapi import FastAPI, Request
@@ -17,7 +18,6 @@ from .routes import (
     followups,
     integration_data,
     leads,
-    messages,
     platform_admin,
     propertyradar,
     query_progress,
@@ -99,7 +99,9 @@ app.include_router(
     assignments.router, prefix="/api/v1/assignments", tags=["assignments"]
 )
 app.include_router(calendar.router, prefix="/api/v1/auth/google", tags=["calendar"])
-app.include_router(messages.router, prefix="/api/v1/messages", tags=["messages"])
+# /api/v1/messages is deliberately not mounted: its direct-send route skipped
+# opt-out (DNC) checks, the owner check and the outbound queue, and had no
+# consumers. Owner texting goes through /api/v1/sms and the outbound queue.
 app.include_router(
     conversations.router, prefix="/api/v1/conversations", tags=["conversations"]
 )
@@ -183,9 +185,16 @@ def startup_event():
     from .sms.followup_scheduler import start_followup_scheduler
 
     start_followup_scheduler()
-    _warm_knowledge_base()
+    if os.getenv('BOBBIE_LEGACY_KNOWLEDGE_WARMUP', '').strip().lower() in {'1', 'true', 'yes', 'on'}:
+        _warm_knowledge_base()
     start_reminder_worker()
     start_geocoding_worker()
+    from .personas.imports import start_worker as start_persona_import_worker
+
+    start_persona_import_worker()
+    from .personas.knowledge_indexing import start_worker as start_persona_index_worker
+
+    start_persona_index_worker()
     from .sms.outbound_worker import start_embedded_worker
 
     start_embedded_worker()
@@ -194,8 +203,13 @@ def startup_event():
 @app.on_event("shutdown")
 def shutdown_event():
     """Give the embedded SMS supervisor and its ten threads a clean stop."""
+    from .personas.imports import stop_worker as stop_persona_import_worker
+    from .personas.knowledge_indexing import stop_worker as stop_persona_index_worker
     from .sms.outbound_worker import stop_embedded_worker
 
+    # Stop claiming new Persona imports first; an in-flight job keeps its lease.
+    stop_persona_import_worker()
+    stop_persona_index_worker()
     stop_embedded_worker()
 
 

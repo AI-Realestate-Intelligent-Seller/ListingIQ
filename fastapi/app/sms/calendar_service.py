@@ -368,10 +368,8 @@ def map_url(address: str) -> str:
 def confirmation_message(booking: dict, host: str | None = None, timezone_name: str | None = None) -> str:
     """The confirmation SMS for a booking.
 
-    `host` is who the owner is actually meeting. It defaults to Bobbie because
-    she books the overwhelming majority of meetings, but a broker or agent
-    booking by hand must be named as themselves — telling an owner they are
-    meeting Bobbie when a person arranged it is simply untrue.
+    `host` is who the owner is actually meeting. Callers should pass the trusted
+    account/Persona identity; the neutral fallback never guesses an agent.
 
     Times are written in `timezone_name`, the booker's own timezone, so the
     owner's text matches the calendar of the person they are meeting.
@@ -383,7 +381,7 @@ def confirmation_message(booking: dict, host: str | None = None, timezone_name: 
     # like a form letter, not a text message.
     full_name = (booking.get('name') or '').strip()
     name = full_name.split()[0] if full_name else 'there'
-    message = (f"Thanks, {name}. Your meeting with {host or 'Bobbie'} is confirmed for "
+    message = (f"Thanks, {name}. Your meeting with {host or 'your agent'} is confirmed for "
                f"{start.strftime('%b %d, %Y at %I:%M %p')}–{end.strftime('%I:%M %p')} "
                f"{timezone_name}.")
     address = (booking.get('location_address') or '').strip()

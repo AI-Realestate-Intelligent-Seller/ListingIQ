@@ -1,4 +1,4 @@
-"""Migration 0032 and database-level Persona retention on disposable databases.
+"""Persona migrations and database-level retention on disposable databases.
 
 SQLite always runs against a throwaway file. PostgreSQL runs only when
 ``PERSONA_TEST_PG_URL`` points at a disposable database (for example a local
@@ -21,7 +21,9 @@ from sqlalchemy.orm import sessionmaker
 BASE_DIR = Path(__file__).resolve().parents[1]
 PG_URL = os.environ.get("PERSONA_TEST_PG_URL", "")
 PREVIOUS = "0031_campaign_draft_groups"
-HEAD = "0032_persona_core"
+HEAD = "0037_persona_storage_indexing"
+BEFORE_FLAGS = "0034_persona_import_jobs"
+BEFORE_STORAGE = "0036_persona_import_mode"
 
 
 def _alembic(url: str, *args: str) -> str:
@@ -197,6 +199,11 @@ ALL_TABLES = {
     "persona_drafts",
     "persona_defaults",
     "persona_events",
+    "persona_draft_examples",
+    "persona_submission_examples",
+    "persona_version_examples",
+    "persona_import_jobs",
+    "persona_knowledge_index_jobs",
 }
 
 
@@ -233,6 +240,113 @@ def test_sqlite_upgrade_downgrade_and_retention(tmp_path):
         _round_trip(url, engine)
         _assert_retention_rules(engine)
         _assert_membership_trigger(engine)
+    finally:
+        engine.dispose()
+
+
+_EXAMPLE_INSERT = (
+    "INSERT INTO {table} (id, {parent}, position, scenario, channel, language, customer_message,"
+    " preferred_response, context, style_explanation, provenance, owner_approved)"
+    " VALUES (1, 1, 0, 'Valuation', 'sms', 'ko', '', '안녕하세요 사장님', '', '', 'illustrative', 0)"
+)
+_FROZEN_EXAMPLES = (("persona_submission_examples", "submission_id"), ("persona_version_examples", "version_id"))
+
+
+def _assert_frozen_examples_immutable(engine):
+    for table, _parent in _FROZEN_EXAMPLES:
+        for statement in (f"UPDATE {table} SET preferred_response = 'forged' WHERE id = 1", f"DELETE FROM {table} WHERE id = 1"):
+            with pytest.raises((IntegrityError, DBAPIError)):
+                with engine.begin() as conn:
+                    conn.execute(text(statement))
+
+
+def _review_flags_round_trip(url, engine):
+    """0035 keeps frozen examples readable and immutable in both directions."""
+    _alembic(url, "upgrade", BEFORE_FLAGS)
+    with engine.begin() as conn:
+        _seed(conn)
+        for table, parent in _FROZEN_EXAMPLES:
+            conn.execute(text(_EXAMPLE_INSERT.format(table=table, parent=parent)))
+    _alembic(url, "upgrade", HEAD)
+    with engine.connect() as conn:
+        for table, _parent in _FROZEN_EXAMPLES:
+            row = conn.execute(text(f"SELECT review_flags, preferred_response FROM {table} WHERE id = 1")).one()
+            flags = row[0] if isinstance(row[0], list) else json.loads(row[0])
+            assert flags == [] and row[1] == "안녕하세요 사장님"
+    _assert_frozen_examples_immutable(engine)
+    _alembic(url, "downgrade", BEFORE_FLAGS)
+    _assert_frozen_examples_immutable(engine)
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT preferred_response FROM persona_version_examples")).scalar() == "안녕하세요 사장님"
+    _alembic(url, "upgrade", HEAD)
+    _assert_frozen_examples_immutable(engine)
+
+
+def test_sqlite_review_flags_migration_keeps_examples_immutable(tmp_path):
+    url = f"sqlite:///{tmp_path / 'persona_flags.db'}"
+    engine = create_engine(url)
+    try:
+        _review_flags_round_trip(url, engine)
+    finally:
+        engine.dispose()
+
+
+def _storage_round_trip(url, engine):
+    """0037 keeps database-stored originals byte-for-byte and marks them 'database'."""
+    original = "안녕하세요 — original bytes".encode("utf-8") + bytes(range(256))
+    _alembic(url, "upgrade", BEFORE_STORAGE)
+    with engine.begin() as conn:
+        _seed(conn)
+        conn.execute(
+            text(
+                "INSERT INTO persona_import_jobs (id, persona_id, brokerage_id, owner_user_id, base_revision,"
+                " file_name, media_type, file_size, file_hash, document_bytes, status, stages, retryable,"
+                " attempt_count, extraction_mode, created_at, updated_at)"
+                " VALUES ('legacyjob', 1, 'b1', 1, 1, 'bio.txt', 'text/plain', :size, 'h', :content,"
+                " 'completed', '{}', 0, 1, 'local', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {"size": len(original), "content": original},
+        )
+    _alembic(url, "upgrade", HEAD)
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT document_bytes, storage_backend, storage_key FROM persona_import_jobs WHERE id = 'legacyjob'"
+        )).one()
+        assert bytes(row[0]) == original and row[1] == "database" and row[2] is None
+    with engine.begin() as conn:
+        # Object-storage rows need no database copy after 0037.
+        conn.execute(text(
+            "INSERT INTO persona_import_jobs (id, persona_id, brokerage_id, owner_user_id, base_revision,"
+            " file_name, media_type, file_size, file_hash, document_bytes, storage_backend, storage_key, status,"
+            " stages, retryable, attempt_count, extraction_mode, created_at, updated_at)"
+            " VALUES ('r2job', 1, 'b1', 1, 1, 'bio.pdf', 'application/pdf', 3, 'h2', NULL, 'r2',"
+            " 'personas/brokerage-b1/user-1/imports/r2job/original.pdf', 'queued', '{}', 0, 0, 'local',"
+            " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        ))
+        conn.execute(text(
+            "INSERT INTO persona_knowledge_index_jobs (id, persona_id, version_id, owner_user_id, brokerage_id,"
+            " source_document_id, status, content_hash, chunk_count, attempt_count, max_attempts,"
+            " next_attempt_at, created_at, updated_at) VALUES ('ix1', 1, 1, 1, 'b1', 'legacyjob', 'pending',"
+            " 'c', 1, 0, 3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        ))
+    with pytest.raises((IntegrityError, DBAPIError)):
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE persona_knowledge_index_jobs SET status = 'bogus' WHERE id = 'ix1'"))
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM persona_knowledge_index_jobs"))
+        conn.execute(text("DELETE FROM persona_import_jobs WHERE id = 'r2job'"))
+    _alembic(url, "downgrade", BEFORE_STORAGE)
+    with engine.connect() as conn:
+        assert bytes(conn.execute(text(
+            "SELECT document_bytes FROM persona_import_jobs WHERE id = 'legacyjob'")).scalar()) == original
+    _alembic(url, "upgrade", HEAD)
+
+
+def test_sqlite_storage_migration_preserves_database_originals(tmp_path):
+    url = f"sqlite:///{tmp_path / 'persona_storage.db'}"
+    engine = create_engine(url)
+    try:
+        _storage_round_trip(url, engine)
     finally:
         engine.dispose()
 
@@ -275,12 +389,21 @@ def test_postgres_upgrade_downgrade_and_retention(pg_engine):
 
 
 @pg
+def test_postgres_review_flags_migration_keeps_examples_immutable(pg_engine):
+    with pg_engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
+    _review_flags_round_trip(PG_URL, pg_engine)
+
+
+@pg
 def test_postgres_concurrent_owner_edits_and_submissions(pg_engine):
     """Real PostgreSQL sessions racing on the same draft revision."""
     from app.models import User
     from app.personas import service
     from app.personas.models import Persona, PersonaEvent, PersonaSubmission
-    from app.personas.schemas import PersonaCreate, PersonaDraftUpdate
+    from app.personas.schemas import PersonaCreate, PersonaDraftUpdate, PersonaExampleCreate
+    from test_persona_onboarding import complete_profile
 
     # Start from a freshly migrated schema (the retention test seeds explicit IDs).
     with pg_engine.begin() as conn:
@@ -304,6 +427,18 @@ def test_postgres_concurrent_owner_edits_and_submissions(pg_engine):
         setup, setup.get(User, owner_id), PersonaCreate(full_name="Pat Postgres")
     )
     persona_id = persona.id
+    # Milestone 2 completeness: a full profile and one owner-approved example,
+    # so the submit race below exercises concurrency, not validation.
+    service.update_draft(setup, setup.get(User, owner_id), persona_id, PersonaDraftUpdate(
+        revision=1, professional_title="Broker", biography="Ready.", experience_summary="Experienced.",
+        specialties=["Residential"], service_areas=["Toronto"], profile_config=complete_profile(),
+    ))
+    service.create_example(setup, setup.get(User, owner_id), persona_id, PersonaExampleCreate(
+        revision=2, scenario="Price objection", channel="sms", customer_message="That feels low.",
+        preferred_response="Can I show you the comparable sales?", provenance="user_written", owner_approved=True,
+    ))
+    assert service.validation_result(setup.get(Persona, persona_id).draft,
+                                     setup.get(Persona, persona_id).draft_examples)["valid"]
     setup.close()
 
     def race(workers, action):
@@ -345,7 +480,7 @@ def test_postgres_concurrent_owner_edits_and_submissions(pg_engine):
             actor,
             persona_id,
             PersonaDraftUpdate(
-                revision=1,
+                revision=3,
                 biography=f"writer {i}",
                 experience_summary="Experienced.",
             ),
@@ -354,20 +489,21 @@ def test_postgres_concurrent_owner_edits_and_submissions(pg_engine):
     assert sorted(edits) == ["conflict"] * 7 + ["ok"], edits
 
     submits = race(
-        6, lambda session, actor, i: service.submit(session, actor, persona_id, 2)
+        6, lambda session, actor, i: service.submit(session, actor, persona_id, 4)
     )
     assert sorted(submits) == ["conflict"] * 5 + ["ok"], submits
 
     check = Session()
     try:
         draft = check.get(Persona, persona_id).draft
-        assert draft.revision == 2
+        assert draft.revision == 4
         assert draft.review_status == "submitted"
+        # One from setup, exactly one from the eight racing edits.
         assert (
             check.query(PersonaEvent)
             .filter_by(persona_id=persona_id, event_type="persona.draft_changed")
             .count()
-            == 1
+            == 2
         )
         assert (
             check.query(PersonaEvent)
@@ -378,3 +514,11 @@ def test_postgres_concurrent_owner_edits_and_submissions(pg_engine):
         assert check.query(PersonaSubmission).filter_by(persona_id=persona_id).count() == 1
     finally:
         check.close()
+
+
+@pg
+def test_postgres_storage_migration_preserves_database_originals(pg_engine):
+    with pg_engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
+    _storage_round_trip(PG_URL, pg_engine)

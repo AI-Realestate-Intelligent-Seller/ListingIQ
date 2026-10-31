@@ -14,19 +14,31 @@ from uuid import uuid4
 import requests
 
 from ..ai.client import AiUnavailableError
+from .prompt import PersonaContextOverflowError
 from ..core.config import settings
 from ..db import SessionLocal
 from ..logger import get_logger, log_event
 from ..models import Conversation, Lead, Message
 from . import bobbie
-from .classifier import classify_lead_message, finalized_lead_status, is_opt_out, merge_lead_status
+from .knowledge import is_agent_knowledge_question, is_experience_question
+from .runtime_context import (
+    AgentResolutionError,
+    resolve_agent_runtime_context,
+    runtime_context_is_current,
+)
+from .classifier import classify_lead_message, finalized_lead_status, is_opt_out, merge_lead_status, seller_signals
 from .policy import (
     ai_debug, ai_debug_begin, ai_debug_enabled, ai_debug_safely, ai_debug_set, ai_debug_state, asked_questions,
+    escalation_reason, estimate_sms_segments, meeting_offer_permitted, visit_only_refusal,
+    EXPERIENCE_FALLBACK, find_conversation_repetition, find_reply_policy_violations,
 )
 from .scheduling import (
     contains_scheduling_pressure,
     contains_time_proposal,
     contains_unbooked_confirmation,
+    answers_meeting_invitation_with_time,
+    mentions_availability,
+    preferred_availability,
 )
 
 logger = get_logger(__name__)
@@ -222,6 +234,7 @@ def send_and_store_message(
         conversation_id=conversation.id,
         event_type=event_type,
         text_chars=len(text),
+        estimated_segments=estimate_sms_segments(text)['segments'],
         suppress_auto_reply=suppress_auto_reply,
     )
     lead_context = None
@@ -336,11 +349,52 @@ def _log_status_change(session, conversation: Conversation, previous_status: str
               lead_id=lead_id, previous_status=previous_status, new_status=new_status)
 
 
-def hand_to_broker(session, conversation: Conversation) -> None:
+def handoff_recipient_ids(session, conversation: Conversation) -> list[int]:
+    """Who is told about a handoff: the lead's assigned agent(s), plus whoever
+    currently hears this owner's replies.
+
+    The reply-notification rule alone follows recent human activity, so a
+    broker who once texted the owner would be notified instead of the agent
+    now assigned. Every id stays inside the conversation owner's brokerage and
+    must be an active lead worker; the conversation owner is the fallback.
+    """
+    from ..models import User
+    from ..routes.webhooks import _LEAD_WORKER_ROLES, _reply_recipient_ids
+    from ..tenancy import brokerage_user_ids
+    owner = session.get(User, conversation.user_id)
+    tenant_ids = set(brokerage_user_ids(session, owner)) if owner else {conversation.user_id}
+    assigned_ids = sorted({
+        user_id for (user_id,) in session.query(Lead.assigned_agent_id).filter(
+            Lead.conversation_id == conversation.id, Lead.assigned_agent_id.isnot(None)).all()})
+    assigned = [user_id for (user_id,) in session.query(User.id).filter(
+        User.id.in_(assigned_ids), User.id.in_(tenant_ids), User.role.in_(_LEAD_WORKER_ROLES),
+        User.is_active.is_(True)).order_by(User.id).all()] if assigned_ids else []
+    return list(dict.fromkeys(assigned + list(_reply_recipient_ids(session, conversation))))
+
+
+def _notify_handoff(session, conversation: Conversation, title: str, message: str) -> None:
+    """In-app/WebSocket/push notice to the agent(s) who must act. Never raises."""
+    try:
+        from ..reminder.notification import dashboard_url, notify_user
+        recipients = handoff_recipient_ids(session, conversation)
+        for user_id in recipients:
+            notify_user(session, user_id, 'AI_HANDOFF', title, message,
+                        action_url=dashboard_url({'view': 'followups', 'conversation_id': conversation.id}))
+        log_event(logger, 'sms.handoff.notified', conversation_id=conversation.id, recipients=len(recipients))
+    except Exception as error:  # a notification failure must not undo the handoff
+        session.rollback()
+        log_event(logger, 'sms.handoff.notify_failed', level=logging.WARNING,
+                  conversation_id=conversation.id, error_type=type(error).__name__)
+
+
+def hand_to_broker(session, conversation: Conversation, reason: str | None = None,
+                   meta: dict | None = None, agent_name: str | None = None) -> None:
     """Bobbie stops; the broker owns every further reply on this thread.
 
     Autopilot is switched off and ownership recorded, so an inbound message
     afterwards is left pending for the broker instead of waking Bobbie.
+    ``reason`` (and structured ``meta``) are shown on the lead timeline, and
+    the agent is notified, so they know why and can continue.
     """
     from ..leads import events as lead_events
     was_ai = conversation.handled_by != 'broker'
@@ -349,11 +403,18 @@ def hand_to_broker(session, conversation: Conversation) -> None:
     log_event(logger, 'sms.handoff.completed', conversation_id=conversation.id,
               from_owner='bobbie' if was_ai else 'broker', to_owner='broker', ai_enabled=False)
     lead_id = _lead_id_for(session, conversation)
+    if agent_name:
+        # The timeline names the agent the AI spoke for, not a fixed product name.
+        meta = {**(meta or {}), 'ai_agent_name': agent_name}
     if lead_id and was_ai:
         lead_events.log_event(
             session, lead_id, lead_events.OWNERSHIP, 'handover_to_agent',
-            actor_type='ai', from_value='bobbie', to_value='broker',
+            actor_type='ai', from_value='bobbie', to_value='broker', reason=reason, meta=meta,
         )
+    if reason and was_ai:
+        speaker = f'AI for {agent_name}' if agent_name else 'AI'
+        _notify_handoff(session, conversation,
+                        f'{speaker} handed {conversation.name or "a homeowner"} to you', reason)
 
 
 def hand_to_bobbie(session, conversation: Conversation) -> None:
@@ -438,6 +499,95 @@ def _debug_final(reply: str, event_type: str, source: str | None = None) -> None
              source=ai_debug_state().get('source'), event_type=event_type)
 
 
+def _previous_agent_text(history: list) -> str:
+    """The agent message immediately before the owner's latest message ('' if none)."""
+    for index in range(len(history) - 1, -1, -1):
+        if history[index].get('direction') == 'inbound':
+            previous = history[index - 1] if index else {}
+            return str(previous.get('text') or '') if previous.get('direction') == 'outbound' else ''
+    return ''
+
+
+def _meeting_kind(history: list, latest_inbound: str) -> str:
+    """'call' when the owner declined a visit or asked for a call, else 'visit'."""
+    inbound = [str(item.get('text') or '') for item in history if item.get('direction') == 'inbound']
+    if any(visit_only_refusal(text) for text in inbound):
+        return 'call'
+    if re.search(r'\b(?:call|phone)\b', latest_inbound or '', re.I) and not re.search(
+            r'\b(?:visit|stop by|come by|walk-?through|in person)\b', latest_inbound or '', re.I):
+        return 'call'
+    return 'visit'
+
+
+def scheduling_handoff_details(conversation: Conversation, history: list, latest_inbound: str,
+                               requested_time_text: str = '') -> tuple[str, str, dict]:
+    """Owner-facing acknowledgment, timeline reason and structured details for a scheduling handoff.
+
+    Only what the owner actually said is used; the price is labeled owner-stated.
+    """
+    inbound = [str(item.get('text') or '') for item in history if item.get('direction') == 'inbound']
+    signals = [seller_signals(text) for text in inbound]
+    selling = any(item['selling_intent'] for item in signals)
+    urgent = any(item['urgency'] for item in signals)
+    price = next((item['target_price_text'] for item in reversed(signals) if item['target_price']), None)
+    kind = _meeting_kind(history, latest_inbound)
+    availability = preferred_availability(requested_time_text, latest_inbound)
+
+    noun = 'call' if kind == 'call' else 'visit'
+    # Clock times are never echoed, so the reply cannot read as a confirmed slot;
+    # the agent still receives the exact words below.
+    spoken = availability if availability and not any(char.isdigit() for char in availability) else ''
+    # Noted as a preference only: nothing here says the agent approved the time.
+    reply = ((f"Thanks, I've noted {spoken} as your preference. " if spoken
+              else "Thanks, I've noted your availability. ")
+             + f'Our team will reach out to coordinate the {noun}.')
+    parts = []
+    if selling:
+        parts.append('Seller interested in selling' + (' quickly' if urgent else '') + '.')
+    if price:
+        parts.append(f'Target price: {price} (owner-stated, unverified).')
+    parts.append('Requested ' + ('phone consultation.' if kind == 'call' else 'onsite assessment.'))
+    parts.append(f'Preferred availability: {availability or (requested_time_text or "").strip()[:80] or "not stated"}.')
+    if conversation.property_address:
+        parts.append(f'Property: {conversation.property_address}.')
+    parts.append(f'Last customer message: "{" ".join(latest_inbound.split())[:160]}".')
+    parts.append('Nothing is booked. Agent to coordinate and confirm the appointment.')
+    meta = {
+        'handoff_reason': 'seller_availability_collected',
+        'conversation_id': conversation.id,
+        'property_address': conversation.property_address,
+        'selling_intent': selling,
+        'urgency': 'high' if urgent else None,
+        'owner_stated_target_price': price,
+        'meeting_type': 'phone_call' if kind == 'call' else 'onsite_visit',
+        'preferred_availability': availability or (requested_time_text or '').strip()[:80] or None,
+        'last_customer_message': latest_inbound[:500],
+        'booked': False,
+    }
+    return reply, ' '.join(parts), meta
+
+
+# Reviewer issues that only concern how well a draft used the evidence.
+_CLAIM_ONLY_ISSUES = ('unsupported_claim', 'ignores_message')
+
+
+def _experience_answer_after_rejection(latest_inbound: str, history: list, issues: list, agent_name: str) -> str:
+    """A fixed transparent answer when every draft to an experience question was
+    rejected only for claim support or relevance; '' when a human must take over.
+
+    Any other blocking category (fabrication, guarantee, identity, consent,
+    booking, advice) still hands the thread to a human.
+    """
+    if not is_experience_question(latest_inbound) or not issues:
+        return ''
+    if not all(str(issue).strip().lower().startswith(_CLAIM_ONLY_ISSUES) for issue in issues):
+        return ''
+    if find_conversation_repetition(EXPERIENCE_FALLBACK, history) or find_reply_policy_violations(
+            EXPERIENCE_FALLBACK, history=history, agent_name=agent_name):
+        return ''
+    return EXPERIENCE_FALLBACK
+
+
 def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
     """Port of processAiReply(). Runs in a background thread with its own session."""
     session = SessionLocal()
@@ -482,8 +632,12 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
                       outcome='opt_out_acknowledged')
             return
 
+        # Identity is resolved only after opt-out handling: a STOP must be honored
+        # even when the owning account can no longer be resolved.
+        agent_context = resolve_agent_runtime_context(session, conversation)
         history = history_for(session, conversation)
-        disposition = bobbie.analyze_conversation_disposition(conversation, history)
+        disposition = bobbie.analyze_conversation_disposition(
+            conversation, history, agent_context=agent_context)
         log_event(
             logger, 'sms.ai.disposition.completed', conversation_id=conversation.id,
             action=disposition.get('action'), intent=disposition.get('intent'),
@@ -509,12 +663,22 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
                 'Do not ask any question, offer another service, request a call, mention scheduling, or try to continue.'
             )
             closing_evidence = []
+            # One knowledge retrieval per processing attempt, reused by every regeneration.
+            closing_snapshot: dict = {}
             ai_debug_set(phase='closing')
             closing_reply = bobbie.generate_ai_reply(conversation, history, closing_context, closing_control,
-                                                     evidence_out=closing_evidence)
-            closing_reply = bobbie.review_and_repair_ai_reply(
-                conversation, history, closing_reply, disposition, closing_context, closing_control,
-                knowledge_evidence=closing_evidence)
+                                                     evidence_out=closing_evidence,
+                                                     agent_context=agent_context,
+                                                     knowledge_snapshot=closing_snapshot)
+            try:
+                closing_reply = bobbie.review_and_repair_ai_reply(
+                    conversation, history, closing_reply, disposition, closing_context, closing_control,
+                    knowledge_evidence=closing_evidence, agent_context=agent_context,
+                    knowledge_snapshot=closing_snapshot)
+            except bobbie.ReviewRejectedError:
+                # Every generated closing was rejected: the fixed closing below
+                # is pre-written text, not model output.
+                closing_reply = ''
             if not closing_reply or '?' in closing_reply or contains_scheduling_pressure(closing_reply):
                 log_event(logger, 'sms.ai.closing.fallback', level=logging.WARNING,
                           conversation_id=conversation.id, reason='unsafe_or_empty_draft')
@@ -522,9 +686,13 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
                 ai_debug('FALLBACK', 'HARDCODED closing reply selected',
                          rule='closing draft empty, asked a question, or pressured scheduling', text=closing_reply)
                 ai_debug_set(source='fallback')
+            if not runtime_context_is_current(session, conversation, agent_context):
+                log_event(logger, 'sms.ai.skipped', level=logging.WARNING,
+                          conversation_id=conversation.id, reason='agent_context_changed')
+                return
             _debug_final(closing_reply, 'ai.closing')
             send_and_store_message(session, conversation, closing_reply, 'ai.closing')
-            hand_to_broker(session, conversation)
+            hand_to_broker(session, conversation, agent_name=agent_context.agent_name)
             mark_lead_completed(session, conversation, lead_status=disposition['lead_status'])
             _log_status_change(session, conversation, status_before, disposition['lead_status'])
             log_event(logger, 'sms.ai.completed', conversation_id=conversation.id,
@@ -544,13 +712,44 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
             f"Qualification focus: {disposition['qualification_focus'] or 'none supplied'}. "
             f"Calendar state: {disposition['calendar']['state']}. Reason: {disposition['reason']}. "
             'Follow the required next step naturally without assuming facts. If the next step is '
-            'answer_and_qualify, answer the concern and ask one concise logical question; do not mention, offer or '
-            'ask about a visit, stop-by, call or meeting in this reply. '
+            'answer_and_qualify, answer the concern and ask one concise logical question. '
             'If it is answer_only, do not ask a question. If it is offer_call, do not qualify further: acknowledge '
-            'what is already known and make one low-pressure request to visit the property in person without '
-            'proposing a time (a phone call only if the owner has declined a visit or asked for a call). '
-            'Never propose, offer or confirm a day or time; a person from the team arranges every meeting.'
+            'what is already known (including any price the owner hopes for and any urgency) and suggest a short '
+            'onsite visit to see the property and review comparable sales before recommending a listing price, '
+            'then ask when would be convenient for them (offer a phone call instead only if the owner declined a '
+            'visit or asked for a call). '
+            'Never propose, offer or confirm a specific day or time yourself; once the owner says when suits them, '
+            'the team arranges the exact time.'
         )
+        meeting_ok = meeting_offer_permitted(disposition['next_step'], latest_inbound_text,
+                                             disposition['calendar']['state'])
+        disposition_control += (
+            ' Meeting offer permitted in this reply: yes. Prefer a short onsite visit; a quick call is also fine.'
+            if meeting_ok else
+            ' Meeting offer permitted in this reply: no. Do not mention, offer or ask about a visit, stop-by, '
+            'call or meeting.'
+        )
+        if is_agent_knowledge_question(latest_inbound_text):
+            # A question or challenge about the agent's approach is answered, not
+            # turned into a scheduling push.
+            disposition_control += (
+                ' The owner asked a direct question about you or your approach. Answer it first and in substance '
+                'with what you would actually do, using only supported facts and standard process (seeing the '
+                'property, reviewing comparable sales, recommending a price the market supports). A meeting '
+                'invitation is optional here, at most one short low-pressure line, and never replaces the answer.'
+            )
+        if visit_only_refusal(latest_inbound_text):
+            disposition_control += (
+                ' The owner declined an in-person visit. Respect that: do not suggest a visit or stop-by; offer a '
+                'quick phone call or a preliminary market discussion instead.'
+            )
+        escalation = escalation_reason(latest_inbound_text)
+        if escalation:
+            disposition_control += (
+                ' The owner asked for negotiation or professional advice. Do not negotiate, propose terms, or give '
+                f'legal, tax or financial advice by text. Say that {agent_context.agent_name} handles that directly '
+                'rather than by automated text and that someone from the team will text them shortly. Ask no question.'
+            )
         already_asked = asked_questions(history)
         if already_asked:
             # The disposition can point back at a question Bobbie already asked; never re-ask it.
@@ -565,17 +764,34 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
                   should_fetch_availability=calendar_state['should_fetch_availability'])
 
         scheduling_context = ''
-        if calendar_state['should_fetch_availability']:
-            # Bobbie never schedules. Once the owner agrees to meet (or names a
-            # time), she says a person will follow up and steps back; the
-            # assigned broker/agent sets the time and place from Follow-ups.
-            reply = 'Great, thank you. Someone from our team will text you shortly to set up a time that works.'
-            ai_debug('FALLBACK', 'HARDCODED reply selected', rule='meeting handoff (should_fetch_availability)',
+        if (not calendar_state['should_fetch_availability'] and calendar_state['state'] != 'call_declined'
+                and answers_meeting_invitation_with_time(_previous_agent_text(history), latest_inbound_text)):
+            # Backstop for a disposition that missed a plain availability reply to the
+            # agent's own visit/call invitation: still hand off, never book.
+            log_event(logger, 'sms.calendar.availability_backstop', conversation_id=conversation.id,
+                      model_state=calendar_state['state'])
+            calendar_state = {**calendar_state, 'state': 'time_proposed', 'should_fetch_availability': True}
+        requested_time = (calendar_state.get('requested_time_text') or '').strip()
+        availability_given = (calendar_state['state'] in ('time_proposed', 'booking_confirmed')
+                              or bool(requested_time) or mentions_availability(latest_inbound_text))
+        if calendar_state['should_fetch_availability'] and not availability_given:
+            # The owner agreed to meet but has not said when: ask once, keep the thread.
+            scheduling_context = ('The owner agreed to meet but has not said when. Acknowledge it and ask one natural '
+                                  'question about what day or time generally suits them. Do not propose, offer or '
+                                  'confirm a time, and do not claim anything is booked.')
+        elif calendar_state['should_fetch_availability']:
+            # The AI never books. With the owner's preferred availability in hand it
+            # acknowledges it, hands the thread to the agent and stops; the agent
+            # confirms the exact time against their calendar from Follow-ups.
+            reply, handoff_reason, handoff_meta = scheduling_handoff_details(
+                conversation, history, latest_inbound_text, requested_time)
+            ai_debug('FALLBACK', 'HARDCODED reply selected', rule='scheduling handoff (availability collected)',
                      text=reply)
             _debug_final(reply, 'ai.reply', 'fallback')
             outbound = send_and_store_message(session, conversation, reply, 'ai.reply')
             previous_status = conversation.lead_status
-            hand_to_broker(session, conversation)
+            hand_to_broker(session, conversation, agent_name=agent_context.agent_name,
+                           reason=handoff_reason, meta=handoff_meta)
             update_lead_progress(session, conversation, lead_status='location_discussion',
                                  meeting_booked=False, processed_at=None)
             _log_status_change(session, conversation, previous_status, 'location_discussion')
@@ -587,12 +803,16 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
             scheduling_context = ('The recipient declined or deferred a meeting. Answer their latest question directly. '
                                   'Do not offer times, ask for a visit or a call, or pressure them to schedule.')
 
-        fallback_plan = {'next_step': disposition['next_step']}
+        fallback_plan = {'next_step': disposition['next_step'],
+                         'calendar_state': disposition['calendar']['state']}
         # Knowledge results the reviewed draft was written from.
         reply_evidence = []
+        # One knowledge retrieval per processing attempt: retries and reviewer
+        # regenerations reuse this exact evidence snapshot.
+        knowledge_snapshot: dict = {}
         reply = bobbie.generate_ai_reply(
             conversation, history, scheduling_context, disposition_control, fallback_plan,
-            evidence_out=reply_evidence)
+            evidence_out=reply_evidence, agent_context=agent_context, knowledge_snapshot=knowledge_snapshot)
 
         if contains_unbooked_confirmation(reply) or contains_time_proposal(reply):
             log_event(logger, 'sms.ai.safety_rewrite', level=logging.WARNING,
@@ -614,7 +834,8 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
                      rule='call_declined + scheduling pressure', replaced=reply)
             ai_debug_set(phase='call_declined_retry')
             retry = bobbie.generate_ai_reply(conversation, history, retry_context, disposition_control, fallback_plan,
-                                             evidence_out=retry_evidence)
+                                             evidence_out=retry_evidence, agent_context=agent_context,
+                                             knowledge_snapshot=knowledge_snapshot)
             reply = ('Understood—I’ll keep this to text and answer what I can here.'
                      if contains_scheduling_pressure(retry) else retry)
             ai_debug_set(phase='original')
@@ -624,9 +845,40 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
                 ai_debug_set(source='fallback')
             reply_evidence = retry_evidence
 
-        reply = bobbie.review_and_repair_ai_reply(conversation, history, reply, disposition,
-                                                  scheduling_context, disposition_control,
-                                                  knowledge_evidence=reply_evidence)
+        rejected = None
+        try:
+            reply = bobbie.review_and_repair_ai_reply(conversation, history, reply, disposition,
+                                                      scheduling_context, disposition_control,
+                                                      knowledge_evidence=reply_evidence,
+                                                      agent_context=agent_context,
+                                                      knowledge_snapshot=knowledge_snapshot)
+        except bobbie.ReviewRejectedError as error:
+            rejected = error
+            reply = _experience_answer_after_rejection(latest_inbound_text, history, error.issues,
+                                                       agent_context.agent_name)
+        if rejected is not None and reply:
+            # An experience question is not a reason to hand off: the drafts only
+            # overstated evidence, so a fixed, claim-free answer is sent instead.
+            log_event(logger, 'sms.ai.review_exhausted', level=logging.WARNING,
+                      conversation_id=conversation.id, outcome='transparent_fallback',
+                      reason='experience_question_claims_only', issues=','.join(rejected.issues))
+            ai_debug('FALLBACK', 'every candidate rejected for claim support -> transparent experience answer',
+                     text=reply)
+            ai_debug_set(source='fallback')
+        elif rejected is not None:
+            # Bounded regeneration is exhausted. Send nothing generated; a human
+            # owns the thread from here (no automatic retry loop).
+            # Reached only for hard-block issues: soft reviewer feedback no longer rejects.
+            log_event(logger, 'sms.ai.review_exhausted', level=logging.WARNING,
+                      conversation_id=conversation.id, outcome='handed_to_human',
+                      reason='hard_block_after_regeneration')
+            ai_debug('FALLBACK', 'every candidate rejected by the reviewer -> human handoff, nothing sent')
+            if runtime_context_is_current(session, conversation, agent_context):
+                hand_to_broker(session, conversation, agent_name=agent_context.agent_name, reason=(
+                    'AI reply withheld: the reviewer found a policy issue it could not fix ('
+                    + (', '.join(rejected.issues) or 'unspecified') + '). No message was sent; please reply to the owner.'
+                ))
+            return
 
         if contains_unbooked_confirmation(reply) or contains_time_proposal(reply):
             log_event(logger, 'sms.ai.review_rewrite', level=logging.WARNING,
@@ -644,17 +896,48 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
             reply = 'Understood—I’ll keep this to text and answer what I can here.'
             ai_debug_set(source='fallback')
 
+        if not runtime_context_is_current(session, conversation, agent_context):
+            log_event(logger, 'sms.ai.skipped', level=logging.WARNING,
+                      conversation_id=conversation.id, reason='agent_context_changed')
+            return
         _debug_final(reply, 'ai.reply')
         outbound = send_and_store_message(session, conversation, reply, 'ai.reply')
-        if is_conversation_closing(reply):
-            hand_to_broker(session, conversation)
+        if escalation:
+            # Genuine escalation: the reply above was sent, then a human owns the thread.
+            hand_to_broker(session, conversation, agent_name=agent_context.agent_name, reason=f'Owner asked for {escalation.replace("_", " ")}; '
+                           'the AI replied and handed the thread to the agent.')
+            log_event(logger, 'sms.ai.escalated', conversation_id=conversation.id, reason=escalation)
+        elif is_conversation_closing(reply):
+            hand_to_broker(session, conversation, agent_name=agent_context.agent_name)
             mark_lead_completed(session, conversation)
             log_event(logger, 'sms.ai.autopilot_stopped', conversation_id=conversation.id,
                       reason='closing_reply')
+        segments = estimate_sms_segments(reply)
         log_event(logger, 'sms.ai.completed', conversation_id=conversation.id,
                   outcome='reply_sent', message_id=outbound.id,
-                  text_chars=len(reply))
-    except AiUnavailableError as error:
+                  text_chars=len(reply), sms_encoding=segments['encoding'],
+                  estimated_segments=segments['segments'],
+                  estimated_cost_usd=segments.get('estimated_cost_usd'))
+    except PersonaContextOverflowError as error:
+        # A retry cannot succeed until the Persona is shortened, so the agent
+        # takes over now and is told why. Nothing was sent to the owner.
+        log_event(logger, 'sms.ai.failed', level=logging.ERROR,
+                  conversation_id=conversation_id, stage='persona_context',
+                  error_type=type(error).__name__, error=str(error))
+        try:
+            session.rollback()
+            conversation = session.get(Conversation, conversation_id)
+            if conversation is not None and conversation.handled_by != 'broker':
+                hand_to_broker(session, conversation, reason=(
+                    'AI paused: your published Persona (approved SMS examples, style and playbook) is too large '
+                    f'for one AI request (about {error.estimated_tokens:,} tokens; limit {error.budget:,}). '
+                    'No message was sent; please reply to the owner. Shorten or remove some conversation '
+                    'examples and publish again to turn the AI back on.'),
+                    meta={'handoff_reason': 'persona_context_overflow', 'conversation_id': conversation_id,
+                          'estimated_tokens': error.estimated_tokens, 'budget': error.budget})
+        except Exception:
+            logger.exception('event=sms.ai.persona_overflow_handoff_failed conversation_id=%s', conversation_id)
+    except (AiUnavailableError, AgentResolutionError) as error:
         # Nothing is sent when the model is unreachable; autopilot stays on so the
         # next inbound message retries once the configured AI provider is available.
         log_event(logger, 'sms.ai.failed', level=logging.ERROR,

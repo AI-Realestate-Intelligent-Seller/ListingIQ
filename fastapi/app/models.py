@@ -8,6 +8,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Index,
+    UniqueConstraint,
     event,
     inspect,
 )
@@ -186,6 +187,40 @@ class Message(Base):
         'User',
         foreign_keys=[sender_user_id],
     )
+
+
+class InboundSmsEvent(Base):
+    """One row per inbound Telnyx message, so a redelivered webhook is handled once.
+
+    The unique key is the provider message ID together with the sender, so an
+    unrelated message is never mistaken for a duplicate. ``status`` is
+    ``processing`` while a request owns the event, ``failed`` when processing
+    raised (a retry may take it over), and ``processed`` once every follow-up
+    step has run. ``message_id`` has no foreign key so deleting a conversation's
+    messages is never blocked.
+    """
+
+    __tablename__ = 'inbound_sms_events'
+    __table_args__ = (
+        UniqueConstraint(
+            'provider_message_id',
+            'from_number',
+            name='uq_inbound_sms_events_provider_from',
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    provider_message_id = Column(String(128), nullable=False)
+    from_number = Column(String(50), nullable=False)
+    conversation_id = Column(Integer, nullable=True)
+    message_id = Column(Integer, nullable=True)
+    status = Column(String(20), nullable=False)
+    attempts = Column(Integer, nullable=False, default=1)
+    last_error = Column(String(500), nullable=True)
+    claimed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    processed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
 
 class Booking(Base):
     __tablename__ = 'bookings'

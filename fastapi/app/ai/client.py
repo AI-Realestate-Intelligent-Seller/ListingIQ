@@ -20,7 +20,16 @@ from .service import ai_service
 
 
 class AiUnavailableError(RuntimeError):
-    """Feature-safe failure type caught by the existing AI fallbacks."""
+    """Feature-safe failure type caught by the existing AI fallbacks.
+
+    ``category`` is a sanitized failure class (for example ``timeout`` or
+    ``provider_configuration``) that features may report; it never contains
+    request or response content.
+    """
+
+    def __init__(self, message: str, *, category: str = 'ai_error') -> None:
+        super().__init__(message)
+        self.category = category
 
 
 def is_configured() -> bool:
@@ -36,7 +45,7 @@ def _native_schema_supported(provider: str) -> bool:
     try:
         adapter = ai_service.registry.resolve(provider)
     except AIError as exc:
-        raise AiUnavailableError(str(exc)) from exc
+        raise AiUnavailableError(str(exc), category=exc.category) from exc
     return adapter.capabilities(settings['ai']['model']).native_structured_output
 
 
@@ -45,13 +54,13 @@ def completion(messages: list, **options) -> dict:
     provider = settings['ai']['provider']
     config_error = configuration_error(settings['ai'])
     if config_error:
-        raise AiUnavailableError(config_error)
+        raise AiUnavailableError(config_error, category='provider_configuration')
     if not is_configured():
         if provider == 'deepseek':
             message = 'DEEPSEEK_API_KEY (or AI_API_KEY) is not configured'
         else:
             message = f'AI credentials are not configured for provider: {provider}'
-        raise AiUnavailableError(message)
+        raise AiUnavailableError(message, category='provider_configuration')
 
     operation_id = uuid4().hex
     correlation_id = session_id_var.get()
@@ -67,15 +76,28 @@ def completion(messages: list, **options) -> dict:
     # Tools that were offered earlier in this conversation. A follow-up request
     # that must not call tools passes them here instead of `tools`.
     history_tools = options.pop('history_tools', None) or []
+    # Long-running background features (document extraction) may need a longer
+    # timeout than interactive requests. Other callers keep the global value.
+    timeout_seconds = options.pop('timeout_seconds', None)
+    if timeout_seconds is None:
+        timeout_seconds = settings['ai']['timeout_seconds']
     legacy_options = dict(options)
     requested_max_tokens = options.pop('max_tokens', None)
     tools = tuple(_tool_from_legacy(item) for item in options.pop('tools', []))
     tool_choice = options.pop('tool_choice', None)
     if provider == 'anthropic':
-        if anthropic_token_budget not in (None, 'simple', 'complex'):
-            raise AiUnavailableError('Anthropic token budget must be simple or complex')
-        budget = anthropic_token_budget or ('complex' if tools else 'simple')
-        requested_max_tokens = settings['ai'][f'anthropic_{budget}_max_output_tokens']
+        if isinstance(anthropic_token_budget, int) and not isinstance(anthropic_token_budget, bool):
+            # An explicit limit for a feature whose output is known to be large.
+            if anthropic_token_budget <= 0:
+                raise AiUnavailableError('Anthropic token budget must be positive',
+                                         category='invalid_request')
+            requested_max_tokens = anthropic_token_budget
+        elif anthropic_token_budget not in (None, 'simple', 'complex'):
+            raise AiUnavailableError('Anthropic token budget must be simple or complex',
+                                     category='invalid_request')
+        else:
+            budget = anthropic_token_budget or ('complex' if tools else 'simple')
+            requested_max_tokens = settings['ai'][f'anthropic_{budget}_max_output_tokens']
         if history_tools and not tools:
             # Claude accepts replayed tool turns and thinking blocks only while
             # the tool list before them is unchanged, so resend it and forbid
@@ -93,7 +115,7 @@ def completion(messages: list, **options) -> dict:
         tools=tools,
         output_schema=output_schema,
         max_output_tokens=requested_max_tokens,
-        timeout_seconds=settings['ai']['timeout_seconds'],
+        timeout_seconds=timeout_seconds,
         options=GenerationOptions(
             temperature=options.pop('temperature', None),
             top_p=options.pop('top_p', None),
@@ -112,11 +134,12 @@ def completion(messages: list, **options) -> dict:
         # Preserve the historical empty-envelope behavior used by feature fallbacks.
         return {}
     except AIError as exc:
-        raise AiUnavailableError(str(exc)) from exc
+        raise AiUnavailableError(str(exc), category=exc.category) from exc
 
     if provider == 'anthropic' and response.stop_reason in {'max_tokens', 'refusal'}:
         raise AiUnavailableError(
             f'Anthropic response stopped before a usable result: {response.stop_reason}',
+            category='incomplete_output' if response.stop_reason == 'max_tokens' else 'refusal',
         )
 
     raw_message = response.provider_metadata.get('_legacy_message')

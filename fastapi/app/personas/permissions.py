@@ -126,6 +126,15 @@ def require_reviewer(session: Session, user: User, persona: Persona) -> None:
 require_publish = require_reviewer
 
 
+def require_activate(session: Session, user: User, persona: Persona) -> None:
+    """Personal Personas are self-managed: the owner activates or restores their
+    own published versions. Anyone else still needs the reviewer rules."""
+    require_member(user)
+    if is_owner(user, persona):
+        return
+    require_reviewer(session, user, persona)
+
+
 def require_submission_access(session: Session, user: User, persona: Persona) -> None:
     """Owner or an HOB of the brokerage may read submissions and history.
 

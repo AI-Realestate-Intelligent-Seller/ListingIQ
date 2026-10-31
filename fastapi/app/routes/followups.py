@@ -36,6 +36,7 @@ from ..schemas import (
     ReplySuggestions,
 )
 from ..sms import calendar_service, reply_suggest, service
+from ..sms.runtime_context import AgentResolutionError, resolve_agent_runtime_context
 from ..tenancy import brokerage_user_ids
 from .auth import get_current_user, get_db
 
@@ -141,7 +142,7 @@ def _reason(conversation: Conversation, latest: Message | None, waiting_days: in
     if conversation.dnc_alert or conversation.lead_status == 'dnc':
         return 'opted_out', 'Opted out — do not contact'
     if conversation.lead_status == 'location_discussion':
-        return 'location_discussion', 'Location to confirm'
+        return 'location_discussion', 'Appointment to confirm'
     if conversation.handled_by == 'broker' and latest is not None and latest.direction == 'inbound':
         return 'reply_needed', 'Reply needs an answer'
     if conversation.meeting_booked:
@@ -429,7 +430,11 @@ def suggest_replies(conversation_id: int, current_user: User = Depends(get_curre
     conversation = _owned_conversation(session, conversation_id, current_user)
     if conversation.dnc_alert or conversation.lead_status == 'dnc':
         raise HTTPException(status_code=409, detail='This owner has opted out and cannot be contacted.')
-    return reply_suggest.suggest(session, conversation)
+    try:
+        agent_context = resolve_agent_runtime_context(session, conversation)
+    except AgentResolutionError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return reply_suggest.suggest(session, conversation, agent_context)
 
 
 @router.post('/{conversation_id}/appointment', response_model=FollowUpAppointmentResult)

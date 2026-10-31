@@ -25,6 +25,9 @@ from ..ai import client as ai_client
 from ..ai.schemas import REASON_SUGGESTIONS_SCHEMA
 from ..logger import get_logger
 from ..models import Campaign, Lead, User
+from ..sms.prompt import (PERSONA_STYLE_RULES, PersonaContextOverflowError, log_persona_style,
+                          persona_style_prompt)
+from ..sms.runtime_context import AgentResolutionError, AgentRuntimeContext, resolve_user_runtime_context
 from ..tenancy import brokerage_user_ids
 from . import address as address_key
 from .catalog import SIGNALS
@@ -155,9 +158,46 @@ def _catalog_suggestions(dominant: list[dict]) -> list[str]:
     return out[:MAX_SUGGESTIONS]
 
 
+def sender_persona(session: Session, user: User) -> AgentRuntimeContext | None:
+    """The sending agent's trusted runtime context, or None for the generic wording.
+
+    A campaign is sent by the signed-in user who presses Send: the send job, the
+    owner threads and the template's agent fields all use that account. The
+    person composing the campaign and asking for suggestions is that sender, so
+    their own active published Persona styles the wording, never a colleague's.
+    """
+    try:
+        return resolve_user_runtime_context(session, user)
+    except AgentResolutionError:
+        return None
+
+
+PERSONA_TOO_LARGE_NOTE = ('Your published Persona is too large for AI suggestions. Shorten or remove some '
+                          'conversation examples and publish again.')
+
+
+def _unavailable_note(error: Exception, default: str) -> str:
+    return PERSONA_TOO_LARGE_NOTE if isinstance(error, PersonaContextOverflowError) else default
+
+
+def _persona_section(persona: AgentRuntimeContext | None) -> str:
+    """Shared published Persona style block; empty when the sender has none."""
+    if persona is None or persona.active_persona_version_id is None:
+        return ''
+    return (
+        '\nSENDING AGENT PERSONA (style only, not factual proof). The record types decide WHY '
+        'the owner is contacted; this Persona decides HOW the agent says it. '
+        f'{PERSONA_STYLE_RULES} The fragment rules above still apply: no greeting, sign-off or '
+        'sms_signature, because the fragment sits inside a longer text. Never take a lead signal, '
+        'prior relationship, market claim or property fact from the Persona or its examples.\n'
+        f'{persona_style_prompt(persona)}'
+    )
+
+
 def _prompt(dominant: list[dict], profile: list[dict], total: int, area: str,
             requested: int = MAX_SUGGESTIONS,
-            preferred: str = '') -> list[dict]:
+            preferred: str = '',
+            persona: AgentRuntimeContext | None = None) -> list[dict]:
     facts = '\n'.join(
         f"- {row['label']}: {row['count']} of {total} leads" for row in profile)
     headline = ', '.join(row['label'] for row in dominant)
@@ -176,6 +216,7 @@ def _prompt(dominant: list[dict], profile: list[dict], total: int, area: str,
                 '4. Never promise a valuation, a buyer or a price.\n'
                 '5. Make every option meaningfully different in wording and structure.\n'
                 'Reply with JSON only: {"suggestions": ["...", "...", "..."]}'
+                + _persona_section(persona)
             ),
         },
         {
@@ -193,7 +234,7 @@ def _prompt(dominant: list[dict], profile: list[dict], total: int, area: str,
     ]
 
 
-def _neutral_prompt(count: int) -> list[dict]:
+def _neutral_prompt(count: int, persona: AgentRuntimeContext | None = None) -> list[dict]:
     return [
         {
             'role': 'system',
@@ -213,6 +254,7 @@ def _neutral_prompt(count: int) -> list[dict]:
                 'records, buyers, value or the local market. No greeting or sign-off. '
                 'Under 200 characters. '
                 'Reply with JSON only: {"suggestions": ["...", "...", "..."]}'
+                + _persona_section(persona)
             ),
         },
         {
@@ -300,7 +342,7 @@ def _screen_neutral(texts: list[str]) -> tuple[list[str], list[str]]:
     return accepted[:MAX_SUGGESTIONS], rejected
 
 
-def _neutral_suggestions(count: int) -> dict:
+def _neutral_suggestions(count: int, persona: AgentRuntimeContext | None = None) -> dict:
     """Only real AI output is offered for No Signal; unsafe claims are discarded."""
     profile = [{'key': NO_SIGNAL_REASON_KEY, 'label': 'No Signal',
                 'count': count, 'share': 1.0}]
@@ -311,7 +353,7 @@ def _neutral_suggestions(count: int) -> dict:
         }
     try:
         message = ai_client.completion(
-            _neutral_prompt(count), temperature=0.7,
+            _neutral_prompt(count, persona), temperature=0.7,
             output_schema=REASON_SUGGESTIONS_SCHEMA,
             feature='campaigns.reason_suggestions.neutral',
         )
@@ -319,7 +361,7 @@ def _neutral_suggestions(count: int) -> dict:
         logger.warning('Neutral reason suggestions could not reach AI: %s', error)
         return {
             'signals': profile, 'suggestions': [], 'options': [], 'source': 'catalog',
-            'note': 'AI could not be reached. Retry Suggest with AI.',
+            'note': _unavailable_note(error, 'AI could not be reached. Retry Suggest with AI.'),
         }
     content = message.get('content') or ''
     raw = _payload_items(content)
@@ -410,7 +452,8 @@ def _meaningfully_distinct(candidates: list[str], existing: list[str], limit: in
     return accepted
 
 
-def _signal_suggestions(profile: list[dict], signal: str) -> dict:
+def _signal_suggestions(profile: list[dict], signal: str,
+                        persona: AgentRuntimeContext | None = None) -> dict:
     """Preferred fragment plus real AI alternatives for one canonical signal."""
     preferred = _PREFERRED_SIGNAL_REASONS.get(signal, '')
     options = ([{'text': preferred, 'source': 'preferred'}] if preferred else [])
@@ -428,7 +471,7 @@ def _signal_suggestions(profile: list[dict], signal: str) -> dict:
     try:
         message = ai_client.completion(
             _prompt(profile, profile, profile[0]['count'], '',
-                    requested=needed, preferred=preferred),
+                    requested=needed, preferred=preferred, persona=persona),
             temperature=0.7,
             output_schema=REASON_SUGGESTIONS_SCHEMA,
             feature='campaigns.reason_suggestions.signal',
@@ -445,7 +488,7 @@ def _signal_suggestions(profile: list[dict], signal: str) -> dict:
             'suggestions': [option['text'] for option in options],
             'options': options,
             'source': 'catalog',
-            'note': 'AI could not be reached. Retry Suggest with AI.',
+            'note': _unavailable_note(error, 'AI could not be reached. Retry Suggest with AI.'),
         }
 
     options.extend({'text': text, 'source': 'ai'} for text in generated)
@@ -479,7 +522,9 @@ def suggest(session: Session, user: User, campaign: Campaign,
                 return {'signals': [], 'suggestions': [], 'options': [],
                         'source': 'catalog',
                         'note': 'No recipients are in the No Signal group.'}
-            return _neutral_suggestions(len(properties))
+            persona = sender_persona(session, user)
+            log_persona_style(logger, 'campaigns.reason_suggestions.neutral', persona)
+            return _neutral_suggestions(len(properties), persona)
         if signal not in SIGNALS:
             raise ValueError('Choose a valid signal for suggestions.')
         count = (session.query(Lead.id)
@@ -500,8 +545,10 @@ def suggest(session: Session, user: User, campaign: Campaign,
                 'note': ('No assigned leads in this signal group.' if signal is not None
                          else 'No signals on these leads to go on.')}
 
+    persona = sender_persona(session, user)
     if signal is not None:
-        return _signal_suggestions(profile, signal)
+        log_persona_style(logger, 'campaigns.reason_suggestions.signal', persona)
+        return _signal_suggestions(profile, signal, persona)
 
     dominant = _dominant(profile)
     fallback = _catalog_suggestions(dominant)
@@ -525,7 +572,8 @@ def suggest(session: Session, user: User, campaign: Campaign,
                 'note': 'The AI provider is not configured, so these are the standard wordings.'}
 
     try:
-        message = ai_client.completion(_prompt(dominant, profile, total, area),
+        log_persona_style(logger, 'campaigns.reason_suggestions', persona)
+        message = ai_client.completion(_prompt(dominant, profile, total, area, persona=persona),
                                       temperature=0.7,
                                       output_schema=REASON_SUGGESTIONS_SCHEMA,
                                       feature='campaigns.reason_suggestions')
@@ -533,7 +581,8 @@ def suggest(session: Session, user: User, campaign: Campaign,
     except ai_client.AiUnavailableError as error:
         logger.warning('Reason suggestions fell back to the catalog: %s', error)
         return {'signals': profile, 'suggestions': fallback, 'source': 'catalog',
-                'note': 'The AI provider could not be reached, so these are the standard wordings.'}
+                'note': _unavailable_note(
+                    error, 'The AI provider could not be reached, so these are the standard wordings.')}
 
     if not suggestions:
         return {'signals': profile, 'suggestions': fallback, 'source': 'catalog',

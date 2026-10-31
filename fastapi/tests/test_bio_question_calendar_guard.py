@@ -17,16 +17,18 @@ from app.core.config import settings
 from app.sms import service
 from app.sms.scheduling import contains_unbooked_confirmation
 from test_ai_review_evidence import (  # noqa: F401  (offline is a fixture)
-    LIVE_KNOWLEDGE, PROVIDERS, QUESTION, _capture_sent, _disposition, _review_payload, _thread, offline, use,
+    LIVE_KNOWLEDGE, PROVIDERS, QUESTION, VALID, _capture_sent, _disposition, _review_payload, _thread,
+    as_trusted_owner, offline, use,
 )
 
 CALENDAR_SAFETY_LINE = 'I haven’t scheduled anything, and I won’t invent a time.'
 OLD_UNBOOKED_CONFIRMATION = re.compile(r"\b(?:you(?:['’]re| are) all set|confirmed|booked)\b", re.I)
 
 BIO_DISPOSITION = _disposition(intent='asks_about_agent_background', lead_status='want_more_info')
+# Length alone no longer blocks a draft, so this draft carries a hard policy
+# violation (an invented tenure) to exercise the policy-repair step.
 OVERLONG_DRAFT = ("I'm Bobbie Fisher, a Chicago-area real estate professional, and I'm with Real Broker LLC now. "
-                  "Before that I worked with RE/MAX Premier on brokerage growth, agent recruiting and leadership "
-                  'development across the North Shore. Are you thinking about selling 1 Test St?')
+                  "I have 20 years of experience across the North Shore. Are you thinking about selling 1 Test St?")
 REPAIRED_DRAFT = "I'm Bobbie Fisher, with Real Broker LLC now. Are you thinking about selling 1 Test St?"
 REVIEW_REJECTION = json.dumps({
     'valid': False, 'issues': ['does_not_answer_tenure_question'],
@@ -37,10 +39,11 @@ REGENERATED = ("I'm with Real Broker LLC now. My exact time at RE/MAX Premier is
 
 
 def _run(offline, monkeypatch, make_user, session, regenerated, caplog):
-    monkeypatch.setitem(settings['sms'], 'approved_brokerage', 'Real Broker LLC')
     offline['knowledge'] = LIVE_KNOWLEDGE
     conversation = _thread(session, make_user)
-    offline['replies'] = [BIO_DISPOSITION, OVERLONG_DRAFT, REPAIRED_DRAFT, REVIEW_REJECTION, regenerated]
+    as_trusted_owner(conversation.user_id, 'Bobbie Fisher', 'Real Broker LLC')
+    # The regenerated reply is reviewed again (accepted here) before any send.
+    offline['replies'] = [BIO_DISPOSITION, OVERLONG_DRAFT, REPAIRED_DRAFT, REVIEW_REJECTION, regenerated, VALID]
     sent = _capture_sent(monkeypatch)
     caplog.set_level(logging.INFO)
     service.process_ai_reply(conversation.id, QUESTION)
@@ -66,13 +69,15 @@ def test_tenure_answer_survives_review_regeneration_and_calendar_guard(
     assert sent == [(REGENERATED, 'ai.reply')]
     assert CALENDAR_SAFETY_LINE not in [text for text, _event in sent]
     assert 'calendar_safety' not in caplog.text
-    # disposition, draft, policy repair, review, regeneration
-    assert len(offline['bodies']) == 5 and len(offline['searches']) == 2
+    # disposition, draft, policy repair, review, regeneration, review of the regeneration
+    assert len(offline['bodies']) == 6 and len(offline['searches']) == 1  # regeneration reuses the attempt's evidence snapshot
     repair = json.dumps(offline['bodies'][2])
-    assert 'Fix these violations: over_length' in repair
+    assert 'Fix these violations: unsupported_tenure' in repair
     review = _review_payload(offline['bodies'][3])
-    assert review['proposed_bobbie_reply'] == REPAIRED_DRAFT and review['approved_knowledge_evidence']
+    assert review['proposed_agent_reply'] == REPAIRED_DRAFT and review['approved_knowledge_evidence']
     assert 'Also answer how long she was with RE/MAX' in json.dumps(offline['bodies'][4])
+    final_review = _review_payload(offline['bodies'][5])
+    assert final_review['proposed_agent_reply'] == REGENERATED and final_review['approved_knowledge_evidence']
 
 
 @pytest.mark.parametrize('regenerated', [
@@ -86,6 +91,7 @@ def test_real_unbooked_confirmations_still_get_the_calendar_safety_line(
 
     sent = _run(offline, monkeypatch, make_user, session, regenerated, caplog)
 
+    # Even a reviewer-accepted booking claim is replaced by the deterministic guard.
     assert sent == [(CALENDAR_SAFETY_LINE, 'ai.reply')]
     assert 'calendar_safety' in caplog.text
 

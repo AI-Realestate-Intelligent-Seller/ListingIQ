@@ -1,26 +1,18 @@
-from .vector_store import vector_store
-from module.prompt import prompt
+from .sms.knowledge import search_agent_knowledge
+from .sms.runtime_context import AgentRuntimeContext
 
 class RagService:
-    def __init__(self):
-        self.client = vector_store
-        self.collection = 'bobbie'
+    """Compatibility facade over the authorized generic knowledge service.
 
-    @property
-    def available(self) -> bool:
-        return self.client.available
+    Index writes belong to the durable Persona indexing worker. Keeping them
+    out of this request-time service prevents arbitrary callers from creating
+    ownerless points.
+    """
 
-    def index_document(self, doc_id: str, text: str, metadata: dict | None = None):
-        return self.client.upsert_text(
-            self.collection, doc_id, text, metadata=metadata or {})
+    def search(self, query: str, context: AgentRuntimeContext, k: int = 5):
+        return search_agent_knowledge(query, context, limit=k).get('matches') or []
 
-    def search(self, query: str, k: int = 5):
-        return self.client.search_text(self.collection, query, k=k)
-
-    def prompt_context(self, query: str):
-        results = self.search(query)
-        if not results:
-            return []
-        return [item.get('metadata') or item for item in results]
+    def prompt_context(self, query: str, context: AgentRuntimeContext):
+        return self.search(query, context)
 
 rag_service = RagService()

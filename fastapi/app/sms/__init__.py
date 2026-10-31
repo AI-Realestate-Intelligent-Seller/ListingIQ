@@ -1,1 +1,1 @@
-"""Bobbie SMS workspace: provider-neutral AI runtime, policy guards and delivery."""
+"""Agent SMS workspace: provider-neutral AI runtime, policy guards and delivery."""

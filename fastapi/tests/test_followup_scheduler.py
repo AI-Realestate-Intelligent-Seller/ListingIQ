@@ -31,7 +31,8 @@ def test_three_followups_then_marks_no_response_dead(session, make_user, monkeyp
     monkeypatch.setitem(sms, 'followup_gap_hours', 72)
     monkeypatch.setitem(sms, 'followup_max_attempts', 3)
     monkeypatch.setattr(followup_scheduler.bobbie, 'generate_no_response_followup',
-                        lambda _conversation, _history, attempt, maximum: f'Follow-up {attempt}/{maximum}')
+                        lambda _conversation, _history, attempt, maximum, agent_context=None:
+                        f'Follow-up {attempt}/{maximum}' if agent_context is not None else None)
 
     def fake_send(db, thread, text, event_type, suppress_auto_reply=False):
         assert suppress_auto_reply is True

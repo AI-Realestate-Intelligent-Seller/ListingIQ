@@ -111,6 +111,10 @@ def load_config():
                                             sms_cfg.get('approved_brokerage', '')) or '').strip(),
         'knowledge_collection': os.getenv('KNOWLEDGE_COLLECTION',
                                           sms_cfg.get('knowledge_collection', 'bobbie_knowledge')),
+        'agent_knowledge_collection': os.getenv(
+            'AGENT_KNOWLEDGE_COLLECTION',
+            sms_cfg.get('agent_knowledge_collection', 'agent_knowledge'),
+        ),
         'knowledge_chunk_chars': int(os.getenv('KNOWLEDGE_CHUNK_CHARS',
                                                sms_cfg.get('knowledge_chunk_chars', 900))),
         'knowledge_chunk_overlap': int(os.getenv('KNOWLEDGE_CHUNK_OVERLAP',

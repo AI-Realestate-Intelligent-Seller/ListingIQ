@@ -1,4 +1,4 @@
-"""Persisted Bobbie follow-ups for campaign owners who have not replied."""
+"""Persisted Personal AI follow-ups for campaign owners who have not replied."""
 
 import threading
 from datetime import datetime, timedelta
@@ -8,6 +8,7 @@ from ..db import SessionLocal
 from ..logger import get_logger
 from ..models import Conversation, Message
 from . import bobbie
+from .runtime_context import AgentResolutionError, resolve_agent_runtime_context, runtime_context_is_current
 from .service import SmsDeliveryError, history_for, send_and_store_message
 
 logger = get_logger(__name__)
@@ -104,8 +105,26 @@ def process_due_conversation(session, conversation_id: int,
         return 'dead'
 
     attempt = conversation.followup_attempt_count + 1
+    try:
+        agent_context = resolve_agent_runtime_context(session, conversation)
+    except AgentResolutionError as error:
+        logger.warning('[followup] conversation=%s cancelled=true reason=%s', conversation.id, error)
+        cancel_followup_cadence(session, conversation)
+        return 'cancelled'
     message = bobbie.generate_no_response_followup(
-        conversation, history_for(session, conversation), attempt, maximum)
+        conversation, history_for(session, conversation), attempt, maximum,
+        agent_context=agent_context)
+    try:
+        current = runtime_context_is_current(session, conversation, agent_context)
+    except AgentResolutionError:
+        current = False
+    if not current:
+        # The agent or their active Persona changed while the text was written.
+        logger.warning('[followup] conversation=%s skipped=true reason=agent_context_changed', conversation.id)
+        conversation.next_followup_at = now + timedelta(minutes=10)
+        session.add(conversation)
+        session.commit()
+        return 'retry'
     try:
         send_and_store_message(session, conversation, message, f'ai.followup.{attempt}', True)
     except SmsDeliveryError as error:

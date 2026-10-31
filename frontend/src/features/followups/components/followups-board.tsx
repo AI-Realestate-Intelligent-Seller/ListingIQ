@@ -36,6 +36,7 @@ import { AppointmentDialog } from "./appointment-dialog";
 import {
   useNotifications,
 } from "../../dashboard/components/notification-provider";
+import { useThreadAutoscroll } from "@/features/sms/lib/use-thread-autoscroll";
 /** How often the list and the open thread refresh. */
 const POLL_INTERVAL_MS = 8000;
 
@@ -244,11 +245,8 @@ export function FollowUpsBoard({
     setScope("all");
   }, [campaignId]);
 
-  // Keep the newest message in view.
-  useEffect(() => {
-    const thread = threadRef.current;
-    if (thread) thread.scrollTop = thread.scrollHeight;
-  }, [messages]);
+  // Follow new messages only when the reader is at the bottom; never on a plain refresh.
+  const followNextMessage = useThreadAutoscroll(threadRef, messages, activeId);
 
   useEffect(() => {
     if (!isStatusMenuOpen) return;
@@ -442,6 +440,7 @@ useEffect(() => {
     const text = String(new FormData(form).get("text") ?? "").trim();
     if (!text) return;
 
+    followNextMessage();
     setIsSending(true);
     setErrorMessage("");
     try {
