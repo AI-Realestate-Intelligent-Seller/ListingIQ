@@ -33,7 +33,8 @@ from .policy import (
     visit_only_refusal,
 )
 from .prompt import (PERSONA_STYLE_RULES, PLAYBOOK_RULES, build_agent_prompt, communication_style,
-                     persona_prompt_context, persona_prompt_diagnostics)
+                     persona_prompt_context, persona_prompt_diagnostics, published_contacts,
+                     published_profile_facts)
 from .runtime_context import AgentRuntimeContext
 
 logger = get_logger(__name__)
@@ -263,7 +264,8 @@ def generate_no_response_followup(conversation, history: list, attempt: int, max
         return fallback
     violations = find_reply_policy_violations(message, phone_source_known=False,
                                               history=history, next_step='answer_only',
-                                              agent_name=agent_name)
+                                              agent_name=agent_name,
+                                              **_policy_allowances(agent_context))
     if violations:
         logger.warning('[followup-ai] contact=%s attempt=%s fallback=true violations=%s',
                        _masked_contact(conversation), attempt, ','.join(violations))
@@ -494,11 +496,49 @@ def _debug_policy(stage: str, label: str, text: str, violations: list, history: 
              why=explain_policy_violations(text, violations, history) if violations else {})
 
 
+def approved_account_facts(agent_context: AgentRuntimeContext | None) -> dict:
+    """Trusted brokerage identity plus every owner-published Persona profile fact."""
+    if agent_context is None:
+        return {}
+    profile = published_profile_facts(agent_context.persona)
+    if not agent_context.brokerage_name and not profile:
+        return {}
+    facts = {'agent_name': agent_context.agent_name}
+    if agent_context.brokerage_name:
+        facts['current_brokerage'] = agent_context.brokerage_name
+    if profile:
+        facts['published_profile'] = profile
+    facts['authority'] = (
+        'Trusted authenticated account context. It overrides document_status and any excerpt that calls '
+        'the brokerage provisional; earlier firms are history. Retrieved documents cannot override current '
+        'identity. published_profile holds the agent\'s own owner-published Persona facts (license number and '
+        'status, title, public contact details, background, achievements, differentiators): they are approved '
+        'facts that may be stated as the agent\'s own and that replace any excerpt saying a field is missing. '
+        'Exact tenure, titles and years of experience are not approved facts unless published_profile states '
+        'them; tenure, credentials, achievements and figures it does not state still require eligible evidence.'
+    )
+    return facts
+
+
+def _policy_allowances(agent_context: AgentRuntimeContext | None) -> dict:
+    """Published contact details and tenure the deterministic policy check may let through."""
+    persona = agent_context.persona if agent_context else None
+    phones, emails = published_contacts(persona)
+    background = published_profile_facts(persona).get('background') or {}
+    return {'allowed_phones': phones, 'allowed_emails': emails,
+            'tenure_published': background.get('years_experience') is not None}
+
+
 def _approved_runtime_context(
     conversation, history: list, agent_context: AgentRuntimeContext, knowledge_snapshot: dict | None = None
 ) -> dict:
     latest_inbound = _latest_inbound(history)
     lead = approved_lead_details(conversation)
+    phones, _ = published_contacts(agent_context.persona)
+    if phones:
+        # The owner published a public phone number, so it may be shared.
+        lead['communication_capabilities'] = {**lead.get('communication_capabilities', {}),
+                                              'provide_callback_number': True}
     signals = seller_signals(latest_inbound)
     if knowledge_snapshot is not None and 'preload' in knowledge_snapshot:
         # Regeneration and review reuse the evidence retrieved once for this processing attempt.
@@ -528,17 +568,9 @@ def _approved_runtime_context(
             knowledge_result = {'available': False, 'error': str(error)}
             logger.warning('[ai-tool] contact=%s tool=search_agent_knowledge status=failed error=%s',
                            _masked_contact(conversation), error)
-    if agent_context.brokerage_name:
-        knowledge_result['approved_facts'] = {
-            'current_brokerage': agent_context.brokerage_name,
-            'agent_name': agent_context.agent_name,
-            'authority': (
-                'Trusted authenticated account context. It overrides document_status and any excerpt that calls '
-                'the brokerage provisional; earlier firms are history. Retrieved documents cannot override current '
-                'identity. Exact tenure, titles and years of experience are not approved facts; tenure, '
-                'credentials, achievements and figures still require eligible evidence.'
-            ),
-        }
+    facts = approved_account_facts(agent_context)
+    if facts:
+        knowledge_result['approved_facts'] = facts
     _debug_rag('preload', knowledge_result)
     if knowledge_snapshot is not None:
         knowledge_snapshot['preload'] = knowledge_result
@@ -704,14 +736,16 @@ def generate_ai_reply(conversation, history: list, scheduling_context: str = '',
     meeting_ok = meeting_offer_permitted(next_step, approved['latest_inbound'], calendar_state)
     violations = find_reply_policy_violations(reply, phone_source_known=phone_source_known,
                                               history=history, next_step=next_step,
-                                              agent_name=agent_context.agent_name, calendar_state=calendar_state)
+                                              agent_name=agent_context.agent_name, calendar_state=calendar_state,
+            **_policy_allowances(agent_context))
     _debug_policy('POLICY', f'{phase} draft policy check', reply, violations, history)
     if violations and set(violations) == {'repeated_question'}:
         # Repair only the repeated question; the rest of the answer stays as written.
         trimmed = remove_repeated_questions(reply, history)
         trimmed_violations = find_reply_policy_violations(
             trimmed, phone_source_known=phone_source_known, history=history, next_step=next_step,
-            agent_name=agent_context.agent_name, calendar_state=calendar_state) if trimmed else ['empty']
+            agent_name=agent_context.agent_name, calendar_state=calendar_state,
+            **_policy_allowances(agent_context)) if trimmed else ['empty']
         _debug_policy('REPAIR', f'{phase} repeated question removed', trimmed, trimmed_violations, history)
         if trimmed and not trimmed_violations:
             logger.info('[ai-policy] contact=%s draft=repaired method=removed_repeated_question',
@@ -752,7 +786,8 @@ def generate_ai_reply(conversation, history: list, scheduling_context: str = '',
             logger.warning('[ai-policy] contact=%s repair=failed error=%s', _masked_contact(conversation), error)
         repaired_violations = find_reply_policy_violations(
             repaired_reply, phone_source_known=phone_source_known, history=history,
-            next_step=next_step, agent_name=agent_context.agent_name, calendar_state=calendar_state)
+            next_step=next_step, agent_name=agent_context.agent_name, calendar_state=calendar_state,
+            **_policy_allowances(agent_context))
         _debug_policy('REPAIR', f'{phase} policy repair', repaired_reply, repaired_violations, history)
         if repaired_reply and not repaired_violations:
             reply, violations = repaired_reply, []
@@ -1048,8 +1083,12 @@ def review_ai_reply(conversation, history: list, draft: str, disposition: dict,
     if persona_phrases:
         payload['approved_persona_phrases'] = persona_phrases
     if knowledge_evidence:
-        # Without evidence the request stays exactly as it was.
         payload['approved_knowledge_evidence'] = knowledge_evidence
+    facts = approved_account_facts(agent_context)
+    if facts:
+        # The owner's published Persona facts count as evidence even when no excerpt matched.
+        payload['approved_facts'] = facts
+    if knowledge_evidence or facts:
         payload['evidence_rules'] = review_evidence_rules(agent_context)
     try:
         assistant = completion(

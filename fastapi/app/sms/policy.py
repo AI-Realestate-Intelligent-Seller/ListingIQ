@@ -570,9 +570,15 @@ EXPERIENCE_FALLBACK = ('Fair question. I don\u2019t want to overstate anything b
 def find_reply_policy_violations(reply: str, phone_source_known: bool | None = None,
                                  max_length: int | None = None, history: list | None = None,
                                  next_step: str | None = None,
-                                 agent_name: str = '', calendar_state: str = 'none') -> list:
+                                 agent_name: str = '', calendar_state: str = 'none',
+                                 allowed_phones: tuple = (), allowed_emails: tuple = (),
+                                 tenure_published: bool = False) -> list:
     """Hard deterministic blocks only. Length is checked against the provider
-    ceiling (``SMS_PROVIDER_MAX_CHARS``), never against a style target."""
+    ceiling (``SMS_PROVIDER_MAX_CHARS``), never against a style target.
+
+    ``allowed_phones`` (10-digit strings) and ``allowed_emails`` are the contact
+    details the agent published on their Persona; only those may appear.
+    ``tenure_published`` means the Persona states years of experience."""
     text = clean_reply(reply)
     violations = []
     if len(text) > (max_length or SMS_PROVIDER_MAX_CHARS):
@@ -585,9 +591,10 @@ def find_reply_policy_violations(reply: str, phone_source_known: bool | None = N
             violations.append('missing_ai_disclosure')
     elif IDENTITY_ASSISTANT.search(text) or _third_person_identity(text, agent_name):
         violations.append('identity_switch')
-    if EMAIL_ADDRESS.search(text):
+    allowed_email_set = {str(email).lower() for email in allowed_emails}
+    if any(match.lower() not in allowed_email_set for match in EMAIL_ADDRESS.findall(text)):
         violations.append('invented_email')
-    if PHONE_NUMBER.search(text):
+    if any(re.sub(r'\D', '', match.group(0))[-10:] not in allowed_phones for match in PHONE_NUMBER.finditer(text)):
         violations.append('invented_phone')
     if DELIVERY_PROMISE.search(text):
         violations.append('unsupported_delivery')
@@ -605,7 +612,7 @@ def find_reply_policy_violations(reply: str, phone_source_known: bool | None = N
         violations.append('unsupported_outcome')
     if _unsupported_guarantee(text):
         violations.append('unsupported_guarantee')
-    if PRECISE_TENURE.search(text):
+    if PRECISE_TENURE.search(text) and not tenure_published:
         violations.append('unsupported_tenure')
     if BUSINESS_EXPERIENCE.search(text):
         violations.append('business_experience')

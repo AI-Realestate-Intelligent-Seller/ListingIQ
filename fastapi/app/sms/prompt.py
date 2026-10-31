@@ -152,7 +152,8 @@ def _unique_phrases(*groups) -> list[str]:
     for group in groups:
         for item in group or []:
             text = ' '.join(str(item or '').split())
-            if text and text.casefold() not in seen:
+            # "N/A — ..." is a placeholder note from the import, not a phrase.
+            if text and not text.upper().startswith('N/A') and text.casefold() not in seen:
                 seen.add(text.casefold())
                 out.append(text)
     return out
@@ -280,6 +281,70 @@ def conversation_playbook(persona: dict | None) -> dict:
             if str(playbook.get(field) or '').strip()}
 
 
+# Persona profile fields the owner filled in (by hand or by import autofill)
+# that the AI may state as the agent's own facts. business_background is left
+# out on purpose: conversations are about a residential home only.
+PROFILE_FACT_FIELDS = {
+    'identity': ('license_number', 'licensing_jurisdiction', 'licensing_status', 'professional_intro',
+                 'brand_identity', 'public_email', 'public_phone'),
+    'background': ('years_experience', 'previous_experience', 'target_audiences', 'industry_expertise',
+                   'differentiators', 'unique_selling_proposition', 'achievements', 'transaction_experience',
+                   'professional_philosophy', 'brand_positioning'),
+}
+PROFILE_HANDOFF_FIELDS = ('sensitive_escalation', 'human_handoff')
+_DISPUTED = frozenset({'owner_disputed', 'disputed', 'rejected', 'dismissed'})
+
+
+def _fact_value(value):
+    """A filled-in value, or None for blanks and "N/A" placeholders."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, (list, tuple)):
+        items = [str(item).strip()[:300] for item in value
+                 if str(item or '').strip() and not str(item).strip().upper().startswith('N/A')]
+        return items[:12] or None
+    text = str(value or '').strip()
+    if not text or text.upper().startswith('N/A'):
+        return None
+    return text[:600]
+
+
+def published_profile_facts(persona: dict | None) -> dict:
+    """Every owner-published Persona profile fact, minus blanks and disputed fields."""
+    persona = dict(persona or {})
+    profile = dict(persona.get('profile_config') or {})
+    confirmations = dict(profile.get('confirmations') or {})
+    facts = {}
+    for field in ('professional_title', 'professional_role'):
+        value = _fact_value(persona.get(field))
+        if value is not None and confirmations.get(field) not in _DISPUTED:
+            facts[field] = value
+    for section, fields in PROFILE_FACT_FIELDS.items():
+        source = dict(profile.get(section) or {})
+        values = {field: _fact_value(source.get(field)) for field in fields
+                  if confirmations.get(field) not in _DISPUTED}
+        values = {field: value for field, value in values.items() if value is not None}
+        if values:
+            facts[section] = values
+    playbook = dict(profile.get('playbook') or {})
+    handoff = {field: _fact_value(playbook.get(field)) for field in PROFILE_HANDOFF_FIELDS}
+    handoff = {field: value for field, value in handoff.items() if value is not None}
+    if handoff:
+        facts['handoff_guidance'] = handoff
+    return facts
+
+
+def published_contacts(persona: dict | None) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(phones as 10-digit strings, lowercase emails) the owner published for owners to use."""
+    identity = published_profile_facts(persona).get('identity') or {}
+    phone_digits = re.sub(r'\D', '', str(identity.get('public_phone') or ''))[-10:]
+    phones = (phone_digits,) if len(phone_digits) == 10 else ()
+    email = str(identity.get('public_email') or '').strip().lower()
+    return phones, ((email,) if '@' in email else ())
+
+
 def _prompt_payload(context: AgentRuntimeContext, latest_message: str = '') -> dict:
     persona = dict(context.persona or {})
     payload = build_published_persona_style_context(context, latest_message)
@@ -296,6 +361,14 @@ def _prompt_payload(context: AgentRuntimeContext, latest_message: str = '') -> d
         'service_areas': [str(item)[:80] for item in (persona.get('service_areas') or [])[:8]],
         'trust': 'owner-published self-description; not independently verified evidence',
     }
+    profile = published_profile_facts(persona)
+    if profile:
+        payload['published_profile'] = {
+            **profile,
+            'trust': ("The agent's own published Persona facts (license, title, contact details, background, "
+                      'achievements). State them as the agent\'s facts when the owner asks or when relevant; '
+                      'they replace any excerpt saying a field is missing. Never add details they do not state.'),
+        }
     return payload
 
 
