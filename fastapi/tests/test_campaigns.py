@@ -521,7 +521,7 @@ def test_discarding_a_draft_returns_its_leads_to_the_pool(
 # -- sending ---------------------------------------------------------------
 
 
-def test_campaign_outreach_starts_in_user_handled_mode(session, monkeypatch):
+def test_campaign_outreach_starts_with_ai_enabled(session, monkeypatch):
     user = User(
         email=BROKER_EMAIL,
         hashed_password='unused-in-this-test',
@@ -573,8 +573,8 @@ def test_campaign_outreach_starts_in_user_handled_mode(session, monkeypatch):
     assert failed is None
     assert started['conversation_id']
     conversation = session.query(Conversation).one()
-    assert conversation.handled_by == 'broker'
-    assert conversation.ai_enabled is False
+    assert conversation.handled_by == 'bobbie'
+    assert conversation.ai_enabled is True
 
 
 def test_sending_texts_every_recipient_the_message_they_were_shown(
@@ -601,10 +601,10 @@ def test_sending_texts_every_recipient_the_message_they_were_shown(
     assert len(sent_sms) == 3
     assert all(item['text'].endswith('Reply STOP to Opt-out') for item in sent_sms)
 
-    # Campaign threads start user-handled; Bobbie can be handed the thread later.
+    # Campaign threads start AI-handled; a person can take over any thread.
     conversations = client.get('/api/v1/sms/conversations', headers=headers).json()
-    assert all(item['handled_by'] == 'broker' for item in conversations)
-    assert all(item['ai_enabled'] is False for item in conversations)
+    assert all(item['handled_by'] == 'bobbie' for item in conversations)
+    assert all(item['ai_enabled'] is True for item in conversations)
     assert session.query(Conversation).filter(
         Conversation.campaign_id == campaign_id).count() == 3
 

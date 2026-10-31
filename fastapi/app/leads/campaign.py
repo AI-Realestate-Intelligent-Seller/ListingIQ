@@ -1463,11 +1463,12 @@ def _prepare_conversation(session: Session, user: User, campaign: Campaign,
         earlier.append(previous_address)
         context['other_properties'] = earlier
     conversation.lead_context = json.dumps(context)
-    # Campaign outreach starts user-handled. Bobbie remains available through
-    # the existing explicit hand-back control in Follow-ups.
-    conversation.ai_enabled = False
+    # Campaign outreach starts AI-handled, like a single new conversation. An
+    # owner who opted out stays off; a person can still take over any thread.
+    opted_out = bool(conversation.dnc_alert) or conversation.lead_status == 'dnc'
+    conversation.ai_enabled = not opted_out
     conversation.recipient_ai_enabled = False
-    conversation.handled_by = 'broker'
+    conversation.handled_by = 'broker' if opted_out else 'bobbie'
     conversation.lead_status = 'processing'
     conversation.queue_status = 'idle'
     conversation.processed_at = None

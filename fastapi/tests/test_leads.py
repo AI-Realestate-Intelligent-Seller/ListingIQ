@@ -468,7 +468,7 @@ def test_facets_count_the_whole_pool(client, make_user, auth_header):
 # -- campaigns -------------------------------------------------------------
 
 
-def test_campaign_starts_user_handled_and_moves_the_lead_into_the_sms_tab(
+def test_campaign_starts_ai_handled_and_moves_the_lead_into_the_sms_tab(
         client, make_user, auth_header, sent_sms, session):
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
@@ -488,8 +488,8 @@ def test_campaign_starts_user_handled_and_moves_the_lead_into_the_sms_tab(
 
     conversations = client.get('/api/v1/sms/conversations', headers=headers).json()
     assert [item['contact'] for item in conversations] == ['+13125550188']
-    assert conversations[0]['handled_by'] == 'broker'
-    assert conversations[0]['ai_enabled'] is False
+    assert conversations[0]['handled_by'] == 'bobbie'
+    assert conversations[0]['ai_enabled'] is True
 
     # The lead now lives under its campaign, not in the pool.
     refreshed = client.get(LEADS_URL, headers=headers).json()['leads']
