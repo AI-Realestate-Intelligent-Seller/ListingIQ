@@ -26,7 +26,7 @@ from .runtime_context import (
     resolve_agent_runtime_context,
     runtime_context_is_current,
 )
-from .classifier import classify_lead_message, finalized_lead_status, is_opt_out, merge_lead_status, seller_signals
+from .classifier import classify_lead_message, finalized_lead_status, is_opt_out, is_realtor, merge_lead_status, seller_signals
 from .policy import (
     ai_debug, ai_debug_begin, ai_debug_enabled, ai_debug_safely, ai_debug_set, ai_debug_state, asked_questions,
     escalation_reason, estimate_sms_segments, meeting_offer_permitted, visit_only_refusal,
@@ -588,6 +588,21 @@ def _experience_answer_after_rejection(latest_inbound: str, history: list, issue
     return EXPERIENCE_FALLBACK
 
 
+REALTOR_APOLOGY = ('My apologies for reaching out — I didn’t realize you’re a real estate professional. '
+                   'I’ll make sure you aren’t contacted again. Take care.')
+
+
+def _close_as_realtor(session, conversation: Conversation, status_before: str) -> None:
+    """The person is a realtor: apologize once, then never contact them again."""
+    log_event(logger, 'sms.ai.realtor_detected', conversation_id=conversation.id)
+    _debug_final(REALTOR_APOLOGY, 'ai.closing', 'fallback')
+    hand_to_broker(session, conversation)
+    mark_lead_completed(session, conversation, lead_status='realtor', dnc_alert=True)
+    _log_status_change(session, conversation, status_before, 'realtor')
+    send_and_store_message(session, conversation, REALTOR_APOLOGY, 'ai.closing')
+    log_event(logger, 'sms.ai.completed', conversation_id=conversation.id, outcome='realtor_apology')
+
+
 def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
     """Port of processAiReply(). Runs in a background thread with its own session."""
     session = SessionLocal()
@@ -632,6 +647,10 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
                       outcome='opt_out_acknowledged')
             return
 
+        if is_realtor(latest_inbound_text):
+            _close_as_realtor(session, conversation, status_before)
+            return
+
         # Identity is resolved only after opt-out handling: a STOP must be honored
         # even when the owning account can no longer be resolved.
         agent_context = resolve_agent_runtime_context(session, conversation)
@@ -654,6 +673,10 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
                  should_fetch_availability=(disposition.get('calendar') or {}).get('should_fetch_availability'),
                  stage=disposition.get('conversation_stage'), lead_status=disposition.get('lead_status'),
                  reason=disposition.get('reason'))
+
+        if disposition['action'] == 'end' and disposition['lead_status'] == 'realtor':
+            _close_as_realtor(session, conversation, status_before)
+            return
 
         if disposition['action'] == 'end':
             closing_context = 'Do not schedule; this conversation is ending.'
@@ -700,7 +723,7 @@ def process_ai_reply(conversation_id: int, latest_inbound_text: str) -> None:
             return
 
         continued_status = (disposition['lead_status']
-                            if conversation.lead_status in ('not_interested', 'no_response')
+                            if conversation.lead_status in ('not_interested', 'wrong_info', 'no_response')
                             else merge_lead_status(conversation.lead_status, disposition['lead_status']))
         update_lead_progress(session, conversation, lead_status=continued_status, processed_at=None)
         _log_status_change(session, conversation, status_before, continued_status)

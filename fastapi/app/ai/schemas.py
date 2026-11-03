@@ -33,7 +33,7 @@ DISPOSITION_SCHEMA = {
             'enum': [
                 # Mirrors bobbie.LEAD_STATUSES, which accepts every value here.
                 'processing', 'want_more_info', 'interested', 'ready_to_sell',
-                'location_discussion', 'not_interested',
+                'location_discussion', 'not_interested', 'wrong_info', 'realtor',
             ],
         },
         'confidence': {'type': 'number', 'minimum': 0, 'maximum': 1},

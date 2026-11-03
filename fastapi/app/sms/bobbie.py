@@ -14,7 +14,7 @@ from ..ai.client import AiUnavailableError, completion
 from ..ai.schemas import CALENDAR_ACTION_SCHEMA, DISPOSITION_SCHEMA, REVIEW_SCHEMA
 from ..logger import get_logger
 from . import knowledge
-from .classifier import classify_lead_message, seller_signals
+from .classifier import classify_lead_message, is_realtor, is_wrong_info, seller_signals
 from .policy import (
     ai_debug,
     ai_debug_enabled,
@@ -68,17 +68,17 @@ TOOLS = [
 
 CONTINUE_STATUSES = {
     'processing', 'want_more_info', 'interested', 'ready_to_sell', 'location_discussion'}
-LEAD_STATUSES = CONTINUE_STATUSES | {'not_interested'}
+LEAD_STATUSES = CONTINUE_STATUSES | {'not_interested', 'wrong_info', 'realtor'}
 NEXT_STEPS = {'answer_and_qualify', 'answer_only', 'offer_call', 'schedule', 'close'}
 CALENDAR_STATES = {'none', 'call_declined', 'call_accepted', 'time_proposed', 'booking_confirmed'}
 CONVERSATION_STAGES = {'discovery', 'qualified_for_call', 'call_requested', 'scheduling', 'complete'}
 OUTCOMES = {'positive', 'neutral', 'negative', 'disqualified'}
 
 DISPOSITION_SYSTEM = """You are the conversation disposition and next-step layer for an authorized real-estate agent's property-owner SMS chat. Decide whether there is any reasonable path to continue and what the agent should do next.
-Return only JSON: {"action":"continue|end","intent":"short_snake_case","outcome":"positive|neutral|negative|disqualified","lead_status":"processing|want_more_info|interested|ready_to_sell|not_interested","confidence":0.0,"conversation_stage":"discovery|qualified_for_call|call_requested|scheduling|complete","next_step":"answer_and_qualify|answer_only|offer_call|schedule|close","qualification_focus":"brief topic or empty","calendar":{"state":"none|call_declined|call_accepted|time_proposed|booking_confirmed","should_fetch_availability":false,"requested_time_text":"exact owner words or empty","reason":"brief"},"reason":"brief"}.
+Return only JSON: {"action":"continue|end","intent":"short_snake_case","outcome":"positive|neutral|negative|disqualified","lead_status":"processing|want_more_info|interested|ready_to_sell|not_interested|wrong_info|realtor","confidence":0.0,"conversation_stage":"discovery|qualified_for_call|call_requested|scheduling|complete","next_step":"answer_and_qualify|answer_only|offer_call|schedule|close","qualification_focus":"brief topic or empty","calendar":{"state":"none|call_declined|call_accepted|time_proposed|booking_confirmed","should_fetch_availability":false,"requested_time_text":"exact owner words or empty","reason":"brief"},"reason":"brief"}.
 In these labels "call" means the agent's meeting request, which is an onsite visit to the property; a phone call is only the fallback when the owner declines a visit or asks for one. Treat acceptance of a visit, a walkthrough, or "come by / stop by" as call acceptance, and refusal of a visit as call_declined only if the owner also rejects meeting at all.
 Choose continue when the owner asks a question, requests information, states a condition, raises an objection that can be answered, expresses hesitation, says maybe/later, rejects only a call or listing method, or otherwise leaves any opening. Treat conditional willingness as continue even when the message contains words like "not interested."
-Choose end only when the owner clearly wants the conversation to stop, clearly rejects both selling and further discussion without any question or condition, reports a final disqualifier such as wrong number/already sold, or gives a pure closing after the matter is resolved. Action controls whether messaging continues; it does not determine lead quality. A polite goodbye after the owner said they are ready to sell must remain positive/ready_to_sell, never not_interested. Use negative/not_interested only for an actual rejection. When uncertain, choose continue.
+Choose end only when the owner clearly wants the conversation to stop, clearly rejects both selling and further discussion without any question or condition, reports a final disqualifier such as wrong number/already sold, or gives a pure closing after the matter is resolved. Action controls whether messaging continues; it does not determine lead quality. A polite goodbye after the owner said they are ready to sell must remain positive/ready_to_sell, never not_interested. Use negative/not_interested only for an actual rejection. When the text reached the wrong person (wrong number, they do not live there, they are not the owner, nobody by that name), use end, disqualified and wrong_info; but someone who says they do not live there yet still owns the property is the owner, not wrong_info. When the person says they themselves are a realtor, real estate agent or broker, use end, disqualified and realtor; having, using or working with a realtor is not realtor. When uncertain, choose continue.
 For a new objection, condition, failed-listing concern, or unclear motivation, use discovery plus answer_and_qualify and identify the single most logical missing detail. Do not ask for information the owner already clearly provided.
 Use qualified_for_call plus offer_call as soon as the owner is willing or conditionally willing to sell and the agent knows at least one useful decision detail such as motivation, desired outcome/price, timing, property situation, or the condition under which they would sell. One or two useful qualification exchanges are enough. Do not keep interviewing for contact details, documents, title/liens, closing logistics, or repeat confirmation of willingness before requesting the call. If the owner asks a direct question at this stage, answer it briefly and invite the call in the same SMS.
 An owner who says they want to sell and states a hoped-for price or urgency (for example "I just want to sell it quickly at best price like 675000$") has given selling intent plus a useful decision detail: use qualified_for_call and offer_call, lead_status ready_to_sell. Their number is a price expectation, not a request to negotiate or a verified valuation.
@@ -219,17 +219,18 @@ def generate_no_response_followup(conversation, history: list, attempt: int, max
                                   agent_context: AgentRuntimeContext | None = None) -> str:
     """Write one low-pressure follow-up using the stored thread as context."""
     address = conversation.property_address or 'the property'
+    closing = ('Just closing the loop. If selling is still something you’d consider, feel free to reply. '
+               'Otherwise, I won’t follow up again.')
     fallbacks = {
         1: f'Just circling back—did you happen to see my earlier text about {address}?',
         2: f'I wanted to follow up once more about {address}. Is selling something you would consider?',
-        maximum: ('Just closing the loop. If selling is still something you’d consider, feel free to reply. '
-                  'Otherwise, I won’t follow up again.'),
     }
-    fallback = fallbacks.get(attempt, fallbacks.get(maximum))
+    # With a single follow-up, the first message keeps its normal "circling back" tone.
+    final = maximum > 1 and attempt >= maximum
+    fallback = closing if final else fallbacks.get(attempt, fallbacks[2])
     agent_name = agent_context.agent_name if agent_context else 'the ListingIQ agent'
     recent = [{'role': 'Agent' if item.get('direction') == 'outbound' else 'Owner',
                'text': str(item.get('text') or '')} for item in history[-12:]]
-    final = attempt >= maximum
     instruction = (
         f'Write {agent_name}’s final follow-up SMS. Say this is the last outreach in a calm, respectful way, invite a '
         'reply if selling is still relevant, and say there will be no more follow-ups. Do not threaten or pressure.'
@@ -312,9 +313,9 @@ def fallback_disposition(latest_inbound: str, error: Exception | None = None) ->
     return {
         'action': 'end' if should_end else 'continue',
         'intent': lead_status,
-        'lead_status': 'not_interested' if should_end else (
+        'lead_status': (lead_status if lead_status == 'wrong_info' else 'not_interested') if should_end else (
             lead_status if lead_status in CONTINUE_STATUSES else 'processing'),
-        'outcome': 'negative' if should_end else 'neutral',
+        'outcome': ('disqualified' if lead_status == 'wrong_info' else 'negative') if should_end else 'neutral',
         'confidence': 0,
         'next_step': 'close' if should_end else 'answer_and_qualify',
         'qualification_focus': '',
@@ -368,6 +369,16 @@ def analyze_conversation_disposition(conversation, history: list,
             lead_status = (requested_status
                            if requested_status in CONTINUE_STATUSES and requested_status != 'processing'
                            else stored_status)
+
+        if is_realtor(latest_inbound):
+            # The person is a realtor: end politely and never contact them again.
+            action, lead_status, outcome = 'end', 'realtor', 'disqualified'
+        elif lead_status == 'realtor' and action != 'end':
+            # Only a conversation that is ending can be marked realtor.
+            lead_status = stored_status if stored_status != 'realtor' else 'processing'
+        if action == 'end' and lead_status == 'not_interested' and is_wrong_info(latest_inbound):
+            # The owner said wrong number / doesn't live there: record it as wrong info, not a rejection.
+            lead_status = 'wrong_info'
 
         calendar_in = parsed.get('calendar') or {}
         requested_calendar_state = str(calendar_in.get('state') or 'none')

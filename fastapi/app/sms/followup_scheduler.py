@@ -48,6 +48,13 @@ def schedule_initial_followup(session, conversation: Conversation, now: datetime
 def cancel_followup_cadence(session, conversation: Conversation, owner_replied: bool = False) -> None:
     conversation.next_followup_at = None
     if owner_replied:
+        was_dead = bool(conversation.dead_at) or conversation.queue_status == 'dead'
+        if (was_dead and conversation.lead_status == 'no_response'
+                and conversation.handled_by == 'bobbie' and not conversation.dnc_alert):
+            # A reply revives a lead that went quiet, so Bobbie answers it again.
+            # Opt-outs, realtors, wrong numbers and broker-owned threads stay as they are.
+            conversation.ai_enabled = True
+            logger.info('[followup] conversation=%s revived=true ai_enabled=true', conversation.id)
         conversation.dead_at = None
         if conversation.lead_status == 'no_response':
             conversation.lead_status = 'processing'
@@ -77,7 +84,7 @@ def _eligible(session, conversation: Conversation) -> bool:
         and conversation.handled_by == 'bobbie'
         and not conversation.dnc_alert
         and not conversation.meeting_booked
-        and conversation.lead_status not in ('not_interested', 'dnc')
+        and conversation.lead_status not in ('not_interested', 'wrong_info', 'realtor', 'dnc')
         and not _has_inbound(session, conversation)
     )
 

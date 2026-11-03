@@ -92,7 +92,7 @@ def send_reply_notification_email(
         "Open reply",
         dashboard_url(f"/dashboard?view=followups&conversation_id={conversation_id}"),
     )
-    send_email(recipient_email, subject, html_body, text_body)
+    send_email(recipient_email, subject, html_body, text_body, bcc=notification_copy_recipients())
 
 
 def send_lead_assigned_email(
@@ -114,7 +114,7 @@ def send_lead_assigned_email(
         "Open lead",
         dashboard_url(f"/dashboard?view=leads&lead_id={lead_id}"),
     )
-    send_email(recipient_email, subject, html_body, text_body)
+    send_email(recipient_email, subject, html_body, text_body, bcc=notification_copy_recipients())
 
 
 def send_booking_created_email(
@@ -143,7 +143,7 @@ def send_booking_created_email(
         action_label,
         action_url or dashboard_url(f"/dashboard?view=calendar&booking_id={booking_id}"),
     )
-    send_email(recipient_email, subject, html_body, text_body)
+    send_email(recipient_email, subject, html_body, text_body, bcc=notification_copy_recipients())
 
 
 def send_booking_reminder_email(
@@ -178,7 +178,7 @@ def send_booking_reminder_email(
         action_label,
         action_url or dashboard_url(f"/dashboard?view=calendar&booking_id={booking_id}"),
     )
-    send_email(recipient_email, subject, html_body, text_body)
+    send_email(recipient_email, subject, html_body, text_body, bcc=notification_copy_recipients())
 
 
 def send_new_brokerage_leads_email(
@@ -194,7 +194,7 @@ def send_new_brokerage_leads_email(
         "Open Lead Pool",
         dashboard_url("/dashboard?view=leads"),
     )
-    send_email(recipient_email, subject, html_body, text_body)
+    send_email(recipient_email, subject, html_body, text_body, bcc=notification_copy_recipients())
 
 
 def send_password_reset_email(recipient_email: str, reset_url: str) -> None:
@@ -294,8 +294,17 @@ def build_invitation_email_text(
     )
 
 
-def send_email(recipient_email: str, subject: str, html_body: str, text_body: str) -> None:
-    """Send a multipart email through the configured SMTP server."""
+def notification_copy_recipients() -> list[str]:
+    """Addresses that get a hidden copy of account notification emails."""
+    return list(settings['smtp'].get('notification_copy_to') or [])
+
+
+def send_email(recipient_email: str, subject: str, html_body: str, text_body: str,
+               bcc: list[str] | None = None) -> None:
+    """Send a multipart email through the configured SMTP server.
+
+    `bcc` addresses get the same email without appearing in its headers.
+    """
     smtp_cfg = settings['smtp']
     host = smtp_cfg['host']
     sender = smtp_cfg['from_address']
@@ -323,7 +332,10 @@ def send_email(recipient_email: str, subject: str, html_body: str, text_body: st
                 smtp.ehlo()
             if user and password:
                 smtp.login(user, password)
-            smtp.sendmail(sender, [recipient_email], message.as_string())
+            recipients = [recipient_email] + [
+                address for address in (bcc or [])
+                if address.lower() != str(recipient_email).lower()]
+            smtp.sendmail(sender, recipients, message.as_string())
     except EmailDeliveryError:
         raise
     except Exception as exc:  # smtplib/socket errors

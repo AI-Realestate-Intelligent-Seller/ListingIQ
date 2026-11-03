@@ -536,7 +536,7 @@ def test_reply_email_subject_and_body_include_campaign_lead_property_and_reply(m
     sent = []
     monkeypatch.setattr(
         'app.core.email.send_email',
-        lambda recipient_email, subject, html_body, text_body: sent.append({
+        lambda recipient_email, subject, html_body, text_body, bcc=None: sent.append({
             'recipient_email': recipient_email,
             'subject': subject,
             'html_body': html_body,
@@ -570,7 +570,7 @@ def test_other_notification_subjects_include_the_action_and_context(monkeypatch)
     sent = []
     monkeypatch.setattr(
         'app.core.email.send_email',
-        lambda recipient_email, subject, html_body, text_body: sent.append({
+        lambda recipient_email, subject, html_body, text_body, bcc=None: sent.append({
             'subject': subject,
             'html_body': html_body,
             'text_body': text_body,
@@ -600,7 +600,7 @@ def test_calendar_email_subjects_include_timing_and_meeting_context(monkeypatch)
     sent = []
     monkeypatch.setattr(
         'app.core.email.send_email',
-        lambda recipient_email, subject, html_body, text_body: sent.append({
+        lambda recipient_email, subject, html_body, text_body, bcc=None: sent.append({
             'subject': subject,
             'html_body': html_body,
             'text_body': text_body,

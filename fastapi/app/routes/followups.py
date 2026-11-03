@@ -139,6 +139,8 @@ def _reason(conversation: Conversation, latest: Message | None, waiting_days: in
     a compliance stop, an unanswered reply is owed today, a booking is either
     settled or still to arrange, and only then does silence matter.
     """
+    if conversation.lead_status == 'realtor':
+        return 'realtor', 'Realtor — do not contact'
     if conversation.dnc_alert or conversation.lead_status == 'dnc':
         return 'opted_out', 'Opted out — do not contact'
     if conversation.lead_status == 'location_discussion':
@@ -149,6 +151,8 @@ def _reason(conversation: Conversation, latest: Message | None, waiting_days: in
         return 'appointment_booked', 'Appointment booked'
     if conversation.lead_status in ('interested', 'ready_to_sell'):
         return 'appointment_pending', 'Appointment to confirm'
+    if conversation.lead_status == 'wrong_info':
+        return 'wrong_info', 'Wrong number/info'
     if conversation.lead_status == 'not_interested':
         return 'not_interested', 'Not interested'
     if waiting_days is not None and waiting_days >= STALE_AFTER_DAYS:
@@ -400,8 +404,8 @@ def update_followup_status(
     conversation = _owned_conversation(session, conversation_id, current_user)
     previous_status = conversation.lead_status
     updates: dict = {'lead_status': payload.lead_status}
-    if payload.lead_status == 'dnc':
-        # An owner marked do-not-contact must never be texted again, by anyone.
+    if payload.lead_status in ('dnc', 'realtor'):
+        # An owner marked do-not-contact (or a realtor) must never be texted again, by anyone.
         updates.update(dnc_alert=True, ai_enabled=False, handled_by='broker')
     service.update_lead_progress(session, conversation, **updates)
     logger.info('[followup] conversation %s status set to %s by user %s',

@@ -5,6 +5,8 @@ export type LeadStatus =
   | "ready_to_sell"
   | "location_discussion"
   | "not_interested"
+  | "wrong_info"
+  | "realtor"
   | "no_response"
   | "dnc";
 

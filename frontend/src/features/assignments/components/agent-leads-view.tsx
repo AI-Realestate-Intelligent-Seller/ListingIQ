@@ -15,6 +15,8 @@ const STAGES: { value: AssignmentStage; label: string }[] = [
   { value: "interested", label: "Interested" },
   { value: "ready_to_sell", label: "Ready to sell" },
   { value: "not_interested", label: "Not interested" },
+  { value: "wrong_info", label: "Wrong number/info" },
+  { value: "realtor", label: "Realtor" },
   { value: "no_response", label: "No response" },
   { value: "dnc", label: "Do not contact" },
 ];

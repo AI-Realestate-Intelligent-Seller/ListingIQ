@@ -45,7 +45,7 @@ def pushes_list(monkeypatch):
 def calendar_email_outbox(monkeypatch):
     outbox = []
 
-    def capture(recipient_email, subject, html_body, text_body):
+    def capture(recipient_email, subject, html_body, text_body, bcc=None):
         outbox.append({
             'recipient_email': recipient_email,
             'subject': subject,

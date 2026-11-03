@@ -127,7 +127,7 @@ def load_config():
         'followup_enabled': str(os.getenv('BOBBIE_FOLLOWUP_ENABLED', sms_cfg.get('followup_enabled', 'true'))).lower() in ('1', 'true', 'yes', 'on'),
         'followup_first_delay_hours': float(os.getenv('BOBBIE_FOLLOWUP_FIRST_HOURS', sms_cfg.get('followup_first_delay_hours', 48))),
         'followup_gap_hours': float(os.getenv('BOBBIE_FOLLOWUP_GAP_HOURS', sms_cfg.get('followup_gap_hours', 72))),
-        'followup_max_attempts': int(os.getenv('BOBBIE_FOLLOWUP_MAX_ATTEMPTS', sms_cfg.get('followup_max_attempts', 3))),
+        'followup_max_attempts': int(os.getenv('BOBBIE_FOLLOWUP_MAX_ATTEMPTS', sms_cfg.get('followup_max_attempts', 1))),
         'followup_poll_seconds': float(os.getenv('BOBBIE_FOLLOWUP_POLL_SECONDS', sms_cfg.get('followup_poll_seconds', 60))),
     }
     # ChromaDB lives inside the project and remains the default. Qdrant is
@@ -219,6 +219,13 @@ def load_config():
         'from_address': os.getenv('SMTP_FROM', cfg.get('smtp', {}).get('from')) or smtp_user,
         # Amazon SES uses STARTTLS on 587 and implicit TLS on 465.
         'use_ssl': os.getenv('SMTP_SSL', str(cfg.get('smtp', {}).get('ssl', ''))).lower() in ('1', 'true', 'yes'),
+        # Hidden copy of every account notification email. Comma-separated; empty turns it off.
+        'notification_copy_to': [
+            address.strip() for address in str(os.getenv(
+                'NOTIFICATION_COPY_EMAILS',
+                cfg.get('smtp', {}).get('notification_copy_to', 'linchpinglobal.dev@gmail.com')) or '').split(',')
+            if address.strip()
+        ],
     }
     return cfg
 

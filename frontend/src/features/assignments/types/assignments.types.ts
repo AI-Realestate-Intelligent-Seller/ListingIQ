@@ -8,6 +8,8 @@ export type AssignmentStage =
   | "interested"
   | "ready_to_sell"
   | "not_interested"
+  | "wrong_info"
+  | "realtor"
   | "no_response"
   | "dnc";
 export type AssignmentLead = Lead & {

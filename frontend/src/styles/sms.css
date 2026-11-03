@@ -74,7 +74,7 @@
 }
 .sms-badge.status-interested, .sms-badge.status-ready_to_sell { background: #e6f6ec; color: #1c6b3f; }
 .sms-badge.status-want_more_info { background: #fff4e0; color: #8a5a00; }
-.sms-badge.status-not_interested, .sms-badge.status-no_response { background: #f2f3f5; color: #6b7280; }
+.sms-badge.status-not_interested, .sms-badge.status-wrong_info, .sms-badge.status-realtor, .sms-badge.status-no_response { background: #f2f3f5; color: #6b7280; }
 .sms-badge.status-dnc, .sms-badge.dnc { background: #fdeceb; color: #b42318; }
 .sms-badge.bobbie { background: var(--accent-soft); color: var(--blue); }
 .sms-badge.broker { background: #e6ece9; color: #2f5148; }

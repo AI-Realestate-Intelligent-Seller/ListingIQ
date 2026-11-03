@@ -25,6 +25,8 @@ const LEAD_STATUS_LABELS: Record<string, string> = {
   ready_to_sell: "Ready to sell",
   location_discussion: "Appointment to confirm",
   not_interested: "Not interested",
+  wrong_info: "Wrong number/info",
+  realtor: "Realtor",
   no_response: "No response",
   dnc: "Do not contact",
 };

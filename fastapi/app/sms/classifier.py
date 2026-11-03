@@ -6,7 +6,7 @@ detect opt-outs before any model call is made.
 
 import re
 
-TERMINAL_STATUSES = {'dnc', 'not_interested', 'no_response'}
+TERMINAL_STATUSES = {'dnc', 'not_interested', 'wrong_info', 'realtor', 'no_response'}
 STATUS_PRIORITY = {
     'processing': 0, 'want_more_info': 1, 'interested': 2, 'ready_to_sell': 3, 'location_discussion': 3}
 
@@ -29,6 +29,38 @@ QUALIFIED_PROCESS_OBJECTION = re.compile(
 DIRECT_REJECTION = re.compile(
     r"\bnot interested\b(?!\s+(?:in|with)\s+(?:a\s+)?(?:call|meeting|phone conversation))"
     r"|\b(?:have to pass|i(?:['’]ll| will) pass|already sold|wrong number)\b",
+    re.I,
+)
+# The text reached the wrong person: wrong number, they don't live there, or they don't own it.
+_NOT = r"(?:don['’]?t|dont|do\s+not|doesn['’]?t|does\s+not|never|no\s+longer)"
+WRONG_INFO = re.compile(
+    r"\bwrong\s+(?:#|(?:number|person|guy|lady|contact|house|address|property|info(?:rmation)?)\b)"
+    r"|\b(?:you\s+have|you['’]?ve\s+got|you\s+got|got)\s+the\s+wrong\b"
+    rf"|\b(?:i|we|they|he|she|nobody|no\s+one)\s+{_NOT}\s+(?:live|lives|lived|reside|resides)\s+(?:there|here|at)\b"
+    r"|\b(?:i\s+am|i['’]m|im|we\s+are|we['’]re)\s+not\s+the\s+(?:owners?|homeowners?|person)\b"
+    r"|\bnot\s+the\s+(?:owner|homeowner)\s+of\b"
+    rf"|\b(?:i|we)\s+{_NOT}\s+own\s+(?:that|this|the|it|any)\b"
+    r"|\b(?:not|isn['’]?t|never\s+been)\s+(?:my|our)\s+(?:property|house|home|place|address)\b"
+    r"|\b(?:no\s*one|nobody)\s+(?:here\s+)?(?:by|with|named)\s+that\s+name\b"
+    r"|\bdon['’]?t\s+know\s+(?:who|that\s+person|anyone\s+(?:by|named))\b",
+    re.I,
+)
+# Someone who still owns the place can say "we don't live there"; that is not wrong info.
+OWNER_CONTEXT = re.compile(
+    r"\b(?:i|we)\s+(?:still\s+)?own\s+(?:it|that|this|the)\b|\brent(?:al|ed|ing)?\b|\btenants?\b"
+    r"|\bmy\s+rental\b|\b(?:might|would|could|want\s+to|looking\s+to)\s+sell\b",
+    re.I,
+)
+# The person says they are a realtor themselves (not that they have or work with one).
+_I_AM = r"(?:i\s+am|i['’]?m|im|we\s+are|we['’]re|i\s+work\s+as|i['’]ve\s+been)"
+_PRO = (r"(?:realtors?|real\s*estate\s+(?:agents?|brokers?|professionals?|salesperson|licensees?)"
+        r"|listing\s+agents?|licensed\s+(?:agents?|brokers?|realtors?))")
+REALTOR = re.compile(
+    rf"\b{_I_AM}\s+(?:also\s+|actually\s+|myself\s+)?(?:an?\s+|the\s+)?(?:licensed\s+)?{_PRO}\b"
+    rf"|\b{_I_AM}\s+(?:also\s+|actually\s+)?(?:an?\s+)?(?:agent|broker)\s+myself\b"
+    rf"|\b{_I_AM}\s+(?:also\s+|actually\s+)?in\s+real\s*estate\s+(?:myself|too|also|as\s+well)\b"
+    r"|\bi\s+(?:am\s+|['’]m\s+)?(?:work|working)\s+in\s+real\s*estate\b"
+    r"|\b(?:i|we)\s+(?:am|are|['’]m|['’]re)?\s*(?:a\s+)?licensed\s+(?:in\s+real\s*estate|to\s+sell\s+real\s*estate)\b",
     re.I,
 )
 READY_TO_SELL = re.compile(r'\b(?:need to sell|ready to sell|sell soon|as soon as possible|immediately)\b', re.I)
@@ -118,6 +150,16 @@ def is_opt_out(text: str = '') -> bool:
     return bool(OPT_OUT.search(str(text or '').strip()))
 
 
+def is_wrong_info(text: str = '') -> bool:
+    value = str(text or '').strip()
+    return bool(WRONG_INFO.search(value)) and not OWNER_CONTEXT.search(value)
+
+
+def is_realtor(text: str = '') -> bool:
+    """True when the person says they are a realtor or real estate agent themselves."""
+    return bool(REALTOR.search(str(text or '')))
+
+
 def _has_immediate_buyer_condition(text: str = '') -> bool:
     value = str(text or '').strip()
     return any(pattern.search(value) for pattern in IMMEDIATE_BUYER_CONDITION)
@@ -131,6 +173,8 @@ def classify_lead_message(text: str = '') -> dict | None:
         return {'lead_status': 'no_response', 'terminal': True}
     if is_opt_out(value):
         return {'lead_status': 'dnc', 'dnc_alert': True, 'terminal': True}
+    if is_wrong_info(value):
+        return {'lead_status': 'wrong_info', 'terminal': True}
     # A seller can reject relisting while still expressing a concrete condition
     # under which they would engage. Do not let the words "not interested"
     # erase that stronger, actionable signal.

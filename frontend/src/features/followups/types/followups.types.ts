@@ -6,11 +6,13 @@ export type FollowUpState = "pending" | "accepted" | "declined";
 /** Why a thread is on the follow-up list, in the order the API triages them. */
 export type FollowUpReason =
   | "opted_out"
+  | "realtor"
   | "reply_needed"
   | "location_discussion"
   | "appointment_booked"
   | "appointment_pending"
   | "not_interested"
+  | "wrong_info"
   | "no_response"
   | "in_conversation";
 

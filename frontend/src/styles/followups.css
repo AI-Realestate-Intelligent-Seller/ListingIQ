@@ -95,6 +95,8 @@
 .followup-reason.reason-delivery_failed { color: #8a5a00; }
 .followup-reason.reason-opted_out { color: #b42318; }
 .followup-reason.reason-not_interested { color: #6b7280; }
+.followup-reason.reason-wrong_info { color: #8a5a00; }
+.followup-reason.reason-realtor { color: #b42318; }
 .followup-reason.reason-in_conversation { color: var(--accent); }
 
 .followup-state-badge {
