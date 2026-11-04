@@ -79,6 +79,7 @@ const STAGE_CLASS: Record<LeadStage, string> = {
   ready: "ready",
   in_campaign: "campaign",
   needs_review: "review",
+  not_mobile: "not-mobile",
   dnc: "dnc",
 };
 

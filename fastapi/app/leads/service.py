@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 import json
@@ -195,6 +195,23 @@ def lead_phone_numbers(lead: Lead) -> list[dict]:
     return stored
 
 
+NON_MOBILE_STAGE = 'not_mobile'
+
+
+def has_non_mobile_phone(lead: Lead) -> bool:
+    """Telnyx confirmed the lead's current number is not a mobile (landline, VoIP, ...)."""
+    line_type = (lead.phone_line_type or '').lower()
+    return bool(lead.phone and line_type and line_type != 'mobile'
+                and lead.phone_lookup_number == lead.phone)
+
+
+def pool_textable_filter():
+    """SQL form of `not has_non_mobile_phone`: confirmed non-mobile leads stay out of the pool."""
+    return or_(Lead.phone.is_(None), Lead.phone_line_type.is_(None),
+               func.lower(Lead.phone_line_type) == 'mobile',
+               Lead.phone_lookup_number.is_(None), Lead.phone_lookup_number != Lead.phone)
+
+
 def derive_stage(lead: Lead, now: datetime | None = None) -> str:
     """Where this lead stands with us, in strict precedence."""
     if lead.dnc:
@@ -204,6 +221,9 @@ def derive_stage(lead: Lead, now: datetime | None = None) -> str:
     if not lead.phone:
         # Nothing can be sent without a number, however good the signals are.
         return 'needs_review'
+    if has_non_mobile_phone(lead):
+        # Saved for a later screen; never back in the pool while the number is unchanged.
+        return NON_MOBILE_STAGE
     # A freshly imported lead used to sit at "New" for a day. It is the same
     # thing to everyone who reads it — contactable, not yet contacted — and the
     # split only ever delayed outreach, so there is one stage now.
@@ -357,7 +377,7 @@ def _pool_leads(session: Session, user: User) -> list[Lead]:
     if key not in cache:
         cache[key] = (session.query(Lead)
                       .filter(Lead.user_id.in_(brokerage_user_ids(session, user)),
-                              Lead.campaign_id.is_(None)).all())
+                              Lead.campaign_id.is_(None), pool_textable_filter()).all())
     return cache[key]
 
 
@@ -461,7 +481,7 @@ def list_leads(session: Session, user: User, search: str = '', signals: list[str
     # can pick up at once.
     query = (session.query(Lead)
              .filter(Lead.user_id.in_(brokerage_user_ids(session, user)),
-                     Lead.campaign_id.is_(None)))
+                     Lead.campaign_id.is_(None), pool_textable_filter()))
     if None not in (north, south, east, west):
         query = query.filter(
             Lead.latitude.is_not(None),

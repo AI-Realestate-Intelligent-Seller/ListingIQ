@@ -5,7 +5,7 @@ export type LeadSignal = {
 };
 
 /** Stages are derived by the backend; the broker never sets one by hand. */
-export type LeadStage = "dnc" | "in_campaign" | "needs_review" | "ready";
+export type LeadStage = "dnc" | "in_campaign" | "needs_review" | "not_mobile" | "ready";
 
 export type Lead = {
   id: number;

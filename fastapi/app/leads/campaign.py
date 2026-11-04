@@ -585,6 +585,18 @@ def _save_number_lookup(lead: Lead, result: number_lookup.NumberLookupResult) ->
         })
     details['_phone_numbers'] = updated
     lead.details = json.dumps(details)
+    if result.status == 'verified' and result.line_type:
+        # Durable state for the pool filter and a future screen. Keep the lead's own
+        # spelling of the number when it is the one that was checked.
+        checked = (lead.phone if lead.phone and normalize_phone(lead.phone) == normalize_phone(result.phone_number)
+                   else result.phone_number)
+        lead.phone_line_type = result.line_type
+        lead.phone_lookup_number = checked
+        try:
+            lead.phone_lookup_at = datetime.fromisoformat(
+                str(result.checked_at).replace('Z', '+00:00')).replace(tzinfo=None)
+        except (TypeError, ValueError):
+            lead.phone_lookup_at = datetime.utcnow()
 
 
 def _lookup_skip_reason(result: number_lookup.NumberLookupResult) -> str | None:
@@ -1229,6 +1241,7 @@ STAGE_REFUSAL: dict[str, str] = {
     'dnc': 'On the do-not-contact list.',
     'in_campaign': 'Already texted in a campaign.',
     'needs_review': 'Needs review — no usable phone number.',
+    'not_mobile': 'Number is not a mobile; campaigns send only to mobile numbers.',
 }
 
 

@@ -350,6 +350,12 @@ class Lead(Base):
     source = Column(String(50), nullable=False, default='csv_import')
     # Set once the owner opts out anywhere; the lead can never be campaigned again.
     dnc = Column(Boolean, nullable=False, default=False)
+    # Telnyx-verified line type (mobile, landline, voip, ...) of the number in
+    # `phone_lookup_number`. A confirmed non-mobile number cannot get campaign
+    # SMS, so the lead stays out of the pool until its phone changes.
+    phone_line_type = Column(String(30), nullable=True)
+    phone_lookup_number = Column(String(50), nullable=True)
+    phone_lookup_at = Column(DateTime, nullable=True)
     conversation_id = Column(Integer, ForeignKey('conversations.id'), nullable=True, index=True)
     # The campaign this lead was last added to, draft or sent. A lead already
     # in a sent campaign is blocked from joining another, so in practice this

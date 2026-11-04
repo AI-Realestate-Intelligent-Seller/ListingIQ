@@ -15,6 +15,7 @@ const STAGE_CLASS: Record<LeadStage, string> = {
   ready: "ready",
   in_campaign: "campaign",
   needs_review: "review",
+  not_mobile: "not-mobile",
   dnc: "dnc",
 };
 
@@ -542,6 +543,7 @@ const DEFAULT_STAGE_LABELS: Record<string, string> = {
   ready: "Ready",
   in_campaign: "In campaign",
   needs_review: "Needs review",
+  not_mobile: "Not mobile",
   dnc: "Do not contact",
 };
 
@@ -740,7 +742,7 @@ export function LeadDetailDrawer({
                     <dt>Stage</dt>
                     <dd>
                       <span className={`leads-stage ${STAGE_CLASS[shown.stage]}`}>
-                        {stageLabels[shown.stage] ?? shown.stage}
+                        {stageLabels[shown.stage] ?? DEFAULT_STAGE_LABELS[shown.stage] ?? shown.stage}
                       </span>
                     </dd>
                   </div>

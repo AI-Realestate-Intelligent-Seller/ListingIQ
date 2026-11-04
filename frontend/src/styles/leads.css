@@ -586,6 +586,7 @@
 .leads-stage.campaign { background: var(--surface-2); color: #46504b; border: 1px solid var(--line); }
 .leads-stage.review { background: #f3e7ce; color: #b8863b; }
 .leads-stage.dnc { background: #f9e5e1; color: #b8452f; }
+.leads-stage.not-mobile { background: var(--surface-2); color: #6b7280; border: 1px solid var(--line); }
 
 .leads-activity {
   color: var(--muted); font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", Consolas,

@@ -21,7 +21,7 @@ from sqlalchemy.orm import sessionmaker
 BASE_DIR = Path(__file__).resolve().parents[1]
 PG_URL = os.environ.get("PERSONA_TEST_PG_URL", "")
 PREVIOUS = "0031_campaign_draft_groups"
-HEAD = "0039_inbound_sms_events"
+HEAD = "0040_lead_phone_line_type"
 BEFORE_FLAGS = "0034_persona_import_jobs"
 BEFORE_STORAGE = "0036_persona_import_mode"
 
