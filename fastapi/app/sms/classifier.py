@@ -11,7 +11,8 @@ STATUS_PRIORITY = {
     'processing': 0, 'want_more_info': 1, 'interested': 2, 'ready_to_sell': 3, 'location_discussion': 3}
 
 OPT_OUT = re.compile(
-    r"\b(stop|stopall|unsubscribe|remove me|do not contact|don['’]?t contact|don['’]?t message"
+    # "stop by/in/over/past" is a visit invitation, not an opt-out.
+    r"\b(stop(?!\s+(?:by|in|over|past)\b)|stopall|unsubscribe|remove me|do not contact|don['’]?t contact|don['’]?t message"
     r"|leave me alone|take me off|done here)\b",
     re.I,
 )
