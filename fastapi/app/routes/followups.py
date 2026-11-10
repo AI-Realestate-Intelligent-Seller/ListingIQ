@@ -24,6 +24,7 @@ from ..leads import address as address_key
 from ..leads.catalog import signal_label
 from ..leads.service import split_signals
 from ..location.geocoding_service import build_query
+from ..lofty import export as lofty_export
 from ..logger import get_logger
 from ..models import Campaign, Conversation, Lead, Message, User
 from ..schemas import (
@@ -33,6 +34,7 @@ from ..schemas import (
     FollowUpOut,
     FollowUpStateRequest,
     FollowUpStatusUpdate,
+    LoftySendRequest,
     ReplySuggestions,
 )
 from ..sms import calendar_service, reply_suggest, service
@@ -505,3 +507,56 @@ def book_appointment(
         'note': note,
         'followup': _serialize_one(session, conversation, current_user),
     }
+
+
+# --------------------------------------------------------------------------
+# Send to Lofty
+# --------------------------------------------------------------------------
+# Visibility is the same as every other Follow-ups action (_owned_conversation);
+# on top of that the Lofty credential is limited to the brokerages configured
+# for it (app.lofty.auth). The Lofty API key never leaves the server.
+
+
+@router.get('/{conversation_id}/lofty')
+def lofty_preview(conversation_id: int, current_user: User = Depends(get_current_user),
+                  session: Session = Depends(get_db)):
+    """What Send to Lofty would transfer, plus any earlier export's status. Changes nothing."""
+    _require_access(current_user)
+    conversation = _owned_conversation(session, conversation_id, current_user)
+    return lofty_export.preview(session, conversation, current_user)
+
+
+@router.post('/{conversation_id}/lofty/summary')
+def lofty_summary(conversation_id: int, current_user: User = Depends(get_current_user),
+                  session: Session = Depends(get_db)):
+    """Draft the handoff summary with the configured AI provider. Nothing is sent."""
+    _require_access(current_user)
+    conversation = _owned_conversation(session, conversation_id, current_user)
+    try:
+        return {'summary': lofty_export.generate_summary(session, conversation, current_user)}
+    except lofty_export.LoftyNotAvailable as error:
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+    except lofty_export.SummaryUnavailable as error:
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+
+
+@router.post('/{conversation_id}/lofty')
+def lofty_send(conversation_id: int, payload: LoftySendRequest,
+               current_user: User = Depends(get_current_user),
+               session: Session = Depends(get_db)):
+    """Create or update the Lofty lead, mute Anna, and save the notes.
+
+    Safe to repeat: a completed export is returned as is, and a failed one
+    resumes at the step that failed.
+    """
+    _require_access(current_user)
+    conversation = _owned_conversation(session, conversation_id, current_user)
+    try:
+        return lofty_export.send(session, conversation, current_user, summary=payload.summary,
+                                 resync=payload.resync, lofty_lead_id=payload.lofty_lead_id)
+    except lofty_export.LoftyNotAvailable as error:
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+    except lofty_export.ExportInProgress as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except lofty_export.ExportRejected as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error

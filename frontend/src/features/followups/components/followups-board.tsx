@@ -33,6 +33,7 @@ import type {
   ReplySuggestions,
 } from "../types/followups.types";
 import { AppointmentDialog } from "./appointment-dialog";
+import { LoftyExportDialog } from "./lofty-export-dialog";
 import {
   useNotifications,
 } from "../../dashboard/components/notification-provider";
@@ -97,6 +98,9 @@ export function FollowUpsBoard({
   );
   const [isCampaignMenuOpen, setIsCampaignMenuOpen] = useState(false);
   const [isStatusMenuOpen, setIsStatusMenuOpen] = useState(false);
+  const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
+  /** The thread whose Send to Lofty dialog is open. */
+  const [loftyConversationId, setLoftyConversationId] = useState<number | null>(null);
   const [scope, setScope] = useState<"replied" | "all">(
     campaignId === null ? "replied" : "all",
   );
@@ -117,6 +121,7 @@ export function FollowUpsBoard({
   const threadRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const statusMenuRef = useRef<HTMLDivElement | null>(null);
+  const actionsMenuRef = useRef<HTMLDivElement | null>(null);
   const router = useRouter();
   const session = useMemo(() => readAuthSession(), []);
   const token = session?.access_token ?? "";
@@ -263,6 +268,22 @@ export function FollowUpsBoard({
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [isStatusMenuOpen]);
+
+  useEffect(() => {
+    if (!isActionsMenuOpen) return;
+    const close = (event: PointerEvent) => {
+      if (!actionsMenuRef.current?.contains(event.target as Node)) setIsActionsMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setIsActionsMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [isActionsMenuOpen]);
 
   const needle = search.trim().toLowerCase();
   const selectedCampaign = campaigns.find((item) => String(item.id) === selectedCampaignId);
@@ -706,6 +727,33 @@ useEffect(() => {
                     ⓘ
                   </button>
                 ) : null}
+                <div className="followups-actions-menu" ref={actionsMenuRef}>
+                  <button
+                    type="button"
+                    className="sms-icon-button"
+                    aria-haspopup="menu"
+                    aria-expanded={isActionsMenuOpen}
+                    aria-label="More actions"
+                    title="More actions"
+                    onClick={() => setIsActionsMenuOpen((current) => !current)}
+                  >
+                    ⋮
+                  </button>
+                  {isActionsMenuOpen ? (
+                    <div className="followups-actions-menu-list" role="menu" aria-label="Conversation actions">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setIsActionsMenuOpen(false);
+                          setLoftyConversationId(active.id);
+                        }}
+                      >
+                        Send to Lofty
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
               </header>
 
               {active.reply_count > 0 ? (
@@ -914,6 +962,15 @@ useEffect(() => {
         </p>
       ) : null}
 
+
+      {loftyConversationId !== null ? (
+        <LoftyExportDialog
+          key={loftyConversationId}
+          conversationId={loftyConversationId}
+          accessToken={token}
+          onClose={() => setLoftyConversationId(null)}
+        />
+      ) : null}
 
       <AppointmentDialog
         followUp={isSchedulerOpen ? active : null}

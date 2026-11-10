@@ -205,6 +205,25 @@ def load_config():
             'SMS_WORKER_EMBEDDED_ENABLED', 'false')).strip().lower() in (
                 '1', 'true', 'yes', 'on'),
     }
+    # Lofty CRM hand-off (Follow-ups → Send to Lofty). Only the API key comes
+    # from the environment. Which brokerages may use it is the platform-admin
+    # feature flag `lofty_export` (see app.lofty.auth); the rest are fixed.
+    cfg['lofty'] = {
+        'api_key': (os.getenv('LOFTY_API_KEY') or '').strip(),
+        'base_url': 'https://api.lofty.com',
+        # Stored with each export so a later per-agent OAuth connection can be
+        # told apart from this shared account key.
+        'connection_label': 'spacematch',
+        # No fixed Lofty agent: new leads follow Lofty's own routing rules.
+        'assigned_user_id': None,
+        'lead_stage': 'Connected Qualifying',
+        'lead_source': 'ListingIQ',
+        'lead_tag': 'ListingIQ',
+        # Lofty silently truncates note content at 2000 characters.
+        'note_max_chars': 1900,
+        'timeout_seconds': 20.0,
+        'crm_lead_url': 'https://crm.lofty.com/admin/home/lead/detail/{lead_id}',
+    }
     cfg['frontend_url'] = os.getenv('FRONTEND_URL', cfg.get('frontend_url', 'http://localhost:3000'))
     smtp_port = os.getenv('SMTP_PORT', cfg.get('smtp', {}).get('port') if isinstance(cfg.get('smtp', {}), dict) else None)
     if smtp_port is None or smtp_port == '':

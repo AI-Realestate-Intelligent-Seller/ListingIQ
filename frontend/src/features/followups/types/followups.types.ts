@@ -93,3 +93,52 @@ export type ReplySuggestions = {
   /** Why the templates were used, when they were. Empty on the happy path. */
   note: string;
 };
+
+/** Send to Lofty: where an earlier hand-off of this conversation stands. */
+export type LoftyExportStatus = {
+  status: "pending" | "in_progress" | "completed" | "failed" | "needs_review";
+  /** The step that runs next: lead → mute → notes → done. */
+  step: "lead" | "mute" | "notes" | "done";
+  revision: number;
+  lofty_lead_id: string | null;
+  lofty_url: string | null;
+  lead_action: "created" | "existing" | null;
+  mute_verified: boolean;
+  notes_saved: number;
+  notes_total: number;
+  summary: string | null;
+  last_message_id: number | null;
+  last_error: string | null;
+  /** Lofty leads matching the owner when the match was ambiguous. */
+  candidate_lead_ids: string[];
+  attempts: number;
+  completed_at: string | null;
+  updated_at: string | null;
+};
+
+export type LoftyTranscriptMessage = {
+  id: number;
+  sender: "AI" | "Owner" | "You";
+  text: string;
+  created_at: string | null;
+  not_delivered: boolean;
+};
+
+export type LoftyPreview = {
+  conversation_id: number;
+  listingiq_lead_id: number | null;
+  name: string | null;
+  property_address: string | null;
+  phone: string | null;
+  emails: string[];
+  messages: LoftyTranscriptMessage[];
+  available: boolean;
+  unavailable_reason: string | null;
+  export: LoftyExportStatus | null;
+};
+
+export type LoftySendPayload = {
+  summary: string;
+  resync?: boolean;
+  lofty_lead_id?: string;
+};
