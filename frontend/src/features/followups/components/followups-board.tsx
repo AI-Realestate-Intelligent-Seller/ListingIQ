@@ -133,6 +133,8 @@ export function FollowUpsBoard({
       history panel re-fetches without needing the lead to change. */
   const [historyTick, setHistoryTick] = useState(0);
   const viewer = session?.user ?? null;
+  /** The AI replies as the signed-in user, so the handover labels use their first name. */
+  const aiName = viewer?.first_name?.trim() || "Bobbie";
   const isAgent = viewer?.role === "agent";
   const followUpScope = scope;
 
@@ -157,6 +159,8 @@ export function FollowUpsBoard({
   const refreshFollowUps = useCallback(
     async (signal?: AbortSignal, withProgress = false) => {
       if (!token) return;
+      // A fresh load must not show the previous load's finished progress bar.
+      if (withProgress) setLoadProgress(null);
       try {
         const campaignFilter = selectedCampaignId ? Number(selectedCampaignId) : undefined;
         setFollowUps(
@@ -173,7 +177,9 @@ export function FollowUpsBoard({
       } catch (error) {
         handleApiError(error, "Could not load your follow-ups.");
       } finally {
-        setIsLoading(false);
+        // A cancelled load (scope/campaign change, remount) is replaced by a newer
+        // one; keep the loader up until that one has actually returned the chats.
+        if (!signal?.aborted) setIsLoading(false);
       }
     },
     [token, followUpScope, selectedCampaignId, handleApiError],
@@ -439,8 +445,8 @@ useEffect(() => {
       const rows = await listFollowUps(token, scope);
       return rows.find((row) => row.id === conversationId) ?? active;
     }, to === "broker"
-      ? "You have taken over. Write your reply below — Bobbie will not answer this thread."
-      : "Bobbie is handling this conversation again.").then(() => {
+      ? `You have taken over. Write your reply below — ${aiName} will not answer this thread.`
+      : `${aiName} is handling this conversation again.`).then(() => {
         // Taking over is only useful if you can type, so land the cursor there
         // and offer drafts grounded in what has been said so far.
         if (to === "broker") {
@@ -697,10 +703,10 @@ useEffect(() => {
                     className="sms-pill on sms-pill-moving-border"
                     disabled={isWorking}
                     onClick={() => changeHandover("broker")}
-                    title="Pause Bobbie and reply yourself"
+                    title={`Pause ${aiName} and reply yourself`}
                   >
                     <span aria-hidden="true">✦</span>
-                    <span className="sms-pill-label">Bobbie AI is replying · Take over</span>
+                    <span className="sms-pill-label">{aiName} AI is replying · Take over</span>
                   </button>
                 ) : (
                   <button
@@ -708,10 +714,10 @@ useEffect(() => {
                     className="sms-pill sms-pill-moving-border"
                     disabled={isWorking}
                     onClick={() => changeHandover("bobbie")}
-                    title="Bobbie takes the conversation back"
+                    title={`${aiName} takes the conversation back`}
                   >
                     <span aria-hidden="true">✎</span>
-                    <span className="sms-pill-label">You are replying · Hand back to Bobbie</span>
+                    <span className="sms-pill-label">You are replying · Hand back to {aiName}</span>
                   </button>
                 )}
                 {/* Only an imported lead has a property record to open; a thread

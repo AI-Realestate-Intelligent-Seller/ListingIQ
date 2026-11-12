@@ -12,7 +12,7 @@ from ..leads import events as lead_events
 from ..leads.response_analytics import get_agent_response_analytics
 from ..leads.service import serialize
 from ..models import Booking, Campaign, Conversation, Lead, Message, User
-from .. import query_progress
+from .. import cache, query_progress
 from ..reminder.notification import notify_user
 from ..schemas import LeadAssignmentRequest, LeadAssignmentStageRequest
 from .auth import get_current_user, get_db
@@ -121,6 +121,16 @@ def _serialize_assignment(session: Session, lead: Lead,
 
 
 def _assignment_payload(session: Session, current_user: User, progress=None) -> dict:
+    """Broker assignment board, served from Redis when fresh."""
+    return cache.get_or_load(
+        'assignments',
+        cache.DASHBOARD_TABLES,
+        {'user': current_user.id, 'role': current_user.role},
+        lambda: _build_assignment_payload(session, current_user, progress=progress),
+    )
+
+
+def _build_assignment_payload(session: Session, current_user: User, progress=None) -> dict:
     agents = _linked_agents(session, current_user)
     leads = _replied_leads(session, current_user)
     total = len(leads)
@@ -200,6 +210,16 @@ def broker_overview(
 
 
 def _broker_overview_payload(session: Session, current_user: User, progress=None) -> dict:
+    """Area Broker overview metrics, served from Redis when fresh."""
+    return cache.get_or_load(
+        'broker-overview',
+        cache.DASHBOARD_TABLES,
+        {'user': current_user.id, 'role': current_user.role},
+        lambda: _build_broker_overview_payload(session, current_user, progress=progress),
+    )
+
+
+def _build_broker_overview_payload(session: Session, current_user: User, progress=None) -> dict:
     total = 5
     campaigns = session.query(Campaign).filter(Campaign.user_id == current_user.id).all()
     if progress:

@@ -13,6 +13,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
+from .. import cache
 from ..logger import get_logger
 from ..models import Conversation, Lead, Message, User
 from ..tenancy import brokerage_user_ids
@@ -185,6 +186,15 @@ def knowledge_reindex(current_user: User = Depends(get_current_user)):
 @router.get('/conversations', response_model=list[SmsConversationOut])
 def list_conversations(current_user: User = Depends(get_current_user), session: Session = Depends(get_db)):
     _require_sms_access(current_user)
+    return cache.get_or_load(
+        'sms-conversations',
+        cache.DASHBOARD_TABLES,
+        {'user': current_user.id, 'role': current_user.role},
+        lambda: _build_conversation_list(session, current_user),
+    )
+
+
+def _build_conversation_list(session: Session, current_user: User) -> list[dict]:
     conversations = (session.query(Conversation)
                      .filter(Conversation.user_id.in_(
                          brokerage_user_ids(session, current_user)))

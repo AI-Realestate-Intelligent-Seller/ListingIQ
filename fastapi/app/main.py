@@ -171,6 +171,10 @@ def startup_event():
     # Alembic loads its own logging config while checking migrations. Restore
     # the application level afterwards so request lifecycle logs remain visible.
     setup_logging()
+    from . import cache
+
+    # Logs "Redis cache connected …" or "Redis cache unavailable …" once at boot.
+    cache.check_connection()
     from .db import SessionLocal
     from .propertyradar.service import initialize
 

@@ -191,6 +191,14 @@ def load_config():
         )).strip().lower() not in ('0', 'false', 'no', 'off'),
     }
     cfg['redis_url'] = os.getenv('REDIS_URL', 'redis://127.0.0.1:6379')
+    # Read-through API cache (app/cache.py). Writes invalidate it immediately;
+    # the TTL is only a backstop. Off = every read comes from the database.
+    cfg['cache'] = {
+        'enabled': os.getenv('CACHE_ENABLED', 'true').strip().lower()
+                   not in ('0', 'false', 'no', 'off'),
+        'ttl_seconds': int(os.getenv('CACHE_TTL_SECONDS', '60')),
+        'retry_seconds': int(os.getenv('CACHE_RETRY_SECONDS', '30')),
+    }
     configured_sms_rate = int(os.getenv('SMS_MAX_SUBMISSIONS_PER_SECOND', '50'))
     sender_sms_rate = int(os.getenv('SMS_SENDER_SUBMISSIONS_PER_SECOND', str(configured_sms_rate)))
     cfg['sms_submission'] = {

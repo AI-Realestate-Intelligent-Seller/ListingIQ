@@ -13,7 +13,7 @@ from ..db import SessionLocal
 from ..leads import campaign as campaign_service
 from ..logger import get_logger
 from ..models import User
-from .. import query_progress
+from .. import cache, query_progress
 from ..schemas import (
     CampaignDetail,
     CampaignDraftRequest,
@@ -52,7 +52,17 @@ def list_campaigns(current_user: User = Depends(get_current_user),
                    session: Session = Depends(get_db)):
     """Every campaign with its delivered / replied / no-reply counts."""
     _require_access(current_user)
-    return campaign_service.overview(session, current_user)
+    return _cached_overview(session, current_user)
+
+
+def _cached_overview(session: Session, user: User, progress=None) -> list[dict]:
+    """Campaign list with counts, served from Redis when fresh."""
+    return cache.get_or_load(
+        'campaigns',
+        cache.DASHBOARD_TABLES,
+        {'user': user.id, 'role': user.role},
+        lambda: campaign_service.overview(session, user, progress=progress),
+    )
 
 
 def _load_campaigns_job(job_id: str, user_id: int) -> None:
@@ -61,7 +71,7 @@ def _load_campaigns_job(job_id: str, user_id: int) -> None:
         user = session.get(User, user_id)
         if user is None:
             raise LookupError('The account no longer exists.')
-        rows = campaign_service.overview(
+        rows = _cached_overview(
             session,
             user,
             progress=lambda total, loaded: query_progress.update(

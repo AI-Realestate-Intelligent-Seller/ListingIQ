@@ -18,7 +18,7 @@ from datetime import datetime
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from .. import query_progress
+from .. import cache, query_progress
 from ..db import SessionLocal
 from ..leads import address as address_key
 from ..leads.catalog import signal_label
@@ -256,7 +256,27 @@ def list_followups(
     board answers "who replied to the campaign I sent on Tuesday".
     """
     _require_access(current_user)
-    return _followups_payload(session, current_user, state, campaign_id, scope)
+    return _cached_followups(session, current_user, state, campaign_id, scope)
+
+
+def _cached_followups(
+    session: Session,
+    current_user: User,
+    state: str | None,
+    campaign_id: int | None,
+    scope: str,
+    progress=None,
+) -> list[dict]:
+    """Follow-up rows shaped like the response model, served from Redis when fresh."""
+    return cache.get_or_load(
+        'followups',
+        cache.DASHBOARD_TABLES,
+        {'user': current_user.id, 'role': current_user.role, 'state': state,
+         'campaign_id': campaign_id, 'scope': scope},
+        lambda: [FollowUpOut(**row).dict() for row in _followups_payload(
+            session, current_user, state, campaign_id, scope, progress=progress,
+        )],
+    )
 
 
 def _followups_payload(
@@ -320,7 +340,9 @@ def _load_followups_job(
         if user is None:
             raise LookupError('The account no longer exists.')
         _require_access(user)
-        rows = _followups_payload(
+        # Shaped exactly like GET /followups (response_model), so the client can
+        # use the job result directly instead of re-running the query.
+        rows = _cached_followups(
             session,
             user,
             state,
@@ -331,7 +353,9 @@ def _load_followups_job(
             ),
         )
         job = query_progress.read(job_id)
-        query_progress.complete(job_id, rows, total=int(job['total']) if job else len(rows))
+        query_progress.complete(
+            job_id, rows, total=max(int(job['total']) if job else 0, len(rows)),
+        )
     except Exception as error:  # noqa: BLE001 - the job must report every failure
         query_progress.fail(job_id, error)
     finally:

@@ -38,6 +38,9 @@ from cryptography.fernet import Fernet  # noqa: E402
 os.environ['FERNET_KEY'] = Fernet.generate_key().decode()   # throwaway, valid format
 os.environ['SECRET_KEY'] = 'test-secret-key'
 os.environ['REDIS_URL'] = 'redis://127.0.0.1:6379'          # credential-free; connections are refused
+# The test DB is rebuilt per run with recycled ids, so a developer's local Redis
+# must never serve cached payloads into tests. tests/test_cache.py covers the cache.
+os.environ['CACHE_ENABLED'] = 'false'
 os.environ['QDRANT_URL'] = ''
 os.environ['QDRANT_API_KEY'] = ''
 

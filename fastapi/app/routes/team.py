@@ -14,6 +14,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from .. import cache
 from ..auth import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token, hash_password
 from ..core.email import EmailDeliveryError, build_invitation_url, send_invitation_email
 from ..logger import get_logger
@@ -57,7 +58,15 @@ def brokerage_overview(
     """Brokerage-wide operating metrics for the HOB Overview screen."""
     if current_user.role != 'hob':
         raise HTTPException(status_code=403, detail='Only a Head of Brokerage can view brokerage analytics.')
+    return cache.get_or_load(
+        'brokerage-overview',
+        cache.DASHBOARD_TABLES,
+        {'user': current_user.id, 'brokerage': current_user.brokerage_id},
+        lambda: _build_brokerage_overview(session, current_user),
+    )
 
+
+def _build_brokerage_overview(session: Session, current_user: User) -> dict:
     user_ids = brokerage_user_ids(session, current_user)
     month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     leads = session.query(Lead).filter(Lead.user_id.in_(user_ids)).all()

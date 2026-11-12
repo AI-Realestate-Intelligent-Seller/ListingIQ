@@ -15,7 +15,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPExcepti
 from sqlalchemy.orm import Session
 
 from ..leads import campaign as campaign_service
-from .. import query_progress
+from .. import cache, query_progress
 from ..db import SessionLocal
 from ..leads import catalog
 from ..leads import events as lead_events
@@ -118,6 +118,38 @@ def _lead_pool_payload(
     polygon_points,
     progress=None,
 ) -> dict:
+    """The lead pool for one filter combination, served from Redis when fresh."""
+    return cache.get_or_load(
+        'lead-pool',
+        cache.DASHBOARD_TABLES,
+        {'user': current_user.id, 'role': current_user.role, 'search': search,
+         'addresses': addresses, 'signals': signals, 'stage': stage, 'states': states,
+         'cities': cities, 'zip_codes': zip_codes, 'bounds': [north, south, east, west],
+         'polygon': polygon_points},
+        lambda: _build_lead_pool_payload(
+            session, current_user, search, addresses, signals, stage, states, cities,
+            zip_codes, north, south, east, west, polygon_points, progress=progress,
+        ),
+    )
+
+
+def _build_lead_pool_payload(
+    session: Session,
+    current_user: User,
+    search: str,
+    addresses: list[str],
+    signals: list[str],
+    stage: str,
+    states: list[str],
+    cities: list[str],
+    zip_codes: list[str],
+    north: float | None,
+    south: float | None,
+    east: float | None,
+    west: float | None,
+    polygon_points,
+    progress=None,
+) -> dict:
     # Stage and last activity are system-owned; refresh them before reading.
     leads_service.sync_activity(session, brokerage_user_ids(session, current_user))
     filtered = leads_service.list_leads(
@@ -163,7 +195,10 @@ def _load_lead_pool_job(job_id: str, user_id: int, query: dict) -> None:
             ),
         )
         job = query_progress.read(job_id)
-        query_progress.complete(job_id, payload, total=int(job['total']) if job else 0)
+        query_progress.complete(
+            job_id, payload,
+            total=max(int(job['total']) if job else 0, cache.payload_size(payload)),
+        )
     except Exception as error:  # noqa: BLE001 - the job must report every failure
         query_progress.fail(job_id, error)
     finally:
