@@ -2,10 +2,13 @@
 
 How a cached read works
 -----------------------
-``get_or_load(namespace, tables, key_parts, loader)`` builds a key from the
-namespace, the caller's scope (user id + request parameters) and the current
-*version* of every table the payload reads. A hit returns the stored JSON; a
-miss runs ``loader()`` against the database and stores the result with a TTL.
+``get_or_load(namespace, tables, key_parts, loader)`` keys the payload by the
+namespace and the caller's scope (user id + request parameters), and stores it
+prefixed with the *versions* of every table it was built from. One ``MGET``
+returns the current table versions and the stored payload together, so a hit
+costs a single Redis round trip; the payload counts only when the versions it
+was built from are still current. A miss runs ``loader()`` against the
+database and stores the result with a TTL.
 
 How invalidation works
 ----------------------
@@ -38,7 +41,7 @@ from urllib.parse import urlsplit
 
 import redis
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import event
+from sqlalchemy import event, inspect
 from sqlalchemy.orm import Session
 
 from .core.config import settings
@@ -53,7 +56,8 @@ VERSION_PREFIX = f'{KEY_PREFIX}ver:'
 _DIRTY_KEY = 'listingiq_cache_dirty_tables'
 
 # Tables the dashboard read endpoints are built from. A write to any of them
-# invalidates every payload that declares it.
+# invalidates every payload that declares it. Writes to other tables (persona
+# index jobs, notifications, integrations, …) never touch Redis.
 DASHBOARD_TABLES: tuple[str, ...] = (
     'users',
     'invitations',
@@ -144,8 +148,24 @@ def client() -> redis.Redis | None:
     return _connection.get()
 
 
+# Finer-grained keys for pages that only see conversation threads. A draft
+# campaign locks leads that have no thread yet and is itself unsent, so it
+# must not clear Follow-ups or the SMS inbox:
+#   leads:conversation — a lead linked (before or after the write) to a thread
+#   campaigns:sent     — a campaign that is, or was, sent
+LEADS_WITH_THREAD = 'leads:conversation'
+SENT_CAMPAIGNS = 'campaigns:sent'
+
+# Pages built only from conversation threads (Follow-ups, SMS inbox).
+CONVERSATION_TABLES: tuple[str, ...] = (
+    'users', 'conversations', 'messages', LEADS_WITH_THREAD, SENT_CAMPAIGNS,
+)
+
+TRACKED_TABLES = frozenset((*DASHBOARD_TABLES, LEADS_WITH_THREAD, SENT_CAMPAIGNS))
+
+
 def ttl_seconds() -> int:
-    return max(1, int(_settings().get('ttl_seconds', 60)))
+    return max(1, int(_settings().get('ttl_seconds', 900)))
 
 
 def check_connection() -> bool:
@@ -163,10 +183,8 @@ def _fingerprint(parts: Any) -> str:
     return hashlib.sha1(raw.encode('utf-8')).hexdigest()[:20]
 
 
-def _versions(conn: redis.Redis, tables: Iterable[str]) -> str:
-    names = sorted(set(tables))
-    values = conn.mget([f'{VERSION_PREFIX}{name}' for name in names])
-    return '.'.join(value or '0' for value in values)
+def _version_keys(tables: Iterable[str]) -> list[str]:
+    return [f'{VERSION_PREFIX}{name}' for name in sorted(set(tables))]
 
 
 def get_or_load(
@@ -191,9 +209,11 @@ def get_or_load(
                     namespace, (time.perf_counter() - started) * 1000)
         return result
 
+    key = f'{KEY_PREFIX}{namespace}:{_fingerprint(key_parts)}'
+    version_keys = _version_keys(tables)
     try:
-        key = f'{KEY_PREFIX}{namespace}:{_fingerprint(key_parts)}:{_versions(conn, tables)}'
-        raw = conn.get(key)
+        # One round trip: every table version, then the stored payload.
+        *versions, stored = conn.mget([*version_keys, key])
     except redis.RedisError as error:
         _connection.mark_down(error)
         result = loader()
@@ -201,22 +221,29 @@ def get_or_load(
                     namespace, (time.perf_counter() - started) * 1000)
         return result
 
-    if raw is not None:
-        payload = json.loads(raw)
-        logger.info('cache hit ns=%s source=redis key=%s ms=%.1f',
-                    namespace, key.removeprefix(KEY_PREFIX), (time.perf_counter() - started) * 1000)
-        return payload
+    stamp = '.'.join(value or '0' for value in versions)
+    label = f'{key.removeprefix(KEY_PREFIX)} versions={stamp}'
+    if stored is not None:
+        built_from, _, raw = stored.partition('\n')
+        if built_from == stamp:
+            payload = json.loads(raw)
+            logger.info('cache hit ns=%s source=redis key=%s ms=%.1f',
+                        namespace, label, (time.perf_counter() - started) * 1000)
+            return payload
 
     result = loader()
     db_ms = (time.perf_counter() - started) * 1000
     try:
-        conn.set(key, json.dumps(jsonable_encoder(result), separators=(',', ':')),
-                 ex=ttl or ttl_seconds())
+        # Stamped with the versions read *before* loading: a write that lands
+        # while the query runs bumps a version, so this entry is never served.
+        body = json.dumps(jsonable_encoder(result), separators=(',', ':'))
+        conn.set(key, f'{stamp}\n{body}', ex=ttl or ttl_seconds())
     except (redis.RedisError, TypeError, ValueError) as error:
         logger.warning('cache store failed ns=%s error=%s: %s', namespace,
                        type(error).__name__, error)
-    logger.info('cache miss ns=%s source=db key=%s ms=%.1f',
-                namespace, key.removeprefix(KEY_PREFIX), db_ms)
+    reason = 'stale' if stored is not None else 'empty'
+    logger.info('cache miss ns=%s source=db reason=%s key=%s ms=%.1f',
+                namespace, reason, label, db_ms)
     return result
 
 
@@ -253,19 +280,86 @@ def bump(tables: Iterable[str]) -> None:
 
 
 def _record(session: Session, tables: Iterable[str]) -> None:
-    dirty = session.info.setdefault(_DIRTY_KEY, set())
-    dirty.update(tables)
+    relevant = TRACKED_TABLES.intersection(tables)
+    if relevant:
+        session.info.setdefault(_DIRTY_KEY, set()).update(relevant)
+
+
+def _values(obj, attr: str, is_new: bool) -> list | None:
+    """Every value ``attr`` held during this flush, or None when unknown.
+
+    Reads attribute history only — never triggers a lazy load mid-flush.
+    """
+    state = inspect(obj)
+    if attr not in state.attrs:
+        return None
+    history = state.attrs[attr].history
+    values = [*history.added, *history.unchanged, *history.deleted]
+    if values:
+        return values
+    if attr in state.dict:
+        return [state.dict[attr]]
+    if not is_new:
+        return None
+    # A new row that never set the attribute was inserted with the column's
+    # Python-side default, or NULL when it has none.
+    column = obj.__table__.c.get(attr)
+    if column is None:
+        return None
+    if column.default is None:
+        return None if column.server_default is not None else [None]
+    return [column.default.arg] if column.default.is_scalar else None
+
+
+def _fine_grained(table: str, obj, is_new: bool) -> set[str]:
+    """The narrower keys a single row write affects (unknown → assume affected)."""
+    if table == 'leads':
+        values = _values(obj, 'conversation_id', is_new)
+        if values is None or any(value is not None for value in values):
+            return {LEADS_WITH_THREAD}
+    if table == 'campaigns':
+        values = _values(obj, 'status', is_new)
+        if values is None or 'sent' in values:
+            return {SENT_CAMPAIGNS}
+    return set()
 
 
 @event.listens_for(Session, 'after_flush')
 def _track_flush(session: Session, flush_context) -> None:  # noqa: ARG001
     tables = set()
+    new_rows = set(map(id, session.new))
     for obj in (*session.new, *session.dirty, *session.deleted):
         table = getattr(getattr(obj, '__table__', None), 'name', None)
         if table:
             tables.add(table)
+            tables |= _fine_grained(table, obj, id(obj) in new_rows)
     if tables:
         _record(session, tables)
+
+
+def _only_threadless_leads(statement) -> bool:
+    """True when a bulk UPDATE provably touches only leads with no thread.
+
+    That is: its WHERE requires ``conversation_id IS NULL`` and it does not set
+    ``conversation_id`` itself (e.g. the draft lock in leads/campaign.attach).
+    Anything less certain returns False, which keeps invalidation conservative.
+    """
+    try:
+        if not getattr(statement, 'is_update', False):
+            return False
+        assigned = {getattr(column, 'key', column) for column in (statement._values or {})}
+        if 'conversation_id' in assigned:
+            return False
+        for criterion in statement._where_criteria:
+            for clause in getattr(criterion, 'clauses', [criterion]):
+                left = getattr(clause, 'left', None)
+                if (getattr(left, 'key', None) == 'conversation_id'
+                        and getattr(getattr(clause, 'operator', None), '__name__', '') == 'is_'
+                        and type(getattr(clause, 'right', None)).__name__ == 'Null'):
+                    return True
+    except Exception:  # noqa: BLE001 - private attributes: fall back to conservative
+        return False
+    return False
 
 
 @event.listens_for(Session, 'do_orm_execute')
@@ -276,8 +370,16 @@ def _track_bulk(orm_execute_state) -> None:
     statement = orm_execute_state.statement
     table = getattr(statement, 'table', None)
     name = getattr(table, 'name', None)
-    if name:
-        _record(orm_execute_state.session, {name})
+    if not name:
+        return
+    # A bulk statement's rows are unknown, so it affects every finer key —
+    # unless its own WHERE clause rules threaded leads out.
+    finer = set()
+    if name == 'leads' and not _only_threadless_leads(statement):
+        finer.add(LEADS_WITH_THREAD)
+    if name == 'campaigns':
+        finer.add(SENT_CAMPAIGNS)
+    _record(orm_execute_state.session, {name, *finer})
 
 
 @event.listens_for(Session, 'after_commit')

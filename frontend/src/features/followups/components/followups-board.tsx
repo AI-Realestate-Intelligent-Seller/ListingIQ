@@ -81,11 +81,14 @@ type FollowUpsBoardProps = {
   focusConversationId?: number | null;
   /** Narrows the board to one campaign's replies, e.g. from the Campaigns tab. */
   campaignId?: number | null;
+  /** Called when the user opens a chat, so the page URL can carry it. */
+  onConversationChange?: (conversationId: number | null) => void;
 };
 
 export function FollowUpsBoard({
   focusConversationId = null,
   campaignId = null,
+  onConversationChange,
 }: FollowUpsBoardProps) {
   const [followUps, setFollowUps] = useState<FollowUp[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
@@ -643,7 +646,10 @@ useEffect(() => {
                 type="button"
                 role="listitem"
                 className={`followup-card${item.id === activeId ? " active" : ""}`}
-                onClick={() => setActiveId(item.id)}
+                onClick={() => {
+                  setActiveId(item.id);
+                  onConversationChange?.(item.id);
+                }}
               >
                 <span className="followup-card-top">
                   <strong>{item.name || item.contact}</strong>

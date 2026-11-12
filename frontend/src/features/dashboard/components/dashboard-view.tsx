@@ -477,6 +477,29 @@ useEffect(() => {
     else router.push(path, { scroll: false });
   }, [router]);
 
+  /**
+   * Follow-ups reports the chat the user opened so the URL carries it
+   * (?conversation_id=…) and can be shared. The board is already showing it, so
+   * this only rewrites the address — no remount, no new history entry.
+   */
+  const recordFollowUpConversation = useCallback((conversationId: number | null) => {
+    const session = readAuthSession();
+    if (!session) return;
+    const current = actionFromDashboardPath(window.location.pathname, window.location.search);
+    if (current?.view !== "followups") return;
+    const destination: NotificationAction = { ...current };
+    if (conversationId === null) delete destination.conversation_id;
+    else destination.conversation_id = conversationId;
+    const path = dashboardPath(session.user.role, destination);
+    if (path === window.location.pathname + window.location.search) return;
+    appliedPathRef.current = path;
+    awaitingUrlRef.current = true;
+    try {
+      sessionStorage.setItem(`listingiq-dashboard:${session.user.id}`, JSON.stringify(destination));
+    } catch { /* The URL still records the chat when browser storage is unavailable. */ }
+    router.replace(path, { scroll: false });
+  }, [router]);
+
   const handlePersonaDirty = useCallback((dirty: boolean) => {
     personaDirtyRef.current = dirty;
   }, []);
@@ -814,6 +837,7 @@ useEffect(() => {
             key={notificationNavigationId}
             focusConversationId={focusConversationId}
             campaignId={followUpCampaignId}
+            onConversationChange={recordFollowUpConversation}
           />
         ) : null}
 

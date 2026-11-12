@@ -188,7 +188,7 @@ def list_conversations(current_user: User = Depends(get_current_user), session: 
     _require_sms_access(current_user)
     return cache.get_or_load(
         'sms-conversations',
-        cache.DASHBOARD_TABLES,
+        cache.CONVERSATION_TABLES,
         {'user': current_user.id, 'role': current_user.role},
         lambda: _build_conversation_list(session, current_user),
     )

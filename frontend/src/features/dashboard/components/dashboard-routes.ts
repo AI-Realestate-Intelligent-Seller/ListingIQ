@@ -10,8 +10,9 @@ import { actionFromUrl, parseNotificationAction, type DashboardTab, type Notific
  *   /dashboard/{role}                         → last section this tab used (or Overview)
  *   /dashboard/{role}/{section}               → overview | leads | campaigns | assignments
  *                                               | followups | directory | calendar | persona
- *   /dashboard/{role}/followups/{conversationId}[?campaign_id=]
- *   /dashboard/{role}/followups?campaign_id={campaignId}
+ *   /dashboard/{role}/followups?conversation_id={id}[&campaign_id={id}]
+ *                                               → the open chat, shareable
+ *   /dashboard/{role}/followups/{conversationId} (older form, still read)
  *   /dashboard/{role}/leads/{leadId}
  *   /dashboard/{role}/assignments/{leadId}
  *   /dashboard/{role}/campaigns/{campaignId}  → the draft to compose
@@ -23,7 +24,6 @@ import { actionFromUrl, parseNotificationAction, type DashboardTab, type Notific
 
 /** Which id the second path segment carries for each section. */
 const PATH_ID: Partial<Record<DashboardTab, keyof NotificationAction>> = {
-  followups: "conversation_id",
   calendar: "booking_id",
   leads: "lead_id",
   assignments: "lead_id",
@@ -63,9 +63,11 @@ export function dashboardPath(role: string, action: NotificationAction): string 
   const id = idKey ? action[idKey] : undefined;
   if (id !== undefined) segments.push(String(id));
   const query = new URLSearchParams();
-  // Follow-ups can be focused on a thread and filtered to a campaign at once.
-  if (action.view === "followups" && action.campaign_id !== undefined) {
-    query.set("campaign_id", String(action.campaign_id));
+  // Follow-ups keeps the open chat (and an optional campaign filter) in the
+  // query string, so a copied URL opens the same conversation.
+  if (action.view === "followups") {
+    if (action.conversation_id !== undefined) query.set("conversation_id", String(action.conversation_id));
+    if (action.campaign_id !== undefined) query.set("campaign_id", String(action.campaign_id));
   }
   const search = query.toString();
   return segments.join("/") + (search ? `?${search}` : "");
@@ -80,7 +82,10 @@ export function actionFromDashboardPath(pathname: string, search = ""): Notifica
   const idKey = PATH_ID[view as DashboardTab];
   if (idKey && match[2]) raw[idKey] = match[2];
   const query = new URLSearchParams(search);
-  if (view === "followups" && query.get("campaign_id")) raw.campaign_id = query.get("campaign_id");
+  if (view === "followups") {
+    raw.conversation_id = query.get("conversation_id") ?? match[2];
+    if (query.get("campaign_id")) raw.campaign_id = query.get("campaign_id");
+  }
   return parseNotificationAction(raw);
 }
 

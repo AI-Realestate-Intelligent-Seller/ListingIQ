@@ -16,9 +16,9 @@ describe("dashboardPath / actionFromDashboardPath", () => {
     [{ view: "leads", lead_id: 45 }, "/dashboard/broker/leads/45"],
     [{ view: "assignments", lead_id: 9 }, "/dashboard/broker/assignments/9"],
     [{ view: "campaigns", campaign_id: 12 }, "/dashboard/broker/campaigns/12"],
-    [{ view: "followups", conversation_id: 123 }, "/dashboard/broker/followups/123"],
+    [{ view: "followups", conversation_id: 123 }, "/dashboard/broker/followups?conversation_id=123"],
     [{ view: "followups", campaign_id: 7 }, "/dashboard/broker/followups?campaign_id=7"],
-    [{ view: "followups", conversation_id: 3, campaign_id: 7 }, "/dashboard/broker/followups/3?campaign_id=7"],
+    [{ view: "followups", conversation_id: 3, campaign_id: 7 }, "/dashboard/broker/followups?conversation_id=3&campaign_id=7"],
     [{ view: "calendar", booking_id: 5 }, "/dashboard/broker/calendar/5"],
     [{ view: "directory" }, "/dashboard/broker/directory"],
     [{ view: "persona" }, "/dashboard/broker/persona"],
@@ -28,6 +28,10 @@ describe("dashboardPath / actionFromDashboardPath", () => {
     expect(dashboardPath("broker", action)).toBe(path);
     const [pathname, search = ""] = path.split("?");
     expect(actionFromDashboardPath(pathname, search)).toEqual(action);
+  });
+
+  it("still opens the earlier /followups/{id} links", () => {
+    expect(actionFromDashboardPath("/dashboard/broker/followups/18")).toEqual({ view: "followups", conversation_id: 18 });
   });
 
   it("returns null when the path has no section", () => {

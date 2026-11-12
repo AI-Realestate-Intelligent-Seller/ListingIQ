@@ -270,7 +270,7 @@ def _cached_followups(
     """Follow-up rows shaped like the response model, served from Redis when fresh."""
     return cache.get_or_load(
         'followups',
-        cache.DASHBOARD_TABLES,
+        cache.CONVERSATION_TABLES,
         {'user': current_user.id, 'role': current_user.role, 'state': state,
          'campaign_id': campaign_id, 'scope': scope},
         lambda: [FollowUpOut(**row).dict() for row in _followups_payload(
