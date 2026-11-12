@@ -14,6 +14,7 @@ import type { Summary } from "./types";
 const { push } = vi.hoisted(() => ({ push: vi.fn() }));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push, replace: vi.fn() }),
+  usePathname: () => "/platform-admin",
 }));
 vi.mock("@/features/auth/lib/auth-storage", () => ({
   readAuthSession: () => ({

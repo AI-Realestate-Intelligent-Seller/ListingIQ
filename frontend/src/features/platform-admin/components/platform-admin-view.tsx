@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { Brand } from "@/components/brand/brand";
 import { Toast } from "@/components/toast/toast";
 import { clearAuthSession, readAuthSession } from "@/features/auth/lib/auth-storage";
@@ -19,8 +19,41 @@ const nav: {id: Tab; label: string; group: string}[] = [
   {id:"security",label:"Audit log",group:"Security"}, {id:"engineering",label:"Environments",group:"Engineering"},
 ];
 
+/**
+ * One URL per console tab, named after the API resource each tab reads
+ * (/platform-admin/feature-flags → GET /platform-admin/feature-flags, …).
+ * Integrations already had real pages under /platform-admin/integrations.
+ */
+const TAB_PATH: Record<Tab, string> = {
+  overview: "overview", organizations: "organizations", users: "users", product: "feature-flags",
+  operations: "operations", integrations: "integrations", support: "support", security: "audit-log",
+  engineering: "engineering",
+};
+
+export function tabPath(tab: Tab): string {
+  return `/platform-admin/${TAB_PATH[tab]}`;
+}
+
+/** The console tab a /platform-admin/{tab} path opens, or null for any other path. */
+export function tabFromPath(pathname: string): Tab | null {
+  const segment = pathname.match(/^\/platform-admin\/([^/]+)\/?$/)?.[1];
+  const tab = (Object.keys(TAB_PATH) as Tab[]).find((id) => TAB_PATH[id] === segment);
+  return tab && tab !== "integrations" ? tab : null;
+}
+
+/** Old `/platform-admin?tab=product` links. */
+function legacyTab(search: string): Tab | null {
+  const requested = new URLSearchParams(search).get("tab");
+  return nav.some(item => item.id === requested && item.id !== "integrations") ? requested as Tab : null;
+}
+
 export function PlatformAdminView({ children }: { children?: React.ReactNode }) {
   const router = useRouter();
+  const pathname = usePathname();
+  /** The URL the visible tab was opened at; anything else came from back/forward or a typed URL. */
+  const appliedPathRef = useRef<string | null>(null);
+  /** True between our own router.push/replace and the URL actually changing. */
+  const awaitingUrlRef = useRef(false);
   const [tab,setTab]=useState<Tab>(children ? "integrations" : "overview"); const [loading,setLoading]=useState(true); const [error,setError]=useState("");
   const [overview,setOverview]=useState<PlatformOverview|null>(null); const [organizations,setOrganizations]=useState<Organization[]>([]);
   const [users,setUsers]=useState<PlatformUser[]>([]); const [flags,setFlags]=useState<FeatureFlag[]>([]); const [operations,setOperations]=useState<Operations|null>(null);
@@ -59,15 +92,38 @@ export function PlatformAdminView({ children }: { children?: React.ReactNode }) 
       return;
     }
     markActivity();
-    const requested = new URLSearchParams(window.location.search).get("tab");
-    const initial: Tab = children ? "integrations" : nav.some(item => item.id === requested && item.id !== "integrations") ? requested as Tab : "overview";
+    const initial: Tab = children ? "integrations"
+      : tabFromPath(window.location.pathname) ?? legacyTab(window.location.search) ?? "overview";
     // eslint-disable-next-line react-hooks/set-state-in-effect -- existing console loads its selected tab on mount
     void load(initial, "");
+    // /platform-admin, ?tab= links and unknown paths settle on the tab's own URL.
+    if (!children) recordPath(initial, "replace");
     return watchSession(()=>{clearAuthSession();router.replace("/login?expired=1")});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   },[router]);
 
-  function choose(next:Tab){if(next==="integrations"){router.push("/platform-admin/integrations");return;}if(children){router.push(`/platform-admin?tab=${next}`);return;}setTab(next);setNotice("");void load(next,query)}
+  /** Put the open tab in the address bar so back/forward, refresh and links work. */
+  function recordPath(next:Tab, history:"push"|"replace"="push"){
+    const path=tabPath(next); appliedPathRef.current=path;
+    if(path===window.location.pathname+window.location.search){awaitingUrlRef.current=false;return;}
+    awaitingUrlRef.current=true;
+    if(history==="replace") router.replace(path,{scroll:false}); else router.push(path,{scroll:false});
+  }
+  function choose(next:Tab){if(next==="integrations"){router.push("/platform-admin/integrations");return;}if(children){router.push(tabPath(next));return;}setTab(next);setNotice("");void load(next,query);recordPath(next)}
+
+  // Browser back/forward (or a typed URL) moved to another tab's path.
+  useEffect(()=>{
+    if(children||appliedPathRef.current===null)return;
+    if(pathname===appliedPathRef.current){awaitingUrlRef.current=false;return;}
+    // Our own navigation has not reached the URL yet; nothing to sync.
+    if(awaitingUrlRef.current)return;
+    const next=tabFromPath(pathname);
+    if(!next)return;
+    appliedPathRef.current=pathname;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the URL is the external system being synced
+    setTab(next);setNotice("");void load(next,query);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs when the URL changes, with the current search text
+  },[pathname,children]);
   async function toggleOrganization(item:Organization){const session=readAuthSession();if(!session)return;const reason=window.prompt(`Reason to ${item.is_active?"suspend":"activate"} ${item.name}:`);if(!reason)return;await api.setOrganizationActive(session.access_token,item.id,!item.is_active,reason);setNotice(`${item.name} updated.`);await load("organizations",query)}
   async function toggleUser(item:PlatformUser){const session=readAuthSession();if(!session)return;const reason=window.prompt(`Reason to ${item.is_active?"suspend":"activate"} ${item.email}:`);if(!reason)return;await api.setUserActive(session.access_token,item.id,!item.is_active,reason);setNotice(`${item.email} updated.`);await load(tab,query)}
   async function updateScreenAccess(item:PlatformUser, role:CustomerScreenRole){const session=readAuthSession();if(!session||role===item.role)return;setUpdatingScreenUserId(item.id);setError("");try{const result=await api.setUserScreenAccess(session.access_token,item.id,role);setUsers(current=>current.map(user=>user.id===item.id?{...user,role:result.role}:user));setNotice(result.message)}catch(reason){setError(reason instanceof Error?reason.message:"Could not update screen access.")}finally{setUpdatingScreenUserId(null)}}

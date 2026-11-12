@@ -1,6 +1,6 @@
 "use client";
 
-import { useParams, useRouter } from "next/navigation";
+import { useParams, usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Brand } from "@/components/brand/brand";
@@ -27,6 +27,13 @@ import { UpcomingEvents } from "./upcoming-events";
 import {RealtimeProvider} from"../realtimeProvider/realtimeProvider"
 import { NotificationProvider} from "./notification-provider"
 import { actionFromUrl, parseNotificationAction, type DashboardTab, type NotificationAction } from "./notification-action";
+import {
+  actionFromDashboardPath,
+  dashboardPath,
+  legacyActionFromSearch,
+  pathForRole,
+  resolveDestination,
+} from "./dashboard-routes";
 
 type InviteDropdownProps = {
   name: string;
@@ -179,6 +186,12 @@ function TeamDirectory() {
 export function DashboardView() {
   const router = useRouter();
   const params = useParams<{ role?: string }>();
+  const pathname = usePathname();
+  const search = useSearchParams().toString();
+  /** The URL the visible section was opened at; anything else is back/forward or a typed URL. */
+  const appliedPathRef = useRef<string | null>(null);
+  /** True between our own router.push/replace and the URL actually changing. */
+  const awaitingUrlRef = useRef(false);
   const [user, setUser] = useState<AuthUser | null>(null);
   const [view, setView] = useState<DashboardTab>("overview");
   const personaDirtyRef = useRef(false);
@@ -213,7 +226,8 @@ export function DashboardView() {
   useEffect(() => {
     const session = readAuthSession();
     if (!session) {
-      const action = actionFromUrl(window.location.pathname + window.location.search);
+      const action = actionFromDashboardPath(window.location.pathname, window.location.search)
+        ?? actionFromUrl(window.location.pathname + window.location.search);
       if (action) sessionStorage.setItem("listingiq-pending-notification", JSON.stringify(action));
       router.replace("/login");
       return;
@@ -222,8 +236,10 @@ export function DashboardView() {
       router.replace("/platform-admin");
       return;
     }
-    if (params.role && params.role !== session.user.role) {
-      router.replace(`/dashboard/${session.user.role}${window.location.search}`);
+    // Every dashboard URL is scoped to the signed-in role; /dashboard and other
+    // roles' URLs move to the same place under the user's own role.
+    if (params.role !== session.user.role) {
+      router.replace(pathForRole(window.location.pathname, session.user.role) + window.location.search);
       return;
     }
     markActivity();
@@ -428,7 +444,7 @@ useEffect(() => {
   // The ref intentionally keeps this navigation callback stable for push and
   // storage listeners while still consulting the latest Persona edit state.
   // eslint-disable-next-line react-hooks/preserve-manual-memoization
-  const navigateDashboard = useCallback((action: NotificationAction) => {
+  const navigateDashboard = useCallback((action: NotificationAction, history: "push" | "replace" = "push") => {
     // Any navigation, including re-opening My AI Persona, would discard unsaved Persona edits.
     if (personaDirtyRef.current) {
       setPendingPersonaNavigation(action);
@@ -436,40 +452,30 @@ useEffect(() => {
     }
     const session = readAuthSession();
     const role = session?.user.role;
-    let target = action.view;
-    if (target === "assignments" && role === "agent") target = "leads";
-    if ((target === "directory" && role !== "hob") ||
-        (target === "assignments" && role !== "broker") ||
-        (target === "campaigns" && role === "agent")) target = "overview";
+    const destination = resolveDestination(action, role);
     setFocusConversationId(action.conversation_id ?? null);
     setFocusBookingId(action.booking_id ?? null);
     setFocusLeadId(action.lead_id ?? null);
     setFollowUpCampaignId(action.view === "followups" ? action.campaign_id ?? null : null);
     setDraftCampaignId(action.view === "campaigns" ? action.campaign_id ?? null : null);
     setNotificationNavigationId((current) => current + 1);
-    setView(target);
+    setView(destination.view);
     setIsNavOpen(false);
-    const destination: NotificationAction = { view: target };
-    if (target === action.view) {
-      const keys = target === "followups" ? ["conversation_id", "campaign_id"] as const
-        : target === "calendar" ? ["booking_id"] as const
-        : target === "leads" || target === "assignments" ? ["lead_id"] as const
-        : target === "campaigns" ? ["campaign_id"] as const : [];
-      for (const key of keys) {
-        const id = action[key];
-        if (id !== undefined) destination[key] = id;
-      }
-    }
     try {
       if (session) sessionStorage.setItem(`listingiq-dashboard:${session.user.id}`, JSON.stringify(destination));
     } catch { /* Navigation still works when browser storage is unavailable. */ }
-    // Consume incoming push links without exposing dashboard state in the URL.
-    const url = new URL(window.location.href);
-    for (const key of ["view", "conversation_id", "booking_id", "lead_id", "campaign_id"]) {
-      url.searchParams.delete(key);
+    if (!session) return;
+    // Record the section in the URL so back/forward, refresh and shared links work.
+    const path = dashboardPath(session.user.role, destination);
+    appliedPathRef.current = path;
+    if (path === window.location.pathname + window.location.search) {
+      awaitingUrlRef.current = false;
+      return;
     }
-    window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
-  }, []);
+    awaitingUrlRef.current = true;
+    if (history === "replace") router.replace(path, { scroll: false });
+    else router.push(path, { scroll: false });
+  }, [router]);
 
   const handlePersonaDirty = useCallback((dirty: boolean) => {
     personaDirtyRef.current = dirty;
@@ -484,11 +490,14 @@ useEffect(() => {
       sessionStorage.removeItem("listingiq-pending-notification");
       savedAction = parseNotificationAction(JSON.parse(sessionStorage.getItem(`listingiq-dashboard:${user.id}`) || "null"));
     } catch { /* Ignore expired or malformed navigation state. */ }
-    const initialAction = actionFromUrl(window.location.pathname + window.location.search) ?? pendingAction ?? savedAction;
-    if (initialAction) {
-      // Hydrate navigation from browser URL/storage after authentication.
-      navigateDashboard(initialAction);
-    }
+    const { pathname: initialPath, search: initialSearch } = window.location;
+    // The URL wins (a section path, or a legacy ?view= push link), then a link
+    // saved before login, then the section this browser tab last used.
+    const initialAction = actionFromDashboardPath(initialPath, initialSearch)
+      ?? legacyActionFromSearch(initialPath, initialSearch)
+      ?? pendingAction ?? savedAction ?? { view: "overview" as const };
+    // Hydrate navigation from browser URL/storage after authentication.
+    navigateDashboard(initialAction, "replace");
     const handlePushNavigation = (event: MessageEvent) => {
       if (event.data?.type !== "NOTIFICATION_NAVIGATE") return;
       const action = parseNotificationAction(event.data.action) ?? actionFromUrl(event.data.url);
@@ -500,6 +509,29 @@ useEffect(() => {
     navigator.serviceWorker?.addEventListener("message", handlePushNavigation);
     return () => navigator.serviceWorker?.removeEventListener("message", handlePushNavigation);
   }, [user, navigateDashboard]);
+
+  // Browser back/forward (or a typed URL) changed the section underneath us.
+  useEffect(() => {
+    if (!user || appliedPathRef.current === null) return;
+    const current = pathname + (search ? `?${search}` : "");
+    if (current === appliedPathRef.current) {
+      awaitingUrlRef.current = false;
+      return;
+    }
+    // Our own navigation has not reached the URL yet; nothing to sync.
+    if (awaitingUrlRef.current) return;
+    const action = actionFromDashboardPath(pathname, search)
+      ?? (pathname === `/dashboard/${user.role}` ? { view: "overview" as const } : null);
+    if (!action) return;
+    if (personaDirtyRef.current) {
+      // Keep the Persona editor on screen and ask first, exactly like a sidebar click.
+      awaitingUrlRef.current = true;
+      router.push(appliedPathRef.current, { scroll: false });
+      setPendingPersonaNavigation(action);
+      return;
+    }
+    navigateDashboard(action, "replace");
+  }, [user, pathname, search, navigateDashboard, router]);
 
   function logout(): void {
     clearAuthSession();

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { requestJson } from "@/lib/api/http-client";
-import { PlatformAdminView } from "./platform-admin-view";
+import { PlatformAdminView, tabFromPath, tabPath } from "./platform-admin-view";
 
 const mocks = vi.hoisted(() => ({
   request: vi.fn(),
@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("next/navigation", () => ({
   useRouter: () => mocks.router,
+  usePathname: () => "/platform-admin",
 }));
 vi.mock("@/features/auth/lib/auth-storage", () => ({
   readAuthSession: () => ({
@@ -84,6 +85,17 @@ describe("Platform Admin brokerage onboarding", () => {
 
   afterEach(cleanup);
 
+  it("records the opened tab in the URL", async () => {
+    mocks.router.push.mockClear();
+    mocks.router.replace.mockClear();
+    render(<PlatformAdminView />);
+    await screen.findByText("Platform pulse");
+    expect(mocks.router.replace).toHaveBeenCalledWith("/platform-admin/overview", { scroll: false });
+    fireEvent.click(screen.getByRole("button", { name: "Organizations" }));
+    await screen.findByRole("heading", { name: "Add brokerage" });
+    expect(mocks.router.push).toHaveBeenCalledWith("/platform-admin/organizations", { scroll: false });
+  });
+
   it("creates a brokerage and sends its initial user to the selected screen", async () => {
     render(<PlatformAdminView />);
     await screen.findByText("Platform pulse");
@@ -153,5 +165,22 @@ describe("Platform Admin brokerage onboarding", () => {
       "/platform-admin/users/7/screen-access",
       expect.objectContaining({ method: "PATCH", payload: { role: "broker" } }),
     );
+  });
+});
+
+describe("Platform Admin tab URLs", () => {
+  it("names each tab after its API resource and reads it back", () => {
+    expect(tabPath("product")).toBe("/platform-admin/feature-flags");
+    expect(tabPath("security")).toBe("/platform-admin/audit-log");
+    for (const tab of ["overview", "organizations", "users", "product", "operations", "support", "security", "engineering"] as const) {
+      expect(tabFromPath(tabPath(tab))).toBe(tab);
+    }
+  });
+
+  it("ignores paths that are not console tabs", () => {
+    expect(tabFromPath("/platform-admin")).toBeNull();
+    expect(tabFromPath("/platform-admin/integrations")).toBeNull();
+    expect(tabFromPath("/platform-admin/integrations/batchdata")).toBeNull();
+    expect(tabFromPath("/platform-admin/unknown")).toBeNull();
   });
 });
