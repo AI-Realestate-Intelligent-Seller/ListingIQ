@@ -43,3 +43,6 @@ fastapi/storage/
 # Local uploaded/generated data
 fastapi/data/
 fastapi/migrate_sqlite_to_neon.py
+
+# Local database dumps (contain real customer data; never commit)
+fastapi/db_dumps/

@@ -315,3 +315,13 @@ def test_bulk_update_that_links_threads_still_clears(fake, db):
     db.commit()
     cache.get_or_load('followups', THREADS, {'user': 1}, load)
     assert calls['n'] == 2
+
+
+def test_peek_returns_only_a_current_payload_and_never_loads(fake, db):
+    assert cache.peek('demo', ['leads'], {'user': 1}) is None          # nothing cached
+    cache.get_or_load('demo', ['leads'], {'user': 1}, lambda: {'rows': [1]})
+    assert cache.peek('demo', ['leads'], {'user': 1}) == {'rows': [1]}  # current
+    assert cache.peek('demo', ['leads'], {'user': 2}) is None          # other caller
+    db.add(Widget(name='new'))
+    db.commit()
+    assert cache.peek('demo', ['leads'], {'user': 1}) is None          # stale after a write

@@ -101,6 +101,16 @@ def list_leads(
     )
 
 
+def _lead_pool_cache_key(user: User, search, addresses, signals, stage, states, cities,
+                         zip_codes, north, south, east, west, polygon_points):
+    """Cache namespace, dependencies and key — shared by the pool and its /load shortcut."""
+    return ('lead-pool', cache.DASHBOARD_TABLES,
+            {'user': user.id, 'role': user.role, 'search': search,
+             'addresses': addresses, 'signals': signals, 'stage': stage, 'states': states,
+             'cities': cities, 'zip_codes': zip_codes, 'bounds': [north, south, east, west],
+             'polygon': polygon_points})
+
+
 def _lead_pool_payload(
     session: Session,
     current_user: User,
@@ -120,12 +130,8 @@ def _lead_pool_payload(
 ) -> dict:
     """The lead pool for one filter combination, served from Redis when fresh."""
     return cache.get_or_load(
-        'lead-pool',
-        cache.DASHBOARD_TABLES,
-        {'user': current_user.id, 'role': current_user.role, 'search': search,
-         'addresses': addresses, 'signals': signals, 'stage': stage, 'states': states,
-         'cities': cities, 'zip_codes': zip_codes, 'bounds': [north, south, east, west],
-         'polygon': polygon_points},
+        *_lead_pool_cache_key(current_user, search, addresses, signals, stage, states, cities,
+                              zip_codes, north, south, east, west, polygon_points),
         lambda: _build_lead_pool_payload(
             session, current_user, search, addresses, signals, stage, states, cities,
             zip_codes, north, south, east, west, polygon_points, progress=progress,
@@ -230,6 +236,13 @@ def start_lead_pool_load(
         raise HTTPException(status_code=422, detail='polygon must be valid JSON.')
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error))
+    # Already cached and current: answer now, no job for the browser to poll.
+    cached = cache.peek(*_lead_pool_cache_key(
+        current_user, search, address, signal, stage, state, city, zip_code,
+        north, south, east, west, polygon_points,
+    ))
+    if cached is not None:
+        return {'job_id': None, 'status': 'completed', 'result': cached}
     try:
         job = query_progress.create(current_user.id, 'lead-pool')
     except query_progress.ProgressStoreUnavailable as error:

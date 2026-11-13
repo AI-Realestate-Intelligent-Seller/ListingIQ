@@ -247,6 +247,34 @@ def get_or_load(
     return result
 
 
+def peek(namespace: str, tables: Iterable[str], key_parts: Any) -> Any | None:
+    """The cached payload if it is current, else None. Never touches the DB.
+
+    Lets a ``/load`` endpoint answer at once on a hit instead of starting a
+    background job the browser then has to poll.
+    """
+    started = time.perf_counter()
+    conn = client()
+    if conn is None:
+        return None
+    key = f'{KEY_PREFIX}{namespace}:{_fingerprint(key_parts)}'
+    try:
+        *versions, stored = conn.mget([*_version_keys(tables), key])
+    except redis.RedisError as error:
+        _connection.mark_down(error)
+        return None
+    stamp = '.'.join(value or '0' for value in versions)
+    if stored is None:
+        return None
+    built_from, _, raw = stored.partition('\n')
+    if built_from != stamp:
+        return None
+    payload = json.loads(raw)
+    logger.info('cache hit ns=%s source=redis via=load-shortcut key=%s versions=%s ms=%.1f',
+                namespace, key.removeprefix(KEY_PREFIX), stamp, (time.perf_counter() - started) * 1000)
+    return payload
+
+
 def payload_size(payload: Any) -> int:
     """Row count for progress reporting when a load job is answered from cache."""
     if isinstance(payload, list):

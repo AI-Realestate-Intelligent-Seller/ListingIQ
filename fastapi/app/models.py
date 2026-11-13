@@ -122,6 +122,10 @@ class Conversation(Base):
 
 class Message(Base):
     __tablename__ = 'messages'
+    __table_args__ = (
+        Index('ix_messages_conversation_direction', 'conversation_id', 'direction'),
+        Index('ix_messages_conversation_created', 'conversation_id', 'created_at', 'id'),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
 
@@ -313,6 +317,7 @@ class Lead(Base):
     __table_args__ = (
         Index('ix_leads_coordinates', 'latitude', 'longitude'),
         Index('ix_leads_campaign_main_signal', 'campaign_id', 'main_signal'),
+        Index('ix_leads_user_campaign', 'user_id', 'campaign_id'),
     )
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
@@ -588,6 +593,9 @@ class BookingReminder(Base):
 
 class Notification(Base):
     __tablename__ = "notifications"
+    __table_args__ = (
+        Index('ix_notifications_user_read', 'user_id', 'is_read'),
+    )
 
     # Primary key already indexed.
     id = Column(

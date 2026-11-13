@@ -13,9 +13,11 @@ its messages stay on the SMS endpoints — this module adds no second way to do
 either.
 """
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from .. import cache, query_progress
@@ -101,18 +103,96 @@ def _replied_conversation_ids(session: Session, user: User) -> list[int]:
     return [row[0] for row in rows if row[0] is not None]
 
 
-def _messages_by_conversation(session: Session, ids: list[int]) -> dict[int, list[Message]]:
-    """Every message for the listed threads, oldest first, in one query."""
+@dataclass(frozen=True)
+class _Latest:
+    direction: str | None
+    text: str | None
+    created_at: datetime | None
+
+
+@dataclass(frozen=True)
+class _ThreadSummary:
+    """Everything a follow-up card reads from a thread's messages."""
+    latest: _Latest | None = None
+    latest_outbound_status: str | None = None
+    latest_outbound_failure_reason: str | None = None
+    first_reply_at: datetime | None = None
+    last_reply_at: datetime | None = None
+    reply_count: int = 0
+    message_count: int = 0
+
+
+_NO_MESSAGES = _ThreadSummary()
+
+
+def _summary_from_messages(messages: list[Message]) -> _ThreadSummary:
+    """Summarise one thread's messages, already ordered oldest first."""
+    if not messages:
+        return _NO_MESSAGES
+    inbound = [message for message in messages if message.direction == 'inbound']
+    outbound = [message for message in messages if message.direction == 'outbound']
+    latest = messages[-1]
+    return _ThreadSummary(
+        latest=_Latest(latest.direction, latest.text, latest.created_at),
+        latest_outbound_status=outbound[-1].status if outbound else None,
+        latest_outbound_failure_reason=outbound[-1].failure_reason if outbound else None,
+        first_reply_at=inbound[0].created_at if inbound else None,
+        last_reply_at=inbound[-1].created_at if inbound else None,
+        reply_count=len(inbound),
+        message_count=len(messages),
+    )
+
+
+def _thread_summaries(session: Session, ids: list[int]) -> dict[int, _ThreadSummary]:
+    """Card summaries for many threads in three queries, without loading every message.
+
+    Same results as `_summary_from_messages` over each thread's full history:
+    counts and first/last reply times are aggregates, and the latest message and
+    latest outbound message are picked per thread by created_at, then id.
+    """
     if not ids:
         return {}
-    grouped: dict[int, list[Message]] = defaultdict(list)
-    rows = (session.query(Message)
-            .filter(Message.conversation_id.in_(ids))
-            .order_by(Message.created_at, Message.id)
-            .all())
-    for row in rows:
-        grouped[row.conversation_id].append(row)
-    return grouped
+    inbound = Message.direction == 'inbound'
+    totals = {row.conversation_id: row for row in (
+        session.query(Message.conversation_id,
+                      func.count(Message.id).label('message_count'),
+                      func.sum(case((inbound, 1), else_=0)).label('reply_count'),
+                      func.min(case((inbound, Message.created_at))).label('first_reply_at'),
+                      func.max(case((inbound, Message.created_at))).label('last_reply_at'))
+        .filter(Message.conversation_id.in_(ids))
+        .group_by(Message.conversation_id).all())}
+
+    def newest(*criteria, columns):
+        rank = (session.query(
+                    Message.id.label('id'),
+                    func.row_number().over(
+                        partition_by=Message.conversation_id,
+                        order_by=(Message.created_at.desc(), Message.id.desc()),
+                    ).label('rank'))
+                .filter(Message.conversation_id.in_(ids), *criteria)
+                .subquery())
+        return {row.conversation_id: row for row in (
+            session.query(Message.conversation_id, *columns)
+            .join(rank, rank.c.id == Message.id)
+            .filter(rank.c.rank == 1).all())}
+
+    latest = newest(columns=(Message.direction, Message.text, Message.created_at))
+    latest_outbound = newest(Message.direction == 'outbound',
+                             columns=(Message.status, Message.failure_reason))
+    summaries = {}
+    for conversation_id, total in totals.items():
+        last = latest.get(conversation_id)
+        out = latest_outbound.get(conversation_id)
+        summaries[conversation_id] = _ThreadSummary(
+            latest=_Latest(last.direction, last.text, last.created_at) if last else None,
+            latest_outbound_status=out.status if out else None,
+            latest_outbound_failure_reason=out.failure_reason if out else None,
+            first_reply_at=total.first_reply_at,
+            last_reply_at=total.last_reply_at,
+            reply_count=int(total.reply_count or 0),
+            message_count=int(total.message_count),
+        )
+    return summaries
 
 
 def _leads_by_conversation(session: Session, user: User, ids: list[int]) -> dict[int, list[Lead]]:
@@ -168,15 +248,11 @@ def _campaign_names(session: Session, user: User) -> dict[int, str]:
     return {row[0]: row[1] for row in rows}
 
 
-def _serialize(conversation: Conversation, messages: list[Message], leads: list[Lead],
+def _serialize(conversation: Conversation, summary: _ThreadSummary, leads: list[Lead],
                now: datetime, campaign_names: dict[int, str] | None = None) -> dict:
     lead = next((row for row in leads if row.property_address == conversation.property_address),
                 leads[-1] if leads else None)
-    inbound = [message for message in messages if message.direction == 'inbound']
-    outbound = [message for message in messages if message.direction == 'outbound']
-    latest = messages[-1] if messages else None
-    latest_outbound = outbound[-1] if outbound else None
-    last_reply = inbound[-1] if inbound else None
+    latest = summary.latest
     # The assignee owes a reply when Bobbie has stepped back and the owner spoke last.
     awaiting = bool(conversation.handled_by == 'broker' and latest is not None
                     and latest.direction == 'inbound')
@@ -215,15 +291,13 @@ def _serialize(conversation: Conversation, messages: list[Message], leads: list[
         'followup_state': conversation.followup_state or 'pending',
         'reason': reason,
         'reason_label': reason_label,
-        'latest_outbound_status': latest_outbound.status if latest_outbound else None,
-        'latest_outbound_failure_reason': (
-            latest_outbound.failure_reason if latest_outbound else None
-        ),
+        'latest_outbound_status': summary.latest_outbound_status,
+        'latest_outbound_failure_reason': summary.latest_outbound_failure_reason,
         'waiting_days': waiting_days,
-        'reply_count': len(inbound),
-        'message_count': len(messages),
-        'first_reply_at': inbound[0].created_at if inbound else None,
-        'last_reply_at': last_reply.created_at if last_reply else None,
+        'reply_count': summary.reply_count,
+        'message_count': summary.message_count,
+        'first_reply_at': summary.first_reply_at,
+        'last_reply_at': summary.last_reply_at,
         'latest_message': latest.text if latest else None,
         'latest_message_at': latest.created_at if latest else None,
         'created_at': conversation.created_at,
@@ -238,7 +312,7 @@ def _serialize_one(session: Session, conversation: Conversation, user: User) -> 
     leads = (session.query(Lead)
              .filter(Lead.conversation_id == conversation.id)
              .order_by(Lead.id).all())
-    return _serialize(conversation, messages, leads, datetime.utcnow(),
+    return _serialize(conversation, _summary_from_messages(messages), leads, datetime.utcnow(),
                       _campaign_names(session, user))
 
 
@@ -259,6 +333,13 @@ def list_followups(
     return _cached_followups(session, current_user, state, campaign_id, scope)
 
 
+def _followups_cache_key(user: User, state: str | None, campaign_id: int | None, scope: str):
+    """Cache namespace, dependencies and key — shared by the list and its /load shortcut."""
+    return ('followups', cache.CONVERSATION_TABLES,
+            {'user': user.id, 'role': user.role, 'state': state,
+             'campaign_id': campaign_id, 'scope': scope})
+
+
 def _cached_followups(
     session: Session,
     current_user: User,
@@ -269,10 +350,7 @@ def _cached_followups(
 ) -> list[dict]:
     """Follow-up rows shaped like the response model, served from Redis when fresh."""
     return cache.get_or_load(
-        'followups',
-        cache.CONVERSATION_TABLES,
-        {'user': current_user.id, 'role': current_user.role, 'state': state,
-         'campaign_id': campaign_id, 'scope': scope},
+        *_followups_cache_key(current_user, state, campaign_id, scope),
         lambda: [FollowUpOut(**row).dict() for row in _followups_payload(
             session, current_user, state, campaign_id, scope, progress=progress,
         )],
@@ -304,14 +382,14 @@ def _followups_payload(
     conversations = (session.query(Conversation)
                      .filter(Conversation.id.in_(ids))
                      .all())
-    messages = _messages_by_conversation(session, ids)
+    summaries = _thread_summaries(session, ids)
     leads = _leads_by_conversation(session, current_user, ids)
     campaign_names = _campaign_names(session, current_user)
     now = datetime.utcnow()
 
     rows = []
     for loaded, conversation in enumerate(conversations, start=1):
-        rows.append(_serialize(conversation, messages.get(conversation.id, []),
+        rows.append(_serialize(conversation, summaries.get(conversation.id, _NO_MESSAGES),
                                leads.get(conversation.id, []), now, campaign_names))
         if progress:
             progress(total, loaded)
@@ -376,6 +454,10 @@ def start_followups_load(
                             detail=f"State must be one of: {', '.join(FOLLOWUP_STATES)}.")
     if scope not in {'replied', 'all'}:
         raise HTTPException(status_code=400, detail="Scope must be one of: replied, all.")
+    # Already cached and current: answer now, no job for the browser to poll.
+    cached = cache.peek(*_followups_cache_key(current_user, state, campaign_id, scope))
+    if cached is not None:
+        return {'job_id': None, 'status': 'completed', 'result': cached}
     try:
         job = query_progress.create(current_user.id, 'followups')
     except query_progress.ProgressStoreUnavailable as error:

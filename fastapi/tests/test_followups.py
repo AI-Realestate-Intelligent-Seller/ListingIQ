@@ -562,3 +562,43 @@ def test_no_reply_suggestions_for_an_opted_out_owner(client, make_user, auth_hea
 
     response = client.post(f'{FOLLOWUPS_URL}/{conversation_id}/reply-suggestions', headers=headers)
     assert response.status_code == 409
+
+
+def test_sql_thread_summaries_match_reading_every_message(make_user, session):
+    """The card summary computed in SQL equals the one built from the full history."""
+    from datetime import datetime, timedelta
+
+    from app.models import Conversation, Message
+    from app.routes import followups as followups_route
+
+    owner = make_user('summary-owner@example.test', role='broker')
+    busy = Conversation(contact='+13125550170', user_id=owner.id)
+    quiet = Conversation(contact='+13125550171', user_id=owner.id)
+    silent = Conversation(contact='+13125550172', user_id=owner.id)
+    session.add_all([busy, quiet, silent])
+    session.flush()
+    at = datetime(2026, 10, 1, 9, 0, 0)
+    session.add_all([
+        Message(conversation_id=busy.id, direction='outbound', text='hello', status='delivered', created_at=at),
+        Message(conversation_id=busy.id, direction='inbound', text='who is this', created_at=at + timedelta(minutes=3)),
+        # Same timestamp: the later id wins, as in ORDER BY created_at, id.
+        Message(conversation_id=busy.id, direction='outbound', text='reply A', status='failed',
+                failure_reason='carrier rejected', created_at=at + timedelta(minutes=5)),
+        Message(conversation_id=busy.id, direction='outbound', text='reply B', status='sent',
+                created_at=at + timedelta(minutes=5)),
+        Message(conversation_id=busy.id, direction='inbound', text='ok thanks', created_at=at + timedelta(minutes=9)),
+        Message(conversation_id=quiet.id, direction='outbound', text='first touch', status='queued', created_at=at),
+    ])
+    session.commit()
+
+    ids = [busy.id, quiet.id, silent.id]
+    in_sql = followups_route._thread_summaries(session, ids)
+    for conversation_id in ids:
+        history = (session.query(Message).filter(Message.conversation_id == conversation_id)
+                   .order_by(Message.created_at, Message.id).all())
+        expected = followups_route._summary_from_messages(history)
+        assert in_sql.get(conversation_id, followups_route._NO_MESSAGES) == expected
+
+    assert in_sql[busy.id].latest_outbound_status == 'sent'
+    assert in_sql[busy.id].reply_count == 2
+    assert silent.id not in in_sql

@@ -55,12 +55,15 @@ def list_campaigns(current_user: User = Depends(get_current_user),
     return _cached_overview(session, current_user)
 
 
+def _campaigns_cache_key(user: User):
+    """Cache namespace, dependencies and key — shared by the list and its /load shortcut."""
+    return ('campaigns', cache.DASHBOARD_TABLES, {'user': user.id, 'role': user.role})
+
+
 def _cached_overview(session: Session, user: User, progress=None) -> list[dict]:
     """Campaign list with counts, served from Redis when fresh."""
     return cache.get_or_load(
-        'campaigns',
-        cache.DASHBOARD_TABLES,
-        {'user': user.id, 'role': user.role},
+        *_campaigns_cache_key(user),
         lambda: campaign_service.overview(session, user, progress=progress),
     )
 
@@ -131,6 +134,10 @@ def start_campaign_load(
 ):
     """Start a counted campaign query whose progress is held in Redis."""
     _require_access(current_user)
+    # Already cached and current: answer now, no job for the browser to poll.
+    cached = cache.peek(*_campaigns_cache_key(current_user))
+    if cached is not None:
+        return {'job_id': None, 'status': 'completed', 'result': cached}
     try:
         job = query_progress.create(current_user.id, 'campaigns')
     except query_progress.ProgressStoreUnavailable as error:

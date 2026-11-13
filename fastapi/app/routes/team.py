@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .. import cache
@@ -67,36 +68,37 @@ def brokerage_overview(
 
 
 def _build_brokerage_overview(session: Session, current_user: User) -> dict:
+    """HOB metrics. Each query selects only the columns a metric needs."""
     user_ids = brokerage_user_ids(session, current_user)
     month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    leads = session.query(Lead).filter(Lead.user_id.in_(user_ids)).all()
+    lead_phone_rows = session.query(Lead.phone).filter(Lead.user_id.in_(user_ids)).all()
     campaigns_sent = (session.query(Campaign)
                       .filter(Campaign.user_id.in_(user_ids),
                               Campaign.status == 'sent',
                               Campaign.sent_at >= month_start)
                       .count())
 
-    outreach = (session.query(Message)
-                .join(Conversation, Conversation.id == Message.conversation_id)
-                .filter(Conversation.user_id.in_(user_ids),
-                        Message.direction == 'outbound',
-                        Message.campaign_id.isnot(None))
-                .all())
-    outreach_conversation_ids = {message.conversation_id for message in outreach}
+    outreach_conversation_ids = {row[0] for row in (
+        session.query(Message.conversation_id)
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .filter(Conversation.user_id.in_(user_ids),
+                Message.direction == 'outbound',
+                Message.campaign_id.isnot(None))
+        .distinct().all())}
     replied_ids = set()
     if outreach_conversation_ids:
         replied_ids = {row[0] for row in session.query(Message.conversation_id)
                        .filter(Message.conversation_id.in_(outreach_conversation_ids),
                                Message.direction == 'inbound').distinct().all()}
 
-    conversations = (session.query(Conversation)
+    conversations = (session.query(Conversation.id, Conversation.handled_by)
                      .filter(Conversation.user_id.in_(user_ids)).all())
-    conversation_ids = [conversation.id for conversation in conversations]
+    conversation_ids = [row.id for row in conversations]
     messages = ([] if not conversation_ids else
-                session.query(Message)
+                session.query(Message.conversation_id, Message.direction, Message.created_at)
                 .filter(Message.conversation_id.in_(conversation_ids))
                 .order_by(Message.conversation_id, Message.created_at, Message.id).all())
-    grouped: dict[int, list[Message]] = {}
+    grouped: dict[int, list] = {}
     for message in messages:
         grouped.setdefault(message.conversation_id, []).append(message)
 
@@ -108,35 +110,44 @@ def _build_brokerage_overview(session: Session, current_user: User) -> dict:
     )
     response_seconds = []
     for rows in grouped.values():
-        for index, message in enumerate(rows):
-            if message.direction != 'inbound' or not message.created_at:
-                continue
-            response = next((row for row in rows[index + 1:]
-                             if row.direction == 'outbound' and row.created_at), None)
-            if response:
-                response_seconds.append(max((response.created_at - message.created_at).total_seconds(), 0))
+        # Walk each thread backwards so every inbound message is paired with the
+        # first later outbound reply in one pass (was a rescan per message).
+        next_reply_at = None
+        paired = []
+        for message in reversed(rows):
+            if message.direction == 'outbound' and message.created_at:
+                next_reply_at = message.created_at
+            elif message.direction == 'inbound' and message.created_at and next_reply_at:
+                paired.append(max((next_reply_at - message.created_at).total_seconds(), 0))
+        response_seconds.extend(reversed(paired))
 
-    bookings = (session.query(Booking)
+    bookings = (session.query(Booking.created_at, Booking.phone)
                 .filter(Booking.user_id.in_(user_ids)).all())
     bookings_this_month = sum(1 for booking in bookings
                               if booking.created_at and booking.created_at >= month_start)
-    lead_phones = {lead.phone for lead in leads if lead.phone}
+    lead_phones = {row.phone for row in lead_phone_rows if row.phone}
     booked_lead_phones = {booking.phone for booking in bookings if booking.phone in lead_phones}
 
     members = (session.query(User)
                .filter(User.id.in_(user_ids), User.role.in_(('broker', 'agent')), User.is_active.is_(True))
                .order_by(User.role, User.full_name).all())
-    workload = []
-    for member in members:
-        count = ((session.query(Lead).filter(Lead.assigned_agent_id == member.id).count())
-                 if member.role == 'agent' else
-                 session.query(Lead).filter(Lead.user_id == member.id).count())
-        workload.append({'user_id': member.id, 'name': member.full_name or member.email,
-                         'role': member.role, 'lead_count': count})
+    # Two grouped counts for the whole team instead of one COUNT per member.
+    agent_ids = [member.id for member in members if member.role == 'agent']
+    broker_ids = [member.id for member in members if member.role != 'agent']
+    assigned = dict(session.query(Lead.assigned_agent_id, func.count(Lead.id))
+                    .filter(Lead.assigned_agent_id.in_(agent_ids))
+                    .group_by(Lead.assigned_agent_id).all()) if agent_ids else {}
+    owned = dict(session.query(Lead.user_id, func.count(Lead.id))
+                 .filter(Lead.user_id.in_(broker_ids))
+                 .group_by(Lead.user_id).all()) if broker_ids else {}
+    workload = [{'user_id': member.id, 'name': member.full_name or member.email,
+                 'role': member.role,
+                 'lead_count': (assigned if member.role == 'agent' else owned).get(member.id, 0)}
+                for member in members]
 
     total_outreach = len(outreach_conversation_ids)
     return {
-        'total_leads': len(leads),
+        'total_leads': len(lead_phone_rows),
         'campaigns_sent_this_month': campaigns_sent,
         'campaign_conversations': total_outreach,
         'campaign_replied': len(replied_ids),
