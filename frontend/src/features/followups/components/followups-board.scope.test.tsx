@@ -60,12 +60,12 @@ afterEach(() => {
 
 describe("FollowUpsBoard outcome filter", () => {
   it("shows four outcome tabs and loads every conversation once", async () => {
-    render(<FollowUpsBoard initialCategory="leads" />);
+    render(<FollowUpsBoard />);
 
     const group = screen.getByRole("group", { name: "Conversation scope" });
     expect(group).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Leads" }).getAttribute("aria-pressed")).toBe("true");
-    for (const label of ["Others", "Not replied", "All"]) {
+    expect(screen.getByRole("button", { name: "Replied" }).getAttribute("aria-pressed")).toBe("true");
+    for (const label of ["Leads", "Not replied", "All"]) {
       expect(screen.getByRole("button", { name: label })).toBeTruthy();
     }
 
@@ -116,7 +116,7 @@ describe("FollowUpsBoard outcome filter", () => {
       created_at: "2026-10-08T14:30:00Z",
     }]);
 
-    render(<FollowUpsBoard />);
+    render(<FollowUpsBoard initialCategory="not_replied" />);
 
     const waitingLabel = await screen.findByText("Waiting for first reply");
     expect(waitingLabel.classList.contains("reason-reply_needed")).toBe(true);

@@ -99,7 +99,7 @@ function isPositiveLead(item: FollowUp): boolean {
 export function FollowUpsBoard({
   focusConversationId = null,
   campaignId = null,
-  initialCategory = "all",
+  initialCategory = "others",
   onConversationChange,
 }: FollowUpsBoardProps) {
   const [followUps, setFollowUps] = useState<FollowUp[]>([]);
@@ -533,8 +533,8 @@ useEffect(() => {
       <div className="followups-layout">
         <aside className="followups-list-panel">
           <div className="followups-scope" role="group" aria-label="Conversation scope">
-            {(["leads", "others", "not_replied", "all"] as const).map((item) => {
-              const label = item === "leads" ? "Leads" : item === "others" ? "Others" : item === "not_replied" ? "Not replied" : "All";
+            {(["others", "not_replied", "leads", "all"] as const).map((item) => {
+              const label = item === "leads" ? "Leads" : item === "others" ? "Replied" : item === "not_replied" ? "Not replied" : "All";
               return (
                 <button
                   key={item}

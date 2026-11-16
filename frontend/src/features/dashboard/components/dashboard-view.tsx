@@ -143,7 +143,10 @@ function CommunicationSummaryCards({
           aria-label={`Open ${totals.total_positive_leads.toLocaleString()} positive leads in Follow-ups`}
           onClick={onOpenPositiveLeads}
         >
-          {totals.total_positive_leads.toLocaleString()}
+          <span>{totals.total_positive_leads.toLocaleString()}</span>
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M4 10h11M11 6l4 4-4 4" />
+          </svg>
         </button>
         <small>Sent to Lofty · Appointment to confirm</small>
       </article>
@@ -300,7 +303,7 @@ export function DashboardView() {
   const [draftCampaignId, setDraftCampaignId] = useState<number | null>(null);
   /** Set when Campaigns sends the broker to one campaign's replies. */
   const [followUpCampaignId, setFollowUpCampaignId] = useState<number | null>(null);
-  const [followUpCategory, setFollowUpCategory] = useState<FollowUpCategory>("all");
+  const [followUpCategory, setFollowUpCategory] = useState<FollowUpCategory>("others");
   const [hobOverview, setHobOverview] = useState<BrokerageOverview | null>(null);
   const [hobOverviewError, setHobOverviewError] = useState("");
   const [agentOverview, setAgentOverview] = useState<AgentOverview | null>(null);
@@ -516,6 +519,7 @@ useEffect(() => {
 
   /** Choosing a tab closes the drawer so the phone lands on the content. */
   function openTab(tab: DashboardTab): void {
+    if (tab === "followups") setFollowUpCategory("others");
     navigateDashboard({ view: tab });
   }
 
