@@ -15,6 +15,7 @@ import type { AuthUser, BrokerageOverview, DirectoryMember, InvitableRole } from
 import { createInvitation, getBrokerageOverview, getTeamDirectory } from "@/features/auth/api/auth-api";
 import { CampaignsView } from "@/features/campaigns/components/campaigns-view";
 import { FollowUpsBoard } from "@/features/followups/components/followups-board";
+import type { FollowUpCategory } from "@/features/followups/components/followups-board";
 import { LeadPool } from "@/features/leads/components/lead-pool";
 import { AssignmentsView } from "@/features/assignments/components/assignments-view";
 import { AgentLeadsView } from "@/features/assignments/components/agent-leads-view";
@@ -112,7 +113,13 @@ function assignmentDonut(overview: AgentOverview): string {
   return `conic-gradient(#b8863b 0 ${newEnd}%, #5c9789 ${newEnd}% ${progressEnd}%, var(--blue) ${progressEnd}% 100%)`;
 }
 
-function CommunicationSummaryCards({ totals }: { totals: DashboardCommunicationTotals }) {
+function CommunicationSummaryCards({
+  totals,
+  onOpenPositiveLeads,
+}: {
+  totals: DashboardCommunicationTotals;
+  onOpenPositiveLeads: () => void;
+}) {
   const cards = [
     ["Total campaigns", totals.total_campaigns],
     ["Leads outreached", totals.total_leads_outreached],
@@ -130,7 +137,14 @@ function CommunicationSummaryCards({ totals }: { totals: DashboardCommunicationT
       ))}
       <article className="dashboard-summary-outcomes">
         <span>Positive replies</span>
-        <strong>{totals.total_positive_leads.toLocaleString()}</strong>
+        <button
+          type="button"
+          className="dashboard-summary-value-button"
+          aria-label={`Open ${totals.total_positive_leads.toLocaleString()} positive leads in Follow-ups`}
+          onClick={onOpenPositiveLeads}
+        >
+          {totals.total_positive_leads.toLocaleString()}
+        </button>
         <small>Sent to Lofty · Appointment to confirm</small>
       </article>
       <article>
@@ -149,7 +163,7 @@ function LeadConversionRate({ overview }: { overview: BrokerageOverview }) {
   const used = Math.min(overview.total_leads_outreached, total);
   const remaining = overview.remaining_leads_in_pool;
   const other = overview.other_leads;
-  const rate = total ? (positive / total) * 100 : 0;
+  const rate = used ? (positive / used) * 100 : 0;
 
   return (
     <section className="hob-performance-section hob-conversion-card">
@@ -286,6 +300,7 @@ export function DashboardView() {
   const [draftCampaignId, setDraftCampaignId] = useState<number | null>(null);
   /** Set when Campaigns sends the broker to one campaign's replies. */
   const [followUpCampaignId, setFollowUpCampaignId] = useState<number | null>(null);
+  const [followUpCategory, setFollowUpCategory] = useState<FollowUpCategory>("all");
   const [hobOverview, setHobOverview] = useState<BrokerageOverview | null>(null);
   const [hobOverviewError, setHobOverviewError] = useState("");
   const [agentOverview, setAgentOverview] = useState<AgentOverview | null>(null);
@@ -908,6 +923,7 @@ useEffect(() => {
             key={notificationNavigationId}
             focusConversationId={focusConversationId}
             campaignId={followUpCampaignId}
+            initialCategory={followUpCategory}
             onConversationChange={recordFollowUpConversation}
           />
         ) : null}
@@ -917,8 +933,8 @@ useEffect(() => {
         {pendingPersonaNavigation ? <UnsavedChangesDialog onStay={() => setPendingPersonaNavigation(null)} onDiscard={() => { const action = pendingPersonaNavigation; personaDirtyRef.current = false; setPendingPersonaNavigation(null); navigateDashboard(action); }} /> : null}
         {view === "overview" ? (
         <>
-        {user.role === "hob" && hobOverview ? <CommunicationSummaryCards totals={hobOverview} /> : null}
-        {user.role === "broker" && brokerOverview ? <CommunicationSummaryCards totals={brokerOverview} /> : null}
+        {user.role === "hob" && hobOverview ? <CommunicationSummaryCards totals={hobOverview} onOpenPositiveLeads={() => { setFollowUpCategory("leads"); navigateDashboard({ view: "followups" }); }} /> : null}
+        {user.role === "broker" && brokerOverview ? <CommunicationSummaryCards totals={brokerOverview} onOpenPositiveLeads={() => { setFollowUpCategory("leads"); navigateDashboard({ view: "followups" }); }} /> : null}
         <section className="dashboard-panel">
           {user.role === "agent" ? (
             <div>

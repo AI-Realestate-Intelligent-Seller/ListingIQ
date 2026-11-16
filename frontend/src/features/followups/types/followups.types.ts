@@ -44,6 +44,7 @@ export type FollowUp = {
   queue_status: QueueStatus;
   dnc_alert: boolean;
   meeting_booked: boolean;
+  sent_to_lofty: boolean;
   followup_state: FollowUpState;
   reason: FollowUpReason;
   reason_label: string;

@@ -54,12 +54,12 @@
 .followups-search { display: block; }
 
 .followups-scope {
-  display: grid; grid-template-columns: 1fr 1fr; padding: 3px;
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); padding: 3px;
   border: 1px solid var(--line); border-radius: 10px; background: var(--paper);
 }
 .followups-scope button {
-  padding: 7px 10px; border: 0; border-radius: 7px; background: transparent;
-  color: var(--muted); font: inherit; font-size: 12px; font-weight: 700; cursor: pointer;
+  min-width: 0; padding: 7px 5px; border: 0; border-radius: 7px; background: transparent;
+  color: var(--muted); font: inherit; font-size: 10px; font-weight: 700; cursor: pointer;
 }
 .followups-scope button.active {
   background: var(--white); color: #0f5548; box-shadow: 0 1px 4px rgba(20, 40, 35, .1);
@@ -89,7 +89,8 @@
 /* The reason line is the triage: colour carries the same order the API uses. */
 .followup-reason { font-size: 12px; font-weight: 700; color: #4a5568; }
 .followup-reason.reason-reply_needed { color: #b45309; }
-.followup-reason.reason-appointment_pending { color: #8a5a00; }
+.followup-reason.reason-appointment_pending,
+.followup-reason.reason-location_discussion { color: #8a5a00; }
 .followup-reason.reason-appointment_booked { color: #0f5548; }
 .followup-reason.reason-no_response { color: #b42318; }
 .followup-reason.reason-delivery_failed { color: #8a5a00; }

@@ -28,7 +28,7 @@ from ..leads.service import split_signals
 from ..location.geocoding_service import build_query
 from ..lofty import export as lofty_export
 from ..logger import get_logger
-from ..models import Campaign, Conversation, Lead, Message, User
+from ..models import Campaign, Conversation, Lead, LoftyExport, Message, User
 from ..schemas import (
     FOLLOWUP_STATES,
     FollowUpAppointmentRequest,
@@ -249,7 +249,8 @@ def _campaign_names(session: Session, user: User) -> dict[int, str]:
 
 
 def _serialize(conversation: Conversation, summary: _ThreadSummary, leads: list[Lead],
-               now: datetime, campaign_names: dict[int, str] | None = None) -> dict:
+               now: datetime, campaign_names: dict[int, str] | None = None,
+               sent_to_lofty: bool = False) -> dict:
     lead = next((row for row in leads if row.property_address == conversation.property_address),
                 leads[-1] if leads else None)
     latest = summary.latest
@@ -288,6 +289,7 @@ def _serialize(conversation: Conversation, summary: _ThreadSummary, leads: list[
         'queue_status': conversation.queue_status,
         'dnc_alert': bool(conversation.dnc_alert),
         'meeting_booked': bool(conversation.meeting_booked),
+        'sent_to_lofty': sent_to_lofty,
         'followup_state': conversation.followup_state or 'pending',
         'reason': reason,
         'reason_label': reason_label,
@@ -312,8 +314,12 @@ def _serialize_one(session: Session, conversation: Conversation, user: User) -> 
     leads = (session.query(Lead)
              .filter(Lead.conversation_id == conversation.id)
              .order_by(Lead.id).all())
+    sent_to_lofty = (session.query(LoftyExport.id).filter(
+        LoftyExport.conversation_id == conversation.id,
+        LoftyExport.status == 'completed',
+    ).first() is not None)
     return _serialize(conversation, _summary_from_messages(messages), leads, datetime.utcnow(),
-                      _campaign_names(session, user))
+                      _campaign_names(session, user), sent_to_lofty)
 
 
 @router.get('', response_model=list[FollowUpOut])
@@ -335,7 +341,7 @@ def list_followups(
 
 def _followups_cache_key(user: User, state: str | None, campaign_id: int | None, scope: str):
     """Cache namespace, dependencies and key — shared by the list and its /load shortcut."""
-    return ('followups', cache.CONVERSATION_TABLES,
+    return ('followups-v2', cache.CONVERSATION_TABLES,
             {'user': user.id, 'role': user.role, 'state': state,
              'campaign_id': campaign_id, 'scope': scope})
 
@@ -385,12 +391,17 @@ def _followups_payload(
     summaries = _thread_summaries(session, ids)
     leads = _leads_by_conversation(session, current_user, ids)
     campaign_names = _campaign_names(session, current_user)
+    lofty_completed_ids = {row[0] for row in session.query(LoftyExport.conversation_id).filter(
+        LoftyExport.conversation_id.in_(ids),
+        LoftyExport.status == 'completed',
+    ).all()}
     now = datetime.utcnow()
 
     rows = []
     for loaded, conversation in enumerate(conversations, start=1):
         rows.append(_serialize(conversation, summaries.get(conversation.id, _NO_MESSAGES),
-                               leads.get(conversation.id, []), now, campaign_names))
+                               leads.get(conversation.id, []), now, campaign_names,
+                               conversation.id in lofty_completed_ids))
         if progress:
             progress(total, loaded)
     if campaign_id is not None:

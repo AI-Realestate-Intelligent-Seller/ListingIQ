@@ -189,6 +189,7 @@ class SmsConversationOut(BaseModel):
     queue_status: str
     dnc_alert: bool
     meeting_booked: bool
+    sent_to_lofty: bool = False
     created_at: Optional[datetime]
     latest_message: Optional[str] = None
     latest_message_at: Optional[datetime] = None

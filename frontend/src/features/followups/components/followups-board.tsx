@@ -81,13 +81,25 @@ type FollowUpsBoardProps = {
   focusConversationId?: number | null;
   /** Narrows the board to one campaign's replies, e.g. from the Campaigns tab. */
   campaignId?: number | null;
+  /** Opens the list on a dashboard outcome category. */
+  initialCategory?: FollowUpCategory;
   /** Called when the user opens a chat, so the page URL can carry it. */
   onConversationChange?: (conversationId: number | null) => void;
 };
 
+export type FollowUpCategory = "leads" | "others" | "not_replied" | "all";
+
+function isPositiveLead(item: FollowUp): boolean {
+  return item.reply_count > 0 && item.lead_status !== "dnc" && (
+    item.sent_to_lofty || item.meeting_booked ||
+    ["interested", "ready_to_sell", "location_discussion"].includes(item.lead_status)
+  );
+}
+
 export function FollowUpsBoard({
   focusConversationId = null,
   campaignId = null,
+  initialCategory = "all",
   onConversationChange,
 }: FollowUpsBoardProps) {
   const [followUps, setFollowUps] = useState<FollowUp[]>([]);
@@ -104,9 +116,7 @@ export function FollowUpsBoard({
   const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
   /** The thread whose Send to Lofty dialog is open. */
   const [loftyConversationId, setLoftyConversationId] = useState<number | null>(null);
-  const [scope, setScope] = useState<"replied" | "all">(
-    campaignId === null ? "replied" : "all",
-  );
+  const [category, setCategory] = useState<FollowUpCategory>(initialCategory);
   const [search, setSearch] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [loadProgress, setLoadProgress] = useState<QueryProgress<FollowUp[]> | null>(null);
@@ -138,8 +148,6 @@ export function FollowUpsBoard({
   const viewer = session?.user ?? null;
   /** The AI replies as the signed-in user, so the handover labels use their first name. */
   const aiName = viewer?.first_name?.trim() || "Bobbie";
-  const isAgent = viewer?.role === "agent";
-  const followUpScope = scope;
 
   /** A rejected token means the session is over; stop polling and sign out. */
   const handleApiError = useCallback(
@@ -169,7 +177,7 @@ export function FollowUpsBoard({
         setFollowUps(
           await listFollowUps(
             token,
-            followUpScope,
+            "all",
             undefined,
             signal,
             campaignFilter,
@@ -185,7 +193,7 @@ export function FollowUpsBoard({
         if (!signal?.aborted) setIsLoading(false);
       }
     },
-    [token, followUpScope, selectedCampaignId, handleApiError],
+    [token, selectedCampaignId, handleApiError],
   );
 
   const refreshMessages = useCallback(
@@ -203,6 +211,7 @@ export function FollowUpsBoard({
   // Initial load.
   useEffect(() => {
     const controller = new AbortController();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void refreshFollowUps(controller.signal, true);
     return () => controller.abort();
   }, [refreshFollowUps]);
@@ -222,6 +231,7 @@ export function FollowUpsBoard({
   // Load a thread when the selection changes.
   useEffect(() => {
     if (activeId === null) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setMessages([]);
       return;
     }
@@ -234,7 +244,7 @@ export function FollowUpsBoard({
     if (focusConversationId === null) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setActiveId(focusConversationId);
-    setScope("all");
+    setCategory("all");
   }, [focusConversationId]);
 
   // The campaign list is its own request: a sent campaign with no replies yet
@@ -256,7 +266,7 @@ export function FollowUpsBoard({
     if (campaignId === null) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setSelectedCampaignId(String(campaignId));
-    setScope("all");
+    setCategory("all");
   }, [campaignId]);
 
   // Follow new messages only when the reader is at the bottom; never on a plain refresh.
@@ -298,6 +308,9 @@ export function FollowUpsBoard({
   const selectedCampaign = campaigns.find((item) => String(item.id) === selectedCampaignId);
   const visible = followUps.filter((item) => {
     if (selectedCampaignId && item.campaign_id !== Number(selectedCampaignId)) return false;
+    if (category === "leads" && !isPositiveLead(item)) return false;
+    if (category === "others" && (item.reply_count === 0 || isPositiveLead(item))) return false;
+    if (category === "not_replied" && item.reply_count > 0) return false;
     if (!needle) return true;
     return [item.name, item.contact, item.property_address]
       .filter(Boolean)
@@ -445,7 +458,7 @@ useEffect(() => {
     const conversationId = active.id;
     void runAction(async () => {
       await setHandover(conversationId, to, token);
-      const rows = await listFollowUps(token, scope);
+      const rows = await listFollowUps(token, "all");
       return rows.find((row) => row.id === conversationId) ?? active;
     }, to === "broker"
       ? `You have taken over. Write your reply below — ${aiName} will not answer this thread.`
@@ -520,30 +533,20 @@ useEffect(() => {
       <div className="followups-layout">
         <aside className="followups-list-panel">
           <div className="followups-scope" role="group" aria-label="Conversation scope">
-            <button
-              type="button"
-              className={scope === "replied" ? "active" : undefined}
-              aria-pressed={scope === "replied"}
-              onClick={() => {
-                if (scope === "replied") return;
-                setIsLoading(true);
-                setScope("replied");
-              }}
-            >
-              Replied
-            </button>
-            <button
-              type="button"
-              className={scope === "all" ? "active" : undefined}
-              aria-pressed={scope === "all"}
-              onClick={() => {
-                if (scope === "all") return;
-                setIsLoading(true);
-                setScope("all");
-              }}
-            >
-              All
-            </button>
+            {(["leads", "others", "not_replied", "all"] as const).map((item) => {
+              const label = item === "leads" ? "Leads" : item === "others" ? "Others" : item === "not_replied" ? "Not replied" : "All";
+              return (
+                <button
+                  key={item}
+                  type="button"
+                  className={category === item ? "active" : undefined}
+                  aria-pressed={category === item}
+                  onClick={() => setCategory(item)}
+                >
+                  {label}
+                </button>
+              );
+            })}
           </div>
 
           <label className="sms-search followups-search">
@@ -631,12 +634,8 @@ useEffect(() => {
             {!isLoading && visible.length === 0 ? (
               <p className="sms-muted">
                 {followUps.length === 0
-                  ? followUpScope === "replied"
-                    ? isAgent
-                      ? "No owner replies are assigned to you yet."
-                      : "No owner has replied yet. Switch to All to see every conversation."
-                    : "No conversations yet. Start one to begin outreach."
-                  : "No conversations match the current search and campaign filters."}
+                  ? "No conversations yet. Start one to begin outreach."
+                  : "No conversations match the current category, search, and campaign filters."}
               </p>
             ) : null}
 

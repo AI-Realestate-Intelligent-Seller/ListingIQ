@@ -58,19 +58,21 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("FollowUpsBoard scope filter", () => {
-  it("shows Replied and All to an agent and sends the selected scope", async () => {
-    render(<FollowUpsBoard />);
+describe("FollowUpsBoard outcome filter", () => {
+  it("shows four outcome tabs and loads every conversation once", async () => {
+    render(<FollowUpsBoard initialCategory="leads" />);
 
     const group = screen.getByRole("group", { name: "Conversation scope" });
     expect(group).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Replied" }).getAttribute("aria-pressed")).toBe("true");
-
-    fireEvent.click(screen.getByRole("button", { name: "All" }));
+    expect(screen.getByRole("button", { name: "Leads" }).getAttribute("aria-pressed")).toBe("true");
+    for (const label of ["Others", "Not replied", "All"]) {
+      expect(screen.getByRole("button", { name: label })).toBeTruthy();
+    }
 
     await waitFor(() => {
       expect(request.mock.calls.some((call) => call[1] === "all")).toBe(true);
     });
+    fireEvent.click(screen.getByRole("button", { name: "All" }));
     expect(screen.getByRole("button", { name: "All" }).getAttribute("aria-pressed")).toBe("true");
   });
 
@@ -98,6 +100,7 @@ describe("FollowUpsBoard scope filter", () => {
       queue_status: "completed",
       dnc_alert: false,
       meeting_booked: false,
+      sent_to_lofty: false,
       followup_state: "pending",
       reason: "in_conversation",
       reason_label: "Conversation in progress",
