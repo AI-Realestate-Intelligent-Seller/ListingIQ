@@ -19,7 +19,7 @@ import { LeadPool } from "@/features/leads/components/lead-pool";
 import { AssignmentsView } from "@/features/assignments/components/assignments-view";
 import { AgentLeadsView } from "@/features/assignments/components/agent-leads-view";
 import { getAgentOverview, getBrokerOverviewWithProgress, getMyBroker } from "@/features/assignments/api/assignments-api";
-import type { AgentOverview, BrokerOverview } from "@/features/assignments/types/assignments.types";
+import type { AgentOverview, BrokerOverview, DashboardCommunicationTotals } from "@/features/assignments/types/assignments.types";
 import { CalendarContainer } from "@/features/calendar/calendar-container";
 import { PersonaView, UnsavedChangesDialog } from "@/features/personas/components/persona-view";
 import { NotificationBell} from "./notification-bell";
@@ -110,6 +110,77 @@ function assignmentDonut(overview: AgentOverview): string {
   const newEnd = (overview.new_assignments / overview.assigned_leads) * 100;
   const progressEnd = newEnd + (overview.in_progress_leads / overview.assigned_leads) * 100;
   return `conic-gradient(#b8863b 0 ${newEnd}%, #5c9789 ${newEnd}% ${progressEnd}%, var(--blue) ${progressEnd}% 100%)`;
+}
+
+function CommunicationSummaryCards({ totals }: { totals: DashboardCommunicationTotals }) {
+  const cards = [
+    ["Total campaigns", totals.total_campaigns],
+    ["Leads outreached", totals.total_leads_outreached],
+    ["Leads replied", totals.total_leads_replied],
+    ["Leads opted out", totals.total_leads_opted_out],
+  ] as const;
+
+  return (
+    <section className="dashboard-summary-metrics" aria-label="Communication totals">
+      {cards.map(([label, value]) => (
+        <article key={label}>
+          <span>{label}</span>
+          <strong>{value.toLocaleString()}</strong>
+        </article>
+      ))}
+      <article className="dashboard-summary-outcomes">
+        <span>Positive replies</span>
+        <strong>{totals.total_positive_leads.toLocaleString()}</strong>
+        <small>Sent to Lofty · Appointment to confirm</small>
+      </article>
+      <article>
+        <span>Other replies</span>
+        <strong>{totals.total_other_reply_leads.toLocaleString()}</strong>
+        <small>Other, wrong info, or realtor replies</small>
+      </article>
+    </section>
+  );
+}
+
+function LeadConversionRate({ overview }: { overview: BrokerageOverview }) {
+  const total = overview.total_leads;
+  const replied = Math.min(overview.campaign_replied, total);
+  const positive = Math.min(overview.total_positive_leads, replied);
+  const used = Math.min(overview.total_leads_outreached, total);
+  const remaining = overview.remaining_leads_in_pool;
+  const other = overview.other_leads;
+  const rate = total ? (positive / total) * 100 : 0;
+
+  return (
+    <section className="hob-performance-section hob-conversion-card">
+      <div><span>LEAD CONVERSION</span><h3>Pipeline outcomes</h3></div>
+      <div className="hob-conversion-rate">
+        <strong>{rate.toFixed(1)}%</strong>
+        <span>lead-to-positive-outcome rate</span>
+      </div>
+      <dl className="hob-conversion-totals">
+        <div><dt>Total leads</dt><dd>{total.toLocaleString()}</dd></div>
+        <div><dt>Used</dt><dd>{used.toLocaleString()}</dd></div>
+        <div><dt>Remaining in pool</dt><dd>{remaining.toLocaleString()}</dd></div>
+        <div>
+          <dt>
+            Other
+            <span className="metric-info" tabIndex={0} aria-label="Show Other leads breakdown">
+              i
+              <span className="metric-info-tooltip" role="tooltip">
+                <b>Other leads</b>
+                <span>Confirmed non-mobile <strong>{overview.other_lead_breakdown.confirmed_non_mobile.toLocaleString()}</strong></span>
+                <span>Reserved in draft campaigns <strong>{overview.other_lead_breakdown.reserved_in_draft_campaigns.toLocaleString()}</strong></span>
+                <span>Campaign send not accepted <strong>{overview.other_lead_breakdown.campaign_send_not_accepted.toLocaleString()}</strong></span>
+                <span>Other unavailable <strong>{overview.other_lead_breakdown.other_unavailable.toLocaleString()}</strong></span>
+              </span>
+            </span>
+          </dt>
+          <dd>{other.toLocaleString()}</dd>
+        </div>
+      </dl>
+    </section>
+  );
 }
 
 const ROLE_LABELS: Record<InvitableRole, string> = {
@@ -846,52 +917,32 @@ useEffect(() => {
         {pendingPersonaNavigation ? <UnsavedChangesDialog onStay={() => setPendingPersonaNavigation(null)} onDiscard={() => { const action = pendingPersonaNavigation; personaDirtyRef.current = false; setPendingPersonaNavigation(null); navigateDashboard(action); }} /> : null}
         {view === "overview" ? (
         <>
+        {user.role === "hob" && hobOverview ? <CommunicationSummaryCards totals={hobOverview} /> : null}
+        {user.role === "broker" && brokerOverview ? <CommunicationSummaryCards totals={brokerOverview} /> : null}
         <section className="dashboard-panel">
-          <div>
-            <span>RECENT ACTIVITY</span>
-            <h2>{user.role === "agent" ? "Your assigned tasks" : "Your Listing pipeline"}</h2>
-          </div>
+          {user.role === "agent" ? (
+            <div>
+              <span>RECENT ACTIVITY</span>
+              <h2>Your assigned tasks</h2>
+            </div>
+          ) : null}
           {user.role === "hob" && hobOverview ? (
             <div className="hob-analytics-grid">
-              <article className="hob-analytics-card hob-campaign-chart">
-                <div><span>CAMPAIGN PERFORMANCE</span><h3>Replies</h3></div>
-                <div className="hob-donut-row">
-                  <div className="hob-donut" style={{ background: `conic-gradient(var(--blue) 0 ${hobOverview.campaign_reply_rate}%, #e5e7e2 ${hobOverview.campaign_reply_rate}% 100%)` }}>
-                    <div><strong>{hobOverview.campaign_reply_rate}%</strong><small>reply rate</small></div>
+              <article className="hob-analytics-card hob-combined-performance-card">
+                <section className="hob-performance-section hob-campaign-chart">
+                  <div><span>CAMPAIGN PERFORMANCE</span><h3>Replies</h3></div>
+                  <div className="hob-reply-rate">
+                    <strong>{hobOverview.campaign_reply_rate}%</strong>
+                    <span>reply rate</span>
                   </div>
-                  <dl><div><dt>Replied</dt><dd>{hobOverview.campaign_replied}</dd></div><div><dt>No reply</dt><dd>{Math.max(hobOverview.campaign_conversations - hobOverview.campaign_replied, 0)}</dd></div></dl>
-                </div>
+                  <dl className="hob-reply-totals">
+                    <div><dt>Replied</dt><dd>{hobOverview.campaign_replied}</dd></div>
+                    <div><dt>No reply</dt><dd>{Math.max(hobOverview.campaign_conversations - hobOverview.campaign_replied, 0)}</dd></div>
+                  </dl>
+                </section>
+                <LeadConversionRate overview={hobOverview} />
               </article>
 
-              <article className="hob-analytics-card hob-funnel-card">
-                <div><span>LEAD CONVERSION</span><h3>Pipeline funnel</h3></div>
-                <div className="hob-funnel">
-                  <div><label><span>Total leads</span><b>{hobOverview.total_leads}</b></label><i style={{ width: "100%" }} /></div>
-                  <div><label><span>Replied</span><b>{hobOverview.campaign_replied}</b></label><i style={{ width: `${hobOverview.total_leads ? Math.max((hobOverview.campaign_replied / hobOverview.total_leads) * 100, 4) : 0}%` }} /></div>
-                  <div><label><span>Appointments</span><b>{hobOverview.booked_leads}</b></label><i style={{ width: `${hobOverview.total_leads ? Math.max((hobOverview.booked_leads / hobOverview.total_leads) * 100, 4) : 0}%` }} /></div>
-                </div>
-                <small>{hobOverview.lead_to_appointment_rate}% lead-to-appointment rate</small>
-              </article>
-
-              <article className="hob-analytics-card hob-attention-card">
-                <div><span>ATTENTION QUEUE</span><h3>Follow-up health</h3></div>
-                <div className="hob-paired-metrics"><div><strong>{hobOverview.replies_requiring_attention}</strong><small>Replies need attention</small></div><div><strong>{formatResponseTime(hobOverview.average_response_seconds)}</strong><small>Average response time</small></div></div>
-              </article>
-
-              <article className="hob-analytics-card hob-monthly-card">
-                <div><span>MONTHLY ACTIVITY</span><h3>This month</h3></div>
-                <div className="hob-paired-metrics"><div><strong>{hobOverview.campaigns_sent_this_month}</strong><small>Campaigns sent</small></div><div><strong>{hobOverview.appointments_booked_this_month}</strong><small>Appointments booked</small></div></div>
-              </article>
-
-              <article className="hob-analytics-card hob-workload-card">
-                <div><span>TEAM WORKLOAD</span><h3>Lead distribution</h3></div>
-                <div className="hob-workload-list">
-                  {hobOverview.workload.length ? hobOverview.workload.map((member) => {
-                    const maximum = Math.max(...hobOverview.workload.map((item) => item.lead_count), 1);
-                    return <div key={member.user_id} className="hob-workload-row"><label><span>{member.name}</span><small>{member.role === "broker" ? "Broker" : "Agent"}</small><b>{member.lead_count}</b></label><i><span style={{ width: `${(member.lead_count / maximum) * 100}%` }} /></i></div>;
-                  }) : <p className="sms-muted">No active brokers or agents yet.</p>}
-                </div>
-              </article>
             </div>
           ) : null}
           {user.role === "hob" && !hobOverview && !hobOverviewError ? (

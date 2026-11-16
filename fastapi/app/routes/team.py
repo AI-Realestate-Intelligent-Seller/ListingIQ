@@ -19,6 +19,8 @@ from .. import cache
 from ..auth import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token, hash_password
 from ..core.email import EmailDeliveryError, build_invitation_url, send_invitation_email
 from ..logger import get_logger
+from ..dashboard_metrics import communication_totals
+from ..leads import service as leads_service
 from ..models import Booking, Campaign, Conversation, Invitation, Lead, Message, User
 from ..schemas import (
     INVITABLE_ROLES,
@@ -60,7 +62,7 @@ def brokerage_overview(
     if current_user.role != 'hob':
         raise HTTPException(status_code=403, detail='Only a Head of Brokerage can view brokerage analytics.')
     return cache.get_or_load(
-        'brokerage-overview',
+        'brokerage-overview-v4',
         cache.DASHBOARD_TABLES,
         {'user': current_user.id, 'brokerage': current_user.brokerage_id},
         lambda: _build_brokerage_overview(session, current_user),
@@ -78,20 +80,12 @@ def _build_brokerage_overview(session: Session, current_user: User) -> dict:
                               Campaign.sent_at >= month_start)
                       .count())
 
-    outreach_conversation_ids = {row[0] for row in (
-        session.query(Message.conversation_id)
-        .join(Conversation, Conversation.id == Message.conversation_id)
-        .filter(Conversation.user_id.in_(user_ids),
-                Message.direction == 'outbound',
-                Message.campaign_id.isnot(None))
-        .distinct().all())}
-    replied_ids = set()
-    if outreach_conversation_ids:
-        replied_ids = {row[0] for row in session.query(Message.conversation_id)
-                       .filter(Message.conversation_id.in_(outreach_conversation_ids),
-                               Message.direction == 'inbound').distinct().all()}
-
-    conversations = (session.query(Conversation.id, Conversation.handled_by)
+    conversations = (session.query(
+        Conversation.id,
+        Conversation.handled_by,
+        Conversation.lead_status,
+        Conversation.meeting_booked,
+    )
                      .filter(Conversation.user_id.in_(user_ids)).all())
     conversation_ids = [row.id for row in conversations]
     messages = ([] if not conversation_ids else
@@ -107,6 +101,8 @@ def _build_brokerage_overview(session: Session, current_user: User) -> dict:
         if grouped.get(conversation.id)
         and grouped[conversation.id][-1].direction == 'inbound'
         and conversation.handled_by == 'broker'
+        and conversation.lead_status not in ('dnc', 'realtor', 'wrong_info', 'not_interested', 'no_response')
+        and not conversation.meeting_booked
     )
     response_seconds = []
     for rows in grouped.values():
@@ -129,29 +125,71 @@ def _build_brokerage_overview(session: Session, current_user: User) -> dict:
     booked_lead_phones = {booking.phone for booking in bookings if booking.phone in lead_phones}
 
     members = (session.query(User)
-               .filter(User.id.in_(user_ids), User.role.in_(('broker', 'agent')), User.is_active.is_(True))
+               .filter(User.id.in_(user_ids), User.role.in_(('hob', 'broker', 'agent')), User.is_active.is_(True))
                .order_by(User.role, User.full_name).all())
     # Two grouped counts for the whole team instead of one COUNT per member.
     agent_ids = [member.id for member in members if member.role == 'agent']
-    broker_ids = [member.id for member in members if member.role != 'agent']
+    owner_ids = [member.id for member in members if member.role != 'agent']
     assigned = dict(session.query(Lead.assigned_agent_id, func.count(Lead.id))
                     .filter(Lead.assigned_agent_id.in_(agent_ids))
                     .group_by(Lead.assigned_agent_id).all()) if agent_ids else {}
     owned = dict(session.query(Lead.user_id, func.count(Lead.id))
-                 .filter(Lead.user_id.in_(broker_ids))
-                 .group_by(Lead.user_id).all()) if broker_ids else {}
+                 .filter(Lead.user_id.in_(owner_ids))
+                 .group_by(Lead.user_id).all()) if owner_ids else {}
     workload = [{'user_id': member.id, 'name': member.full_name or member.email,
                  'role': member.role,
                  'lead_count': (assigned if member.role == 'agent' else owned).get(member.id, 0)}
                 for member in members]
 
-    total_outreach = len(outreach_conversation_ids)
+    communication = communication_totals(session, user_ids)
+    total_outreach = communication['total_leads_outreached']
+    remaining_pool = leads_service.pool_total(session, current_user)
+    total_leads = len(lead_phone_rows)
+    other_leads = max(total_leads - total_outreach - remaining_pool, 0)
+    confirmed_non_mobile = (session.query(Lead.id).filter(
+        Lead.user_id.in_(user_ids),
+        Lead.campaign_id.is_(None),
+        Lead.phone.isnot(None),
+        Lead.phone_line_type.isnot(None),
+        func.lower(Lead.phone_line_type) != 'mobile',
+        Lead.phone_lookup_number == Lead.phone,
+    ).count())
+    campaign_held = (session.query(Lead.id).filter(
+        Lead.user_id.in_(user_ids),
+        Lead.campaign_id.isnot(None),
+    ).count())
+    draft_held = (session.query(Lead.id).join(
+        Campaign, Campaign.id == Lead.campaign_id,
+    ).filter(
+        Lead.user_id.in_(user_ids),
+        Campaign.status == 'draft',
+    ).count())
+    # Keep the tooltip an exact partition of Other even when legacy records do
+    # not have a one-to-one lead/conversation link.
+    non_mobile_other = min(confirmed_non_mobile, other_leads)
+    campaign_held_other = min(
+        max(campaign_held - total_outreach, 0),
+        max(other_leads - non_mobile_other, 0),
+    )
+    draft_held_other = min(draft_held, campaign_held_other)
+    campaign_unsent_other = max(campaign_held_other - draft_held_other, 0)
+    unavailable_other = max(other_leads - non_mobile_other - campaign_held_other, 0)
+    replied = min(communication['total_leads_replied'], total_outreach)
     return {
-        'total_leads': len(lead_phone_rows),
+        **communication,
+        'total_leads': total_leads,
+        'remaining_leads_in_pool': remaining_pool,
+        'other_leads': other_leads,
+        'other_lead_breakdown': {
+            'confirmed_non_mobile': non_mobile_other,
+            'reserved_in_draft_campaigns': draft_held_other,
+            'campaign_send_not_accepted': campaign_unsent_other,
+            'other_unavailable': unavailable_other,
+        },
         'campaigns_sent_this_month': campaigns_sent,
         'campaign_conversations': total_outreach,
-        'campaign_replied': len(replied_ids),
-        'campaign_reply_rate': round((len(replied_ids) / total_outreach * 100) if total_outreach else 0, 1),
+        'campaign_replied': replied,
+        'campaign_reply_rate': round((replied / total_outreach * 100) if total_outreach else 0, 1),
         'replies_requiring_attention': requiring_attention,
         'appointments_booked_this_month': bookings_this_month,
         'booked_leads': len(booked_lead_phones),

@@ -18,7 +18,14 @@ def test_overview_counts_replies_attention_and_workload(make_user, session):
         Lead(user_id=hob.id, phone=None),
     ])
     thread = Conversation(contact='+13125550101', user_id=broker.id, handled_by='broker')
-    session.add(thread)
+    opted_out = Conversation(
+        contact='+13125550109',
+        user_id=broker.id,
+        handled_by='broker',
+        lead_status='dnc',
+        dnc_alert=True,
+    )
+    session.add_all([thread, opted_out])
     session.flush()
     start = datetime(2026, 10, 1, 12, 0, 0)
     session.add_all([
@@ -26,15 +33,24 @@ def test_overview_counts_replies_attention_and_workload(make_user, session):
         Message(conversation_id=thread.id, direction='inbound', created_at=start + timedelta(minutes=1)),
         Message(conversation_id=thread.id, direction='outbound', created_at=start + timedelta(minutes=2)),
         Message(conversation_id=thread.id, direction='inbound', created_at=start + timedelta(minutes=5)),
+        Message(conversation_id=opted_out.id, direction='inbound', created_at=start + timedelta(minutes=6)),
     ])
     session.commit()
 
     overview = team._build_brokerage_overview(session, hob)
 
     assert overview['total_leads'] == 3
-    # Owner spoke last on a broker-handled thread: it needs an answer.
+    assert overview['remaining_leads_in_pool'] == 3
+    assert overview['other_leads'] == 0
+    assert overview['other_lead_breakdown'] == {
+        'confirmed_non_mobile': 0,
+        'reserved_in_draft_campaigns': 0,
+        'campaign_send_not_accepted': 0,
+        'other_unavailable': 0,
+    }
+    # The open owner reply needs an answer; the terminal opt-out does not.
     assert overview['replies_requiring_attention'] == 1
     # Only the first inbound has a later outbound reply, 60 s after it.
     assert overview['average_response_seconds'] == 60
     workload = {row['user_id']: row['lead_count'] for row in overview['workload']}
-    assert workload == {broker.id: 2, agent.id: 1}
+    assert workload == {hob.id: 1, broker.id: 2, agent.id: 1}

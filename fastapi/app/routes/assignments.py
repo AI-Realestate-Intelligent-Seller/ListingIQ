@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..core.email import EmailDeliveryError, send_lead_assigned_email
 from ..db import SessionLocal
+from ..dashboard_metrics import communication_totals
 from ..leads import events as lead_events
 from ..leads.response_analytics import get_agent_response_analytics
 from ..leads.service import serialize
@@ -126,7 +127,7 @@ def _assignments_cache_key(user: User):
 
 
 def _broker_overview_cache_key(user: User):
-    return ('broker-overview', cache.DASHBOARD_TABLES, {'user': user.id, 'role': user.role})
+    return ('broker-overview-v2', cache.DASHBOARD_TABLES, {'user': user.id, 'role': user.role})
 
 
 def _assignment_payload(session: Session, current_user: User, progress=None) -> dict:
@@ -263,10 +264,12 @@ def _build_broker_overview_payload(session: Session, current_user: User, progres
         Conversation.user_id == current_user.id,
         Conversation.meeting_booked.is_(True),
     ).count()
+    communication = communication_totals(session, [current_user.id])
     if progress:
         progress(total, 5)
 
     return {
+        **communication,
         'campaigns_started': len(campaigns),
         'campaigns_completed': len(sent_campaign_ids),
         'campaigns_in_draft': sum(1 for campaign in campaigns if campaign.status == 'draft'),

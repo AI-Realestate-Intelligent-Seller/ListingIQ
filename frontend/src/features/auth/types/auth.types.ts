@@ -49,6 +49,17 @@ export type MessageResponse = {
 
 export type InvitableRole = "broker" | "agent";
 
+export type DashboardCommunicationTotals = {
+  total_campaigns: number;
+  total_leads_outreached: number;
+  total_leads_replied: number;
+  total_leads_opted_out: number;
+  total_positive_leads: number;
+  total_other_reply_leads: number;
+  total_sent_to_lofty: number;
+  total_appointments_to_confirm: number;
+};
+
 /** Response of POST /team/invitations — deliberately free of the raw token. */
 export type InvitationCreatedResponse = {
   message: string;
@@ -67,8 +78,16 @@ export type TeamDirectoryResponse = {
   members: DirectoryMember[];
 };
 
-export type BrokerageOverview = {
+export type BrokerageOverview = DashboardCommunicationTotals & {
   total_leads: number;
+  remaining_leads_in_pool: number;
+  other_leads: number;
+  other_lead_breakdown: {
+    confirmed_non_mobile: number;
+    reserved_in_draft_campaigns: number;
+    campaign_send_not_accepted: number;
+    other_unavailable: number;
+  };
   campaigns_sent_this_month: number;
   campaign_conversations: number;
   campaign_replied: number;
@@ -81,7 +100,7 @@ export type BrokerageOverview = {
   workload: {
     user_id: number;
     name: string;
-    role: InvitableRole;
+    role: InvitableRole | "hob";
     lead_count: number;
   }[];
 };

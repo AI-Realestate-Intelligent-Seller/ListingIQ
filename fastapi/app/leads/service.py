@@ -381,6 +381,11 @@ def _pool_leads(session: Session, user: User) -> list[Lead]:
     return cache[key]
 
 
+def pool_total(session: Session, user: User) -> int:
+    """The exact unfiltered count shown in Lead Pool."""
+    return len(_pool_leads(session, user))
+
+
 def _city_states(locations: list[Location]) -> dict[str, str]:
     """Town -> the one state the pool ever pairs it with, where there is only one.
 

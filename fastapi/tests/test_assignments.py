@@ -101,6 +101,14 @@ def test_broker_overview_reports_campaign_and_assignment_metrics(make_user, sess
     result = broker_overview(broker, session)
 
     assert result == {
+        'total_campaigns': 2,
+        'total_leads_outreached': 0,
+        'total_leads_replied': 1,
+        'total_leads_opted_out': 0,
+        'total_positive_leads': 1,
+        'total_other_reply_leads': 0,
+        'total_sent_to_lofty': 0,
+        'total_appointments_to_confirm': 0,
         'campaigns_started': 2,
         'campaigns_completed': 1,
         'campaigns_in_draft': 1,

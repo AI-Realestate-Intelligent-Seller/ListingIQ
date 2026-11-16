@@ -113,6 +113,25 @@
 .dashboard-metrics span { color: var(--muted); font-size: 12px; }
 .dashboard-metrics strong { font-size: 34px; letter-spacing: -.04em; }
 .dashboard-metrics small { color: #2f8a72; }
+.dashboard-summary-metrics {
+  margin: 28px 0 20px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+  gap: 14px;
+}
+.dashboard-summary-metrics article {
+  min-width: 0;
+  padding: 18px 20px;
+  display: grid;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(20,25,22,.07);
+}
+.dashboard-summary-metrics span { color: var(--muted); font-size: 12px; }
+.dashboard-summary-metrics strong { font-size: 30px; letter-spacing: -.04em; }
+.dashboard-summary-metrics article > small { color: var(--muted); font-size: 11px; line-height: 1.35; }
 .broker-analytics-grid { margin-top: 22px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .broker-analytics-card { min-width: 0; padding: 18px 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: 0 1px 2px rgba(20,25,22,.07); }
 .broker-analytics-card > div:first-child > span { color: var(--blue); font-size: 9px; font-weight: 800; letter-spacing: .13em; }
@@ -212,6 +231,17 @@
 .hob-analytics-card > div:first-child > span { color: var(--blue); font-size: 9px; font-weight: 800; letter-spacing: .13em; }
 .hob-analytics-card h3 { margin: 5px 0 0; font-size: 17px; }
 .hob-analytics-card > small { display: block; margin-top: 12px; color: var(--muted); font-size: 11px; }
+.hob-combined-performance-card { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; padding: 0; }
+.hob-performance-section { min-width: 0; padding: 20px; }
+.hob-performance-section > div:first-child > span { color: var(--blue); font-size: 9px; font-weight: 800; letter-spacing: .13em; }
+.hob-performance-section h3 { margin: 5px 0 0; font-size: 17px; }
+.hob-reply-rate { margin-top: 20px; padding: 18px; border-radius: 10px; background: var(--accent-soft); text-align: center; }
+.hob-reply-rate strong { display: block; color: var(--blue-dark); font-size: 48px; line-height: 1; letter-spacing: -.055em; }
+.hob-reply-rate span { display: block; margin-top: 7px; color: var(--muted); font-size: 11px; }
+.hob-reply-totals { margin: 16px 0 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.hob-reply-totals div { min-width: 0; padding: 10px; border-radius: 8px; background: var(--surface-2); text-align: center; }
+.hob-reply-totals dt { color: var(--muted); font-size: 10px; }
+.hob-reply-totals dd { margin: 5px 0 0; font-size: 15px; font-weight: 750; }
 .hob-donut-row { margin-top: 18px; display: flex; align-items: center; justify-content: center; gap: 28px; }
 .hob-donut { width: 138px; height: 138px; flex: 0 0 138px; display: grid; place-items: center; border-radius: 50%; }
 .hob-donut > div { width: 96px; height: 96px; display: grid; place-content: center; border-radius: 50%; background: var(--surface); text-align: center; }
@@ -226,6 +256,21 @@
 .hob-funnel i { height: 9px; display: block; margin-top: 5px; border-radius: 999px; background: var(--blue); }
 .hob-funnel > div:nth-child(2) i { background: #5c9789; }
 .hob-funnel > div:nth-child(3) i { background: var(--accent); }
+.hob-conversion-rate { margin-top: 20px; padding: 18px; border-radius: 10px; background: var(--accent-soft); text-align: center; }
+.hob-conversion-rate strong { display: block; color: var(--blue-dark); font-size: 48px; line-height: 1; letter-spacing: -.055em; }
+.hob-conversion-rate span { display: block; margin-top: 7px; color: var(--muted); font-size: 11px; }
+.hob-conversion-totals { margin: 16px 0 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.hob-conversion-totals div { min-width: 0; padding: 10px; border-radius: 8px; background: var(--surface-2); text-align: center; }
+.hob-conversion-totals dt { color: var(--muted); font-size: 10px; }
+.hob-conversion-totals dd { margin: 5px 0 0; font-size: 15px; font-weight: 750; }
+.metric-info { position: relative; width: 15px; height: 15px; margin-left: 5px; display: inline-grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 50%; color: var(--muted); font-size: 9px; font-style: normal; font-weight: 800; cursor: help; }
+.metric-info-tooltip { position: absolute; z-index: 90; right: -8px; bottom: calc(100% + 9px); width: 245px; padding: 12px; display: none; gap: 8px; border: 1px solid var(--line); border-radius: 9px; background: var(--ink); color: #fff; box-shadow: 0 12px 30px rgba(20,25,22,.2); text-align: left; }
+.metric-info:hover .metric-info-tooltip,
+.metric-info:focus .metric-info-tooltip,
+.metric-info:focus-within .metric-info-tooltip { display: grid; }
+.metric-info-tooltip > b { font-size: 11px; }
+.metric-info-tooltip > span { display: flex; justify-content: space-between; gap: 12px; color: #dbe4e0; font-size: 10px; line-height: 1.35; }
+.metric-info-tooltip strong { color: #fff; }
 .hob-paired-metrics { margin-top: 20px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .hob-paired-metrics > div { min-width: 0; padding: 15px; border-radius: 10px; background: var(--surface-2); }
 .hob-paired-metrics strong { display: block; font-size: 28px; letter-spacing: -.035em; overflow-wrap: anywhere; }
@@ -414,6 +459,7 @@
   .broker-analytics-grid { grid-template-columns: 1fr; }
   .agent-analytics-grid { grid-template-columns: 1fr; }
   .hob-analytics-grid { grid-template-columns: 1fr; }
+  .hob-combined-performance-card { grid-template-columns: 1fr; }
   .hob-workload-card { grid-column: auto; }
   .hob-workload-list { grid-template-columns: 1fr; }
 }
@@ -423,9 +469,13 @@
   .dashboard-header { gap: 14px; }
   .dashboard-avatar { width: 42px; height: 42px; font-size: 12px; }
   .dashboard-metrics { margin: 26px 0 20px; grid-template-columns: 1fr; gap: 12px; }
+  .dashboard-summary-metrics { margin: 26px 0 20px; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
   .hob-donut-row { justify-content: flex-start; gap: 20px; }
   .hob-donut { width: 120px; height: 120px; flex-basis: 120px; }
   .hob-donut > div { width: 82px; height: 82px; }
+  .hob-conversion-rate strong { font-size: 42px; }
+  .hob-reply-rate strong { font-size: 42px; }
+  .hob-conversion-totals { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .agent-donut-row { justify-content: flex-start; gap: 20px; }
   .agent-donut { width: 120px; height: 120px; flex-basis: 120px; }
   .agent-donut > div { width: 82px; height: 82px; }
@@ -433,6 +483,8 @@
   .broker-donut, .broker-conversion-ring { width: 120px; height: 120px; flex-basis: 120px; }
   .broker-donut > div, .broker-conversion-ring > div { width: 82px; height: 82px; }
   .dashboard-metrics article { padding: 18px; }
+  .dashboard-summary-metrics article { padding: 18px; }
+  .dashboard-summary-metrics strong { font-size: 28px; }
   .dashboard-metrics strong { font-size: 28px; }
   .dashboard-panel { padding: 20px 16px; }
   .dashboard-panel h2 { font-size: 19px; }

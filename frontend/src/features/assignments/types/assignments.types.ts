@@ -30,6 +30,16 @@ export type UpcomingEvent = {
   start_at: string;
   end_at: string | null;
 };
+export type DashboardCommunicationTotals = {
+  total_campaigns: number;
+  total_leads_outreached: number;
+  total_leads_replied: number;
+  total_leads_opted_out: number;
+  total_positive_leads: number;
+  total_other_reply_leads: number;
+  total_sent_to_lofty: number;
+  total_appointments_to_confirm: number;
+};
 export type AgentOverview = {
   assigned_leads: number;
   new_assignments: number;
@@ -43,7 +53,7 @@ export type AgentOverview = {
   reply_rate: number | null;
 upcoming_events:UpcomingEvent[];
 };
-export type BrokerOverview = {
+export type BrokerOverview = DashboardCommunicationTotals & {
   campaigns_started: number;
   campaigns_completed: number;
   campaigns_in_draft: number;
