@@ -122,6 +122,10 @@ class Conversation(Base):
 
 class Message(Base):
     __tablename__ = 'messages'
+    __table_args__ = (
+        Index('ix_messages_conversation_direction', 'conversation_id', 'direction'),
+        Index('ix_messages_conversation_created', 'conversation_id', 'created_at', 'id'),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
 
@@ -313,6 +317,7 @@ class Lead(Base):
     __table_args__ = (
         Index('ix_leads_coordinates', 'latitude', 'longitude'),
         Index('ix_leads_campaign_main_signal', 'campaign_id', 'main_signal'),
+        Index('ix_leads_user_campaign', 'user_id', 'campaign_id'),
     )
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
@@ -422,6 +427,49 @@ class LeadEvent(Base):
     lead = relationship('Lead')
     actor = relationship('User', foreign_keys=[actor_id])
     target = relationship('User', foreign_keys=[target_id])
+
+
+class LoftyExport(Base):
+    """One conversation's hand-off to Lofty CRM, and how far it got.
+
+    One row per conversation (unique), so repeated clicks and retries resume
+    the same export instead of creating another Lofty lead. ``lofty_lead_id`` is
+    saved the moment Lofty returns it; a later mute or note failure resumes from
+    ``step`` without touching the lead again. ``note_parts`` freezes the exact
+    note texts on the first notes attempt so a retry sends identical parts, and
+    ``note_ids`` records which parts Lofty has already stored.
+    """
+    __tablename__ = 'lofty_exports'
+    __table_args__ = (
+        UniqueConstraint('conversation_id', name='uq_lofty_exports_conversation'),
+    )
+
+    id = Column(Integer, primary_key=True)
+    conversation_id = Column(Integer, ForeignKey('conversations.id', ondelete='CASCADE'),
+                             nullable=False)
+    lead_id = Column(Integer, nullable=True)  # ListingIQ lead behind the thread
+    brokerage_id = Column(String(255), nullable=True, index=True)
+    requested_by = Column(Integer, ForeignKey('users.id'), nullable=True)
+    # e.g. 'api_key:spacematch' today, 'oauth:<agent>' once OAuth exists.
+    connection_ref = Column(String(120), nullable=True)
+    lofty_lead_id = Column(String(40), nullable=True, index=True)
+    lead_action = Column(String(20), nullable=True)  # created | existing
+    # pending | in_progress | completed | failed | needs_review
+    status = Column(String(20), nullable=False, default='in_progress')
+    # lead -> mute -> notes -> done
+    step = Column(String(20), nullable=False, default='lead')
+    revision = Column(Integer, nullable=False, default=1)
+    mute_verified = Column(Boolean, nullable=False, default=False)
+    summary = Column(Text, nullable=True)
+    last_message_id = Column(Integer, nullable=True)
+    note_parts = Column(Text, nullable=True)  # JSON list[str]
+    note_ids = Column(Text, nullable=True)  # JSON list[str | None]
+    attempts = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text, nullable=True)
+    claimed_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class AiRun(Base):
@@ -545,6 +593,9 @@ class BookingReminder(Base):
 
 class Notification(Base):
     __tablename__ = "notifications"
+    __table_args__ = (
+        Index('ix_notifications_user_read', 'user_id', 'is_read'),
+    )
 
     # Primary key already indexed.
     id = Column(

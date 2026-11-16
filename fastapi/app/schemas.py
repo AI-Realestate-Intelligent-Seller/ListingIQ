@@ -467,3 +467,15 @@ class CampaignDraftResult(BaseModel):
 class TokenData(BaseModel):
     user_id: Optional[int]
     role: Optional[str]
+
+
+class LoftySendRequest(BaseModel):
+    """Send to Lofty: the reviewed (and possibly edited) summary.
+
+    ``resync`` re-sends an already completed export as a new set of notes on the
+    same Lofty lead. ``lofty_lead_id`` resolves an ambiguous match and must be
+    one of the Lofty leads matching the owner's phone or email.
+    """
+    summary: Optional[str] = Field(None, max_length=20000)
+    resync: bool = False
+    lofty_lead_id: Optional[str] = Field(None, max_length=40, regex=r'^\d+$')

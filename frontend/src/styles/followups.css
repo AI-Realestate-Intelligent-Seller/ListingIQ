@@ -360,3 +360,64 @@
   background: var(--white); color: var(--muted); font-size: 12px; line-height: 1;
 }
 .followups-campaign-clear:hover { border-color: #a9bcb5; color: var(--ink); }
+
+/* Conversation three-dot menu (Send to Lofty). */
+/* Sized like the ⓘ icon. The header gives every direct <div> flex: 1 (meant
+   for the name block), so this override must out-rank that selector. */
+.followups-panel-header > .followups-actions-menu,
+.sms-thread-header > .followups-actions-menu,
+.followups-actions-menu {
+  position: relative; z-index: 60;
+  flex: 0 0 34px; width: 34px; min-width: 34px; height: 34px;
+}
+.followups-actions-menu > .sms-icon-button { font-size: 18px; line-height: 1; }
+.followups-actions-menu-list {
+  position: absolute; z-index: 60; top: calc(100% + 6px); right: 0; min-width: 180px;
+  white-space: nowrap;
+  padding: 6px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--white); box-shadow: 0 16px 38px rgba(20, 40, 35, .2);
+}
+.followups-actions-menu-list button {
+  display: block; width: 100%; min-height: 40px; padding: 9px 10px;
+  border: 0; border-radius: 8px; background: transparent;
+  color: var(--ink); font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+}
+.followups-actions-menu-list button:hover,
+.followups-actions-menu-list button:focus-visible { outline: none; background: var(--surface-2); }
+
+/* Send to Lofty dialog. */
+.lofty-dialog { width: min(760px, 100%); max-height: calc(100vh - 40px); display: flex; flex-direction: column; }
+.lofty-body { display: grid; gap: 16px; margin-top: 16px; overflow-y: auto; min-height: 0; padding-right: 4px; }
+.lofty-section h3 { margin: 0 0 8px; font-size: 14px; }
+.lofty-section > small { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; }
+.lofty-section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.lofty-section-head h3 { margin: 0; }
+.lofty-summary {
+  width: 100%; box-sizing: border-box; padding: 10px 12px; resize: vertical;
+  border: 1px solid var(--line-strong); border-radius: 10px; font: inherit; font-size: 13px; line-height: 1.5;
+}
+.lofty-transcript {
+  list-style: none; margin: 0; padding: 0; display: grid; gap: 8px;
+  max-height: 320px; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; padding: 10px;
+  background: var(--paper);
+}
+.lofty-line { padding: 8px 10px; border-radius: 8px; background: var(--white); }
+.lofty-line.sender-owner { border-left: 3px solid #8a6d1d; }
+.lofty-line.sender-ai { border-left: 3px solid var(--blue); }
+.lofty-line.sender-you { border-left: 3px solid #1f7a4d; }
+.lofty-line-meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; font-size: 12px; color: var(--muted); }
+.lofty-line-meta strong { color: var(--ink); }
+.lofty-line p { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+.lofty-result { padding: 12px 14px; border-radius: 10px; font-size: 13px; }
+.lofty-result ul { margin: 6px 0; padding-left: 4px; list-style: none; }
+.lofty-result p { margin: 6px 0; }
+.lofty-result small { display: block; margin-top: 6px; color: var(--muted); }
+.lofty-result a { font-weight: 700; }
+.lofty-result.success { background: #e9f8ef; border: 1px solid #b9e3c8; color: #14532d; }
+.lofty-result.error { background: #fef2f2; border: 1px solid #f5c2c2; color: #7f1d1d; }
+.lofty-result.warning { background: #fef9c3; border: 1px solid #f0de86; color: #6f4f0d; }
+.lofty-candidates { margin: 8px 0; padding: 8px 10px; border: 1px solid currentColor; border-radius: 8px; }
+.lofty-candidates label { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+@media (max-width: 640px) {
+  .lofty-transcript { max-height: 240px; }
+}

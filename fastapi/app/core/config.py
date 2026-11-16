@@ -191,6 +191,14 @@ def load_config():
         )).strip().lower() not in ('0', 'false', 'no', 'off'),
     }
     cfg['redis_url'] = os.getenv('REDIS_URL', 'redis://127.0.0.1:6379')
+    # Read-through API cache (app/cache.py). Writes invalidate it immediately;
+    # the TTL (15 min) is only a backstop. Off = every read comes from the database.
+    cfg['cache'] = {
+        'enabled': os.getenv('CACHE_ENABLED', 'true').strip().lower()
+                   not in ('0', 'false', 'no', 'off'),
+        'ttl_seconds': int(os.getenv('CACHE_TTL_SECONDS', '900')),
+        'retry_seconds': int(os.getenv('CACHE_RETRY_SECONDS', '30')),
+    }
     configured_sms_rate = int(os.getenv('SMS_MAX_SUBMISSIONS_PER_SECOND', '50'))
     sender_sms_rate = int(os.getenv('SMS_SENDER_SUBMISSIONS_PER_SECOND', str(configured_sms_rate)))
     cfg['sms_submission'] = {
@@ -204,6 +212,25 @@ def load_config():
         'embedded_worker_enabled': str(os.getenv(
             'SMS_WORKER_EMBEDDED_ENABLED', 'false')).strip().lower() in (
                 '1', 'true', 'yes', 'on'),
+    }
+    # Lofty CRM hand-off (Follow-ups → Send to Lofty). Only the API key comes
+    # from the environment. Which brokerages may use it is the platform-admin
+    # feature flag `lofty_export` (see app.lofty.auth); the rest are fixed.
+    cfg['lofty'] = {
+        'api_key': (os.getenv('LOFTY_API_KEY') or '').strip(),
+        'base_url': 'https://api.lofty.com',
+        # Stored with each export so a later per-agent OAuth connection can be
+        # told apart from this shared account key.
+        'connection_label': 'spacematch',
+        # No fixed Lofty agent: new leads follow Lofty's own routing rules.
+        'assigned_user_id': None,
+        'lead_stage': 'Connected Qualifying',
+        'lead_source': 'ListingIQ',
+        'lead_tag': 'ListingIQ',
+        # Lofty silently truncates note content at 2000 characters.
+        'note_max_chars': 1900,
+        'timeout_seconds': 20.0,
+        'crm_lead_url': 'https://crm.lofty.com/admin/home/lead/detail/{lead_id}',
     }
     cfg['frontend_url'] = os.getenv('FRONTEND_URL', cfg.get('frontend_url', 'http://localhost:3000'))
     smtp_port = os.getenv('SMTP_PORT', cfg.get('smtp', {}).get('port') if isinstance(cfg.get('smtp', {}), dict) else None)

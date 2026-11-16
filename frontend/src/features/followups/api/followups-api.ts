@@ -36,7 +36,6 @@ export function listFollowUps(
       accessToken,
       signal,
       onProgress,
-      fetchResultAfterCompletion: true,
     });
   }
   return getJson<FollowUp[]>(`${FOLLOWUPS}?${query}`, accessToken, signal);

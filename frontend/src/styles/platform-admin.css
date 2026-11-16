@@ -339,6 +339,17 @@
 .brokerage-invite-form {
   grid-template-columns: 1.15fr 0.85fr 1.1fr 0.65fr auto;
 }
+.flag-form-scoped {
+  grid-template-columns: 1.1fr 0.8fr 0.9fr 1.1fr auto;
+}
+.flag-form select {
+  min-height: 40px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  font: inherit;
+}
 .flag-form p {
   margin: 5px 0 0;
   color: var(--muted);

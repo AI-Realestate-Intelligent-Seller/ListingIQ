@@ -33,6 +33,7 @@ import type {
   ReplySuggestions,
 } from "../types/followups.types";
 import { AppointmentDialog } from "./appointment-dialog";
+import { LoftyExportDialog } from "./lofty-export-dialog";
 import {
   useNotifications,
 } from "../../dashboard/components/notification-provider";
@@ -80,11 +81,14 @@ type FollowUpsBoardProps = {
   focusConversationId?: number | null;
   /** Narrows the board to one campaign's replies, e.g. from the Campaigns tab. */
   campaignId?: number | null;
+  /** Called when the user opens a chat, so the page URL can carry it. */
+  onConversationChange?: (conversationId: number | null) => void;
 };
 
 export function FollowUpsBoard({
   focusConversationId = null,
   campaignId = null,
+  onConversationChange,
 }: FollowUpsBoardProps) {
   const [followUps, setFollowUps] = useState<FollowUp[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
@@ -97,6 +101,9 @@ export function FollowUpsBoard({
   );
   const [isCampaignMenuOpen, setIsCampaignMenuOpen] = useState(false);
   const [isStatusMenuOpen, setIsStatusMenuOpen] = useState(false);
+  const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
+  /** The thread whose Send to Lofty dialog is open. */
+  const [loftyConversationId, setLoftyConversationId] = useState<number | null>(null);
   const [scope, setScope] = useState<"replied" | "all">(
     campaignId === null ? "replied" : "all",
   );
@@ -117,6 +124,7 @@ export function FollowUpsBoard({
   const threadRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const statusMenuRef = useRef<HTMLDivElement | null>(null);
+  const actionsMenuRef = useRef<HTMLDivElement | null>(null);
   const router = useRouter();
   const session = useMemo(() => readAuthSession(), []);
   const token = session?.access_token ?? "";
@@ -128,6 +136,8 @@ export function FollowUpsBoard({
       history panel re-fetches without needing the lead to change. */
   const [historyTick, setHistoryTick] = useState(0);
   const viewer = session?.user ?? null;
+  /** The AI replies as the signed-in user, so the handover labels use their first name. */
+  const aiName = viewer?.first_name?.trim() || "Bobbie";
   const isAgent = viewer?.role === "agent";
   const followUpScope = scope;
 
@@ -152,6 +162,8 @@ export function FollowUpsBoard({
   const refreshFollowUps = useCallback(
     async (signal?: AbortSignal, withProgress = false) => {
       if (!token) return;
+      // A fresh load must not show the previous load's finished progress bar.
+      if (withProgress) setLoadProgress(null);
       try {
         const campaignFilter = selectedCampaignId ? Number(selectedCampaignId) : undefined;
         setFollowUps(
@@ -168,7 +180,9 @@ export function FollowUpsBoard({
       } catch (error) {
         handleApiError(error, "Could not load your follow-ups.");
       } finally {
-        setIsLoading(false);
+        // A cancelled load (scope/campaign change, remount) is replaced by a newer
+        // one; keep the loader up until that one has actually returned the chats.
+        if (!signal?.aborted) setIsLoading(false);
       }
     },
     [token, followUpScope, selectedCampaignId, handleApiError],
@@ -263,6 +277,22 @@ export function FollowUpsBoard({
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [isStatusMenuOpen]);
+
+  useEffect(() => {
+    if (!isActionsMenuOpen) return;
+    const close = (event: PointerEvent) => {
+      if (!actionsMenuRef.current?.contains(event.target as Node)) setIsActionsMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setIsActionsMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [isActionsMenuOpen]);
 
   const needle = search.trim().toLowerCase();
   const selectedCampaign = campaigns.find((item) => String(item.id) === selectedCampaignId);
@@ -418,8 +448,8 @@ useEffect(() => {
       const rows = await listFollowUps(token, scope);
       return rows.find((row) => row.id === conversationId) ?? active;
     }, to === "broker"
-      ? "You have taken over. Write your reply below — Bobbie will not answer this thread."
-      : "Bobbie is handling this conversation again.").then(() => {
+      ? `You have taken over. Write your reply below — ${aiName} will not answer this thread.`
+      : `${aiName} is handling this conversation again.`).then(() => {
         // Taking over is only useful if you can type, so land the cursor there
         // and offer drafts grounded in what has been said so far.
         if (to === "broker") {
@@ -616,7 +646,10 @@ useEffect(() => {
                 type="button"
                 role="listitem"
                 className={`followup-card${item.id === activeId ? " active" : ""}`}
-                onClick={() => setActiveId(item.id)}
+                onClick={() => {
+                  setActiveId(item.id);
+                  onConversationChange?.(item.id);
+                }}
               >
                 <span className="followup-card-top">
                   <strong>{item.name || item.contact}</strong>
@@ -676,10 +709,10 @@ useEffect(() => {
                     className="sms-pill on sms-pill-moving-border"
                     disabled={isWorking}
                     onClick={() => changeHandover("broker")}
-                    title="Pause Bobbie and reply yourself"
+                    title={`Pause ${aiName} and reply yourself`}
                   >
                     <span aria-hidden="true">✦</span>
-                    <span className="sms-pill-label">Bobbie AI is replying · Take over</span>
+                    <span className="sms-pill-label">{aiName} AI is replying · Take over</span>
                   </button>
                 ) : (
                   <button
@@ -687,10 +720,10 @@ useEffect(() => {
                     className="sms-pill sms-pill-moving-border"
                     disabled={isWorking}
                     onClick={() => changeHandover("bobbie")}
-                    title="Bobbie takes the conversation back"
+                    title={`${aiName} takes the conversation back`}
                   >
                     <span aria-hidden="true">✎</span>
-                    <span className="sms-pill-label">You are replying · Hand back to Bobbie</span>
+                    <span className="sms-pill-label">You are replying · Hand back to {aiName}</span>
                   </button>
                 )}
                 {/* Only an imported lead has a property record to open; a thread
@@ -706,6 +739,33 @@ useEffect(() => {
                     ⓘ
                   </button>
                 ) : null}
+                <div className="followups-actions-menu" ref={actionsMenuRef}>
+                  <button
+                    type="button"
+                    className="sms-icon-button"
+                    aria-haspopup="menu"
+                    aria-expanded={isActionsMenuOpen}
+                    aria-label="More actions"
+                    title="More actions"
+                    onClick={() => setIsActionsMenuOpen((current) => !current)}
+                  >
+                    ⋮
+                  </button>
+                  {isActionsMenuOpen ? (
+                    <div className="followups-actions-menu-list" role="menu" aria-label="Conversation actions">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setIsActionsMenuOpen(false);
+                          setLoftyConversationId(active.id);
+                        }}
+                      >
+                        Send to Lofty
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
               </header>
 
               {active.reply_count > 0 ? (
@@ -914,6 +974,15 @@ useEffect(() => {
         </p>
       ) : null}
 
+
+      {loftyConversationId !== null ? (
+        <LoftyExportDialog
+          key={loftyConversationId}
+          conversationId={loftyConversationId}
+          accessToken={token}
+          onClose={() => setLoftyConversationId(null)}
+        />
+      ) : null}
 
       <AppointmentDialog
         followUp={isSchedulerOpen ? active : null}

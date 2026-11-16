@@ -12,7 +12,7 @@ from ..leads import events as lead_events
 from ..leads.response_analytics import get_agent_response_analytics
 from ..leads.service import serialize
 from ..models import Booking, Campaign, Conversation, Lead, Message, User
-from .. import query_progress
+from .. import cache, query_progress
 from ..reminder.notification import notify_user
 from ..schemas import LeadAssignmentRequest, LeadAssignmentStageRequest
 from .auth import get_current_user, get_db
@@ -120,7 +120,24 @@ def _serialize_assignment(session: Session, lead: Lead,
     return item
 
 
+def _assignments_cache_key(user: User):
+    """Cache namespace, dependencies and key — shared by the board and its /load shortcut."""
+    return ('assignments', cache.DASHBOARD_TABLES, {'user': user.id, 'role': user.role})
+
+
+def _broker_overview_cache_key(user: User):
+    return ('broker-overview', cache.DASHBOARD_TABLES, {'user': user.id, 'role': user.role})
+
+
 def _assignment_payload(session: Session, current_user: User, progress=None) -> dict:
+    """Broker assignment board, served from Redis when fresh."""
+    return cache.get_or_load(
+        *_assignments_cache_key(current_user),
+        lambda: _build_assignment_payload(session, current_user, progress=progress),
+    )
+
+
+def _build_assignment_payload(session: Session, current_user: User, progress=None) -> dict:
     agents = _linked_agents(session, current_user)
     leads = _replied_leads(session, current_user)
     total = len(leads)
@@ -181,6 +198,10 @@ def start_assignments_load(
 ):
     """Start a counted broker-assignment query backed by Redis progress."""
     _require_broker(current_user)
+    # Already cached and current: answer now, no job for the browser to poll.
+    cached = cache.peek(*_assignments_cache_key(current_user))
+    if cached is not None:
+        return {'job_id': None, 'status': 'completed', 'result': cached}
     try:
         job = query_progress.create(current_user.id, 'assignments')
     except query_progress.ProgressStoreUnavailable as error:
@@ -200,6 +221,14 @@ def broker_overview(
 
 
 def _broker_overview_payload(session: Session, current_user: User, progress=None) -> dict:
+    """Area Broker overview metrics, served from Redis when fresh."""
+    return cache.get_or_load(
+        *_broker_overview_cache_key(current_user),
+        lambda: _build_broker_overview_payload(session, current_user, progress=progress),
+    )
+
+
+def _build_broker_overview_payload(session: Session, current_user: User, progress=None) -> dict:
     total = 5
     campaigns = session.query(Campaign).filter(Campaign.user_id == current_user.id).all()
     if progress:
@@ -280,6 +309,10 @@ def start_broker_overview_load(
 ):
     """Start the five measured query stages used by the broker overview."""
     _require_broker(current_user)
+    # Already cached and current: answer now, no job for the browser to poll.
+    cached = cache.peek(*_broker_overview_cache_key(current_user))
+    if cached is not None:
+        return {'job_id': None, 'status': 'completed', 'result': cached}
     try:
         job = query_progress.create(current_user.id, 'broker-overview')
     except query_progress.ProgressStoreUnavailable as error:

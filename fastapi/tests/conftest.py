@@ -38,6 +38,9 @@ from cryptography.fernet import Fernet  # noqa: E402
 os.environ['FERNET_KEY'] = Fernet.generate_key().decode()   # throwaway, valid format
 os.environ['SECRET_KEY'] = 'test-secret-key'
 os.environ['REDIS_URL'] = 'redis://127.0.0.1:6379'          # credential-free; connections are refused
+# The test DB is rebuilt per run with recycled ids, so a developer's local Redis
+# must never serve cached payloads into tests. tests/test_cache.py covers the cache.
+os.environ['CACHE_ENABLED'] = 'false'
 os.environ['QDRANT_URL'] = ''
 os.environ['QDRANT_API_KEY'] = ''
 
@@ -142,7 +145,7 @@ from app import db  # noqa: E402
 from app.auth import hash_password  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import (AiRun, Booking, Campaign, Conversation, FeatureFlag, InboundSmsEvent, Invitation, Lead,  # noqa: E402
-                        LeadEvent, Message, OutboundSmsJob, PlatformAuditLog, User)
+                        LeadEvent, LoftyExport, Message, OutboundSmsJob, PlatformAuditLog, User)
 from app.personas.models import (Persona, PersonaDefault, PersonaDraft, PersonaEvent,  # noqa: E402
                                  PersonaDraftExample, PersonaSubmission,
                                  PersonaSubmissionExample, PersonaVersion,
@@ -185,6 +188,7 @@ def clean_tables():
         session.query(OutboundSmsJob).delete()
         session.query(Lead).delete()
         session.query(InboundSmsEvent).delete()
+        session.query(LoftyExport).delete()
         session.query(Message).delete()
         session.query(Conversation).delete()
         # After leads and conversations: both carry a campaign_id.

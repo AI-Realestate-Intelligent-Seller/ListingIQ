@@ -13,7 +13,7 @@ from ..db import SessionLocal
 from ..leads import campaign as campaign_service
 from ..logger import get_logger
 from ..models import User
-from .. import query_progress
+from .. import cache, query_progress
 from ..schemas import (
     CampaignDetail,
     CampaignDraftRequest,
@@ -52,7 +52,20 @@ def list_campaigns(current_user: User = Depends(get_current_user),
                    session: Session = Depends(get_db)):
     """Every campaign with its delivered / replied / no-reply counts."""
     _require_access(current_user)
-    return campaign_service.overview(session, current_user)
+    return _cached_overview(session, current_user)
+
+
+def _campaigns_cache_key(user: User):
+    """Cache namespace, dependencies and key — shared by the list and its /load shortcut."""
+    return ('campaigns', cache.DASHBOARD_TABLES, {'user': user.id, 'role': user.role})
+
+
+def _cached_overview(session: Session, user: User, progress=None) -> list[dict]:
+    """Campaign list with counts, served from Redis when fresh."""
+    return cache.get_or_load(
+        *_campaigns_cache_key(user),
+        lambda: campaign_service.overview(session, user, progress=progress),
+    )
 
 
 def _load_campaigns_job(job_id: str, user_id: int) -> None:
@@ -61,7 +74,7 @@ def _load_campaigns_job(job_id: str, user_id: int) -> None:
         user = session.get(User, user_id)
         if user is None:
             raise LookupError('The account no longer exists.')
-        rows = campaign_service.overview(
+        rows = _cached_overview(
             session,
             user,
             progress=lambda total, loaded: query_progress.update(
@@ -121,6 +134,10 @@ def start_campaign_load(
 ):
     """Start a counted campaign query whose progress is held in Redis."""
     _require_access(current_user)
+    # Already cached and current: answer now, no job for the browser to poll.
+    cached = cache.peek(*_campaigns_cache_key(current_user))
+    if cached is not None:
+        return {'job_id': None, 'status': 'completed', 'result': cached}
     try:
         job = query_progress.create(current_user.id, 'campaigns')
     except query_progress.ProgressStoreUnavailable as error:

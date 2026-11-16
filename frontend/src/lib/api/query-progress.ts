@@ -12,7 +12,13 @@ export type QueryProgress<T> = {
   error: string | null;
 };
 
-type StartResponse = { job_id: string };
+/**
+ * A `/load` call either starts a job to poll, or — when the server already has
+ * a current cached result — answers immediately with `status: "completed"`.
+ */
+type StartResponse<T> =
+  | { job_id: string; status?: undefined; result?: undefined }
+  | { job_id: null; status: "completed"; result: T };
 
 function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -41,21 +47,25 @@ export async function loadQueryWithProgress<T>({
   fetchResultAfterCompletion?: boolean;
 }): Promise<T> {
   try {
-    const { job_id } = await postJson<StartResponse, Record<string, never>>(
+    const started = await postJson<StartResponse<T>, Record<string, never>>(
       startPath,
       {},
       accessToken,
     );
+    if (started.status === "completed") return started.result;
+    const jobId = started.job_id;
+    /** Only pause on 100% if a progress bar was actually on screen. */
+    let showedProgress = false;
     while (!signal?.aborted) {
       const progress = await getJson<QueryProgress<T>>(
-        `/query-progress/${job_id}`,
+        `/query-progress/${jobId}`,
         accessToken,
         signal,
       );
       onProgress(progress);
       if (progress.status === "completed" && progress.result !== null) {
         // Let the truthful 100% state paint before the overlay is removed.
-        await wait(250, signal);
+        if (showedProgress) await wait(250, signal);
         return fetchResultAfterCompletion ? fallback() : progress.result;
       }
       if (progress.status === "failed") {
@@ -63,6 +73,7 @@ export async function loadQueryWithProgress<T>({
         // established endpoint remains the source-of-truth fallback.
         return fallback();
       }
+      showedProgress = true;
       await wait(150, signal);
     }
     throw new DOMException("The request was aborted.", "AbortError");
