@@ -2,9 +2,10 @@
 
 A campaign is a named batch with one message template. The broker selects leads
 in the pool, which creates a *draft* holding them, names it and writes the
-opening message in the Campaigns tab, then sends. Sending renders the template
-once per lead, and opens a conversation for the user to handle. Bobbie can be
-explicitly handed the thread later from Follow-ups.
+opening message in the Campaigns tab, then sends. Sending renders one primary
+message per phone number, attaches every grouped property to that conversation,
+and opens it for the user to handle. Bobbie can be explicitly handed the thread
+later from Follow-ups.
 
 Anything that cannot be sent is reported back per lead rather than failing the
 whole batch — a broker selecting forty rows should not lose thirty-nine of them
@@ -20,7 +21,8 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from ..core.config import settings
-from ..models import Campaign, Conversation, Lead, LeadEvent, Message, OutboundSmsJob, User
+from ..dashboard_metrics import POSITIVE_REPLY_STATUSES
+from ..models import Campaign, Conversation, Lead, LeadEvent, LoftyExport, Message, OutboundSmsJob, User
 from ..sms import number_lookup
 from ..sms import service as sms_service
 from ..sms.outreach import build_single_lead_context
@@ -33,7 +35,7 @@ from . import template as message_template
 from .catalog import SIGNALS, signal_label
 from .importer import normalize_phone
 from .service import (conversation_property_details, derive_stage, outreach_reason,
-                      predefined_reason, serialize, split_signals)
+                      predefined_reason, random_pool_lead_ids, serialize, split_signals)
 
 PROVIDER_LEAD_SOURCE = 'provider_distribution'
 PROVIDER_CONTACT_SOURCE = 'provider_distribution_contact'
@@ -41,6 +43,11 @@ CAMPAIGN_BATCH_SIZE = 250
 MAIN_SIGNAL_BASES = {'single_signal', 'source_verified', 'broker_selected'}
 NO_SIGNAL_REASON_KEY = '__no_signal__'
 _REASON_SIGNAL_UNSET = object()
+NON_DELIVERED_STATUSES = (
+    'failed', 'gw_timeout', 'dlr_timeout', 'delivery_failed',
+    'sending_failed', 'delivery_unconfirmed', 'rejected', 'undelivered',
+    'submission_queued', 'submission_retry',
+)
 
 
 def _batches(values: list, size: int = CAMPAIGN_BATCH_SIZE):
@@ -276,6 +283,15 @@ CLAIMED_ELSEWHERE = 'Another brokerage is already contacting this property.'
 # Already texted this property ourselves. Distinct from the message below,
 # because the broker can see their own thread and act on it.
 CLAIMED_HERE = 'This property already has a conversation in the SMS tab.'
+OWNER_CONTACTED_HERE = (
+    'This owner already has an outreach conversation. '
+    'Use that conversation for their other properties.'
+)
+MULTI_PROPERTY_OUTREACH_NOTE = (
+    "If there’s any chance you’d consider selling another property you own, "
+    "I’d be happy to discuss that too."
+)
+GROUPED_OUTREACH_STATUS = 'grouped_wait'
 
 
 class Claims:
@@ -286,9 +302,11 @@ class Claims:
     first, reported without naming anyone.
     """
 
-    def __init__(self, ours: set[tuple[str, str]], theirs: set[tuple[str, str]]):
+    def __init__(self, ours: set[tuple[str, str]], theirs: set[tuple[str, str]],
+                 our_contacts: dict[str, int | None] | None = None):
         self.ours = ours
         self.theirs = theirs
+        self.our_contacts = our_contacts or {}
 
     def reason_for(self, lead: Lead) -> str | None:
         property_key = address_key.canonical(lead.property_address)
@@ -300,7 +318,12 @@ class Claims:
             return CLAIMED_ELSEWHERE
         if key in self.ours:
             return CLAIMED_HERE
+        if phone_key in self.our_contacts:
+            return OWNER_CONTACTED_HERE
         return None
+
+    def conversation_for(self, lead: Lead) -> int | None:
+        return self.our_contacts.get(normalize_phone(lead.phone or ''))
 
 
 def _recipient_key(lead: Lead) -> tuple[str, str] | None:
@@ -309,7 +332,7 @@ def _recipient_key(lead: Lead) -> tuple[str, str] | None:
     return (property_key, phone_key) if property_key and phone_key else None
 
 
-NO_CLAIMS = Claims(set(), set())
+NO_CLAIMS = Claims(set(), set(), {})
 
 
 def _blocking_reason(lead: Lead, claims: Claims = NO_CLAIMS) -> str | None:
@@ -346,7 +369,8 @@ def claims_on(session: Session, scope: list[int], leads: list[Lead]) -> Claims:
     number belonging to another tenant.
     """
     wanted = {key for lead in leads if (key := _recipient_key(lead)) is not None}
-    if not wanted:
+    wanted_phones = {normalize_phone(lead.phone or '') for lead in leads if lead.phone}
+    if not wanted and not wanted_phones:
         return NO_CLAIMS
 
     property_keys = sorted({property_key for property_key, _ in wanted})
@@ -370,7 +394,7 @@ def claims_on(session: Session, scope: list[int], leads: list[Lead]) -> Claims:
             .filter(OutboundSmsJob.property_key.in_(property_batch),
                     OutboundSmsJob.status.in_((
                         'awaiting_lookup', 'looking_up', 'queued', 'submitting',
-                        'retry_wait', 'accepted', 'uncertain',
+                        'retry_wait', 'accepted', 'uncertain', GROUPED_OUTREACH_STATUS,
                     )))
             .distinct()
             .all()
@@ -382,7 +406,31 @@ def claims_on(session: Session, scope: list[int], leads: list[Lead]) -> Claims:
     ours = {key for key, is_ours in normalized_rows if key in wanted and is_ours}
     theirs = {key for key, is_ours in normalized_rows if key in wanted and not is_ours}
     # A property/contact pair both worked is reported as ours: it is actionable.
-    return Claims(ours, theirs - ours)
+    our_contacts: dict[str, int | None] = {}
+    for conversation_id, contact in (session.query(Conversation.id, Conversation.contact)
+                                     .join(Message, Message.conversation_id == Conversation.id)
+                                     .filter(
+                                         Conversation.user_id.in_(scope),
+                                         Conversation.contact.in_(wanted_phones),
+                                         Message.event_type == 'outreach.initial',
+                                     ).distinct().all()):
+        phone_key = normalize_phone(contact or '')
+        if phone_key in wanted_phones:
+            our_contacts[phone_key] = conversation_id
+    active_job_statuses = (
+        'awaiting_lookup', 'looking_up', 'queued', 'submitting',
+        'retry_wait', 'accepted', 'uncertain', GROUPED_OUTREACH_STATUS,
+    )
+    for (contact,) in (session.query(OutboundSmsJob.to_number)
+                       .filter(
+                           OutboundSmsJob.user_id.in_(scope),
+                           OutboundSmsJob.to_number.in_(wanted_phones),
+                           OutboundSmsJob.status.in_(active_job_statuses),
+                       ).distinct().all()):
+        phone_key = normalize_phone(contact or '')
+        if phone_key in wanted_phones:
+            our_contacts.setdefault(phone_key, None)
+    return Claims(ours, theirs - ours, our_contacts)
 
 
 def owned(session: Session, user: User, campaign_id: int) -> Campaign:
@@ -448,6 +496,21 @@ def create_draft(session: Session, user: User, lead_ids: list[int],
         raise ValueError('None of the selected leads can start a campaign. '
                          + ' '.join(reasons))
     return campaign, left_behind
+
+
+def random_draft_lead_ids(session: Session, user: User, count: int) -> list[int]:
+    """Choose the requested random Lead Pool sample or explain why none exists."""
+    lead_ids = random_pool_lead_ids(session, user, count)
+    if not lead_ids:
+        raise ValueError('The Lead Pool has no available leads for a campaign.')
+    return lead_ids
+
+
+def create_random_draft(session: Session, user: User, count: int) -> tuple[Campaign, list[dict]]:
+    """Draft from a random sample of the currently available Lead Pool."""
+    return create_draft(
+        session, user, random_draft_lead_ids(session, user, count), group_mode=True,
+    )
 
 
 def _stored_details(lead: Lead) -> dict:
@@ -1170,10 +1233,12 @@ def _sent_view(session: Session, user: User, campaign: Campaign,
                     .filter(Message.campaign_id == campaign.id,
                             Message.event_type == 'outreach.initial',
                             Message.conversation_id.in_(conversation_ids))
+                    .order_by(Message.created_at, Message.id)
                     .all())
     # Keyed by property as well as thread: one campaign can text the same owner
     # about two of their listings, which is two messages on one thread.
     by_property = {(row.conversation_id, row.property_key): row for row in outreach}
+    by_conversation = {row.conversation_id: row for row in outreach}
 
     # A recipient rejected before provider submission has no Message row, but
     # its durable job records the authoritative reason (for example, Telnyx
@@ -1203,7 +1268,8 @@ def _sent_view(session: Session, user: User, campaign: Campaign,
     missed_rows: list[dict] = []
     for lead in people:
         key = address_key.canonical(lead.property_address)
-        message = by_property.get((lead.conversation_id, key))
+        message = (by_property.get((lead.conversation_id, key))
+                   or by_conversation.get(lead.conversation_id))
         if message is None:
             # No outreach carries this lead's property, so it never went out.
             # Prefer the reason recorded at send time; current lead state is
@@ -1310,6 +1376,10 @@ def preview(session: Session, user: User, campaign: Campaign,
                         OutboundSmsJob.lead_id.in_([lead.id for lead in people]))
                 .all()) if people else []
         by_lead = {job.lead_id: job for job in jobs}
+        primary_by_phone = {
+            job.to_number: job for job in jobs
+            if job.status != GROUPED_OUTREACH_STATUS
+        }
         rendered = []
         skipped = []
         for lead in people:
@@ -1320,7 +1390,9 @@ def preview(session: Session, user: User, campaign: Campaign,
                 skipped.append({'lead_id': lead.id, 'owner_name': lead.owner_name,
                                 'reason': job.last_error or 'Was not queued.'})
             else:
-                rendered.append(_row(lead, job.text))
+                shown_job = (primary_by_phone.get(job.to_number)
+                             if job.status == GROUPED_OUTREACH_STATUS else job)
+                rendered.append(_row(lead, shown_job.text if shown_job else job.text))
         return {
             'campaign_id': campaign.id,
             'recipients': rendered,
@@ -1410,17 +1482,26 @@ def _previous_properties(conversation: Conversation) -> list[str]:
     return [item for item in earlier if isinstance(item, str)] if isinstance(earlier, list) else []
 
 
+def _with_multi_property_note(text: str) -> str:
+    """Add the owner-level ask once, keeping the STOP instruction last."""
+    compact = text.strip()
+    if not compact or MULTI_PROPERTY_OUTREACH_NOTE.lower() in compact.lower():
+        return compact
+    stop_at = compact.lower().rfind('reply stop')
+    if stop_at > 0:
+        opening = compact[:stop_at].rstrip()
+        stop = compact[stop_at:].lstrip()
+        return f'{opening} {MULTI_PROPERTY_OUTREACH_NOTE} {stop}'
+    return f'{compact} {MULTI_PROPERTY_OUTREACH_NOTE}'
+
+
 def _send_to_lead(session: Session, user: User, campaign: Campaign, lead: Lead,
                   text: str) -> tuple[dict | None, dict | None]:
-    """Open or continue the owner's thread and send one rendered message.
+    """Low-level single-recipient send used outside the grouped queue path.
 
-    An owner gets exactly one thread, whatever they own. An inbound SMS carries
-    no thread identifier — the carrier gives us a from-number and nothing else,
-    and app.routes.webhooks can only route a reply to the newest thread for that
-    number. A second thread for a second property would therefore silently
-    swallow the replies meant for the first, and Bobbie would answer about the
-    wrong house. So a landlord's second property is a second message in the
-    same conversation, and the thread's grounding moves to that property.
+    Bulk campaign sending groups every property sharing this phone before the
+    worker reaches this point, so production campaign runs still create only
+    one initial SMS and one thread for the owner.
     """
     conversation, key = _prepare_conversation(session, user, campaign, lead)
     try:
@@ -1500,19 +1581,49 @@ def _record_sent(session: Session, user: User, campaign: Campaign, lead: Lead,
     message.campaign_id = campaign.id
     message.property_key = key
 
-    lead.conversation_id = conversation.id
-    lead.last_activity_at = datetime.utcnow()
+    grouped_jobs = (session.query(OutboundSmsJob)
+                    .filter(
+                        OutboundSmsJob.campaign_id == campaign.id,
+                        OutboundSmsJob.to_number == normalize_phone(lead.phone or ''),
+                        OutboundSmsJob.status == GROUPED_OUTREACH_STATUS,
+                    ).all())
+    grouped_leads = [session.get(Lead, job.lead_id) for job in grouped_jobs]
+    attached = [lead, *(row for row in grouped_leads if row is not None)]
+    now = datetime.utcnow()
+    for row in attached:
+        row.conversation_id = conversation.id
+        row.last_activity_at = now
+    for job in grouped_jobs:
+        job.status = 'accepted'
+        job.last_error = None
+
+    if grouped_leads:
+        try:
+            context = json.loads(conversation.lead_context or '{}')
+        except ValueError:
+            context = {}
+        other_properties = list(context.get('other_properties') or [])
+        for row in grouped_leads:
+            if row and row.property_address and row.property_address != conversation.property_address:
+                other_properties.append(row.property_address)
+        context['other_properties'] = list(dict.fromkeys(other_properties))
+        conversation.lead_context = json.dumps(context)
     session.commit()
-    lead_events.log_event(
-        session, lead.id, lead_events.STAGE, 'attached_to_campaign',
-        actor_type='broker', actor_id=user.id,
-        to_value=campaign.name, meta={'campaign_id': campaign.id},
-    )
-    lead_events.log_event(
-        session, lead.id, lead_events.ACTIVITY, 'outreach_sent',
-        actor_type='broker', actor_id=user.id,
-        to_value=campaign.name, meta={'campaign_id': campaign.id, 'message_id': message.id},
-    )
+    for row in attached:
+        lead_events.log_event(
+            session, row.id, lead_events.STAGE, 'attached_to_campaign',
+            actor_type='broker', actor_id=user.id,
+            to_value=campaign.name, meta={'campaign_id': campaign.id}, commit=False,
+        )
+        lead_events.log_event(
+            session, row.id, lead_events.ACTIVITY, 'outreach_sent',
+            actor_type='broker', actor_id=user.id,
+            to_value=campaign.name,
+            meta={'campaign_id': campaign.id, 'message_id': message.id,
+                  'grouped_outreach': row.id != lead.id},
+            commit=False,
+        )
+    session.commit()
     schedule_initial_followup(session, conversation)
     return {
         'lead_id': lead.id,
@@ -1551,7 +1662,18 @@ def send(session: Session, user: User, campaign: Campaign) -> dict:
     recipient_ids = member_ids(session, user, campaign)
     if not recipient_ids:
         raise ValueError('This draft has no recipients. Add leads or discard it.')
+    properties_by_phone: dict[str, set[str]] = {}
+    for phone, property_address in (session.query(Lead.phone, Lead.property_address)
+                                    .filter(
+                                        Lead.user_id.in_(scope),
+                                        Lead.phone.isnot(None),
+                                    ).all()):
+        phone_key = normalize_phone(phone or '')
+        property_key = address_key.canonical(property_address)
+        if phone_key and property_key:
+            properties_by_phone.setdefault(phone_key, set()).add(property_key)
     validated_pairs: set[tuple[str, str]] = set()
+    validated_phones: set[str] = set()
     jobs: list[OutboundSmsJob] = []
     for recipient_batch in _batches(recipient_ids):
         people = members_by_ids(session, user, campaign, recipient_batch)
@@ -1559,15 +1681,25 @@ def send(session: Session, user: User, campaign: Campaign) -> dict:
         for lead in people:
             blocked = _blocking_reason(lead, claims)
             pair = _recipient_key(lead)
+            phone_key = normalize_phone(lead.phone or '')
             if blocked is None and pair is not None and pair in validated_pairs:
                 blocked = 'Duplicate property and phone in this campaign.'
             if blocked:
+                existing_conversation_id = claims.conversation_for(lead)
+                if existing_conversation_id is not None:
+                    lead.conversation_id = existing_conversation_id
                 skipped.append({
                     'lead_id': lead.id, 'owner_name': lead.owner_name, 'reason': blocked,
                 })
                 status = 'skipped'
                 text = ''
                 error = blocked
+            elif phone_key in validated_phones:
+                # One phone number is one recipient. The primary job carries
+                # the SMS; this property is attached after provider acceptance.
+                status = GROUPED_OUTREACH_STATUS
+                text = ''
+                error = None
             else:
                 reason, _reason_source, needs_review = resolve_reason(
                     campaign, lead,
@@ -1583,11 +1715,15 @@ def send(session: Session, user: User, campaign: Campaign) -> dict:
                     validated_pairs.add(pair)
                 text = message_template.render(
                     campaign.message_template, lead, user, reason)
+                if len(properties_by_phone.get(phone_key, set())) > 1:
+                    text = _with_multi_property_note(text)
                 # Lookup stays a separate, sequential worker stage for now.
                 status = ('awaiting_lookup'
                           if str(settings['telnyx'].get('mode')).lower() == 'telnyx'
                           else 'queued')
                 error = None
+                if phone_key:
+                    validated_phones.add(phone_key)
             jobs.append(OutboundSmsJob(
                 job_key=f'campaign:{campaign.id}:lead:{lead.id}',
                 campaign_id=campaign.id,
@@ -1635,9 +1771,61 @@ def launch(session: Session, user: User, lead_ids: list[int], reason: str = '') 
 # -- reporting -------------------------------------------------------------
 
 
+def _reply_outcome_properties(session: Session, user: User,
+                              campaign_ids: set[int] | None = None) -> tuple[set, set]:
+    """Property keys with any reply and with a currently positive reply."""
+    scope = brokerage_user_ids(session, user)
+    timeline_query = (session.query(Message)
+                      .join(Conversation, Conversation.id == Message.conversation_id)
+                      .filter(Conversation.user_id.in_(scope)))
+    if campaign_ids is not None:
+        conversation_ids = [row[0] for row in (
+            session.query(Message.conversation_id)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .filter(Conversation.user_id.in_(scope),
+                    Message.campaign_id.in_(campaign_ids),
+                    Message.event_type == 'outreach.initial')
+            .distinct().all()
+        )]
+        if not conversation_ids:
+            return set(), set()
+        timeline_query = timeline_query.filter(Message.conversation_id.in_(conversation_ids))
+    timeline = timeline_query.order_by(
+        Message.conversation_id, Message.created_at, Message.id,
+    ).all()
+    latest_campaign: dict[int, tuple[int, str]] = {}
+    replied_by_conversation: dict[int, tuple[int, str]] = {}
+    for message in timeline:
+        if message.event_type == 'outreach.initial' and message.campaign_id is not None:
+            property_key = message.property_key or f'__message_{message.id}'
+            latest_campaign[message.conversation_id] = (message.campaign_id, property_key)
+        elif message.direction == 'inbound' and message.conversation_id in latest_campaign:
+            replied_by_conversation[message.conversation_id] = latest_campaign[message.conversation_id]
+
+    replied_properties = set(replied_by_conversation.values())
+    if not replied_by_conversation:
+        return replied_properties, set()
+    completed_lofty = session.query(LoftyExport.conversation_id).filter(
+        LoftyExport.status == 'completed',
+    )
+    positive_ids = {row[0] for row in session.query(Conversation.id).filter(
+        Conversation.id.in_(replied_by_conversation),
+        Conversation.lead_status != 'dnc',
+        or_(
+            Conversation.lead_status.in_(POSITIVE_REPLY_STATUSES),
+            Conversation.meeting_booked.is_(True),
+            Conversation.id.in_(completed_lofty),
+        ),
+    ).all()}
+    return replied_properties, {
+        outcome for conversation_id, outcome in replied_by_conversation.items()
+        if conversation_id in positive_ids
+    }
+
+
 def _counts_by_campaign(session: Session, user: User,
-                        campaign_ids: set[int] | None = None) -> tuple[dict, dict, dict]:
-    """Properties selected, reached, and replied for each campaign.
+                        campaign_ids: set[int] | None = None) -> tuple[dict, dict, dict, dict]:
+    """Properties selected, reached, replied, and positive for each campaign.
 
     Campaign reporting is property-based: two contact numbers for the same
     canonical address are one lead in the overview. Messages still remain
@@ -1661,65 +1849,58 @@ def _counts_by_campaign(session: Session, user: User,
 
     # Only provider-accepted messages count as reached. Submission placeholders
     # and retries stay out, as do later carrier-rejected messages.
-    non_delivered_statuses = (
-        'failed', 'gw_timeout', 'dlr_timeout', 'delivery_failed',
-        'sending_failed', 'delivery_unconfirmed', 'rejected', 'undelivered',
-        'submission_queued', 'submission_retry',
-    )
     delivered_properties: dict[int, set[str]] = {}
-    delivered_query = (session.query(Message.id, Message.campaign_id, Message.property_key)
+    delivered_query = (session.query(Message.id, Message.campaign_id, Message.property_key,
+                                      Message.conversation_id)
                        .join(Conversation, Conversation.id == Message.conversation_id)
                        .filter(Message.campaign_id.isnot(None),
                                Message.event_type == 'outreach.initial',
-                               ~Message.status.in_(non_delivered_statuses),
+                               ~Message.status.in_(NON_DELIVERED_STATUSES),
                                Conversation.user_id.in_(scope)))
     if campaign_ids is not None:
         delivered_query = delivered_query.filter(Message.campaign_id.in_(campaign_ids))
     delivered_rows = delivered_query.all()
-    for message_id, campaign_id, property_key in delivered_rows:
+    delivered_threads: set[tuple[int, int]] = set()
+    for message_id, campaign_id, property_key, conversation_id in delivered_rows:
         key = property_key or f'__message_{message_id}'
         delivered_properties.setdefault(campaign_id, set()).add(key)
+        delivered_threads.add((campaign_id, conversation_id))
+    if delivered_threads:
+        delivered_campaign_ids = {campaign_id for campaign_id, _ in delivered_threads}
+        delivered_conversation_ids = {conversation_id for _, conversation_id in delivered_threads}
+        covered_leads = (session.query(
+                            Lead.id, Lead.campaign_id, Lead.conversation_id,
+                            Lead.property_address,
+                         )
+                         .filter(
+                             Lead.campaign_id.in_(delivered_campaign_ids),
+                             Lead.conversation_id.in_(delivered_conversation_ids),
+                         ).all())
+        for lead_id, campaign_id, conversation_id, property_address in covered_leads:
+            if (campaign_id, conversation_id) not in delivered_threads:
+                continue
+            key = address_key.canonical(property_address) or f'__lead_{lead_id}'
+            delivered_properties.setdefault(campaign_id, set()).add(key)
     delivered = {
         campaign_id: len(properties)
         for campaign_id, properties in delivered_properties.items()
     }
 
-    # Attribute an inbound reply to the most recent campaign outreach in its
-    # thread. Crediting every earlier campaign on a shared phone-number thread
-    # would double-count one owner reply and inflate conversion analytics.
-    timeline_query = (session.query(Message)
-                      .join(Conversation, Conversation.id == Message.conversation_id)
-                      .filter(Conversation.user_id.in_(scope)))
-    if campaign_ids is not None:
-        conversation_ids = [row[0] for row in (
-            session.query(Message.conversation_id)
-            .join(Conversation, Conversation.id == Message.conversation_id)
-            .filter(Conversation.user_id.in_(scope),
-                    Message.campaign_id.in_(campaign_ids),
-                    Message.event_type == 'outreach.initial')
-            .distinct().all()
-        )]
-        if not conversation_ids:
-            return member_counts, delivered, {}
-        timeline_query = timeline_query.filter(Message.conversation_id.in_(conversation_ids))
-    timeline = timeline_query.order_by(
-        Message.conversation_id, Message.created_at, Message.id,
-    ).all()
-    latest_campaign: dict[int, tuple[int, str]] = {}
-    replied_properties: set[tuple[int, str]] = set()
-    for message in timeline:
-        if message.event_type == 'outreach.initial' and message.campaign_id is not None:
-            property_key = message.property_key or f'__message_{message.id}'
-            latest_campaign[message.conversation_id] = (message.campaign_id, property_key)
-        elif message.direction == 'inbound' and message.conversation_id in latest_campaign:
-            replied_properties.add(latest_campaign[message.conversation_id])
-    replied: dict[int, int] = {}
-    for campaign_id, _property_key in replied_properties:
-        replied[campaign_id] = replied.get(campaign_id, 0) + 1
-    return member_counts, delivered, replied
+    # Attribute an inbound reply only to the most recent campaign outreach in
+    # its thread, so one owner response never credits multiple experiments.
+    replied_properties, positive_properties = _reply_outcome_properties(
+        session, user, campaign_ids,
+    )
+    def counts(properties: set[tuple[int, str]]) -> dict[int, int]:
+        result: dict[int, int] = {}
+        for campaign_id, _property_key in properties:
+            result[campaign_id] = result.get(campaign_id, 0) + 1
+        return result
+    return member_counts, delivered, counts(replied_properties), counts(positive_properties)
 
 
-def _stats(campaign: Campaign, members_count: int, delivered: int, replied: int) -> dict:
+def _stats(campaign: Campaign, members_count: int, delivered: int, replied: int,
+           positive_replies: int = 0) -> dict:
     return {
         'id': campaign.id,
         'name': campaign.name,
@@ -1732,6 +1913,7 @@ def _stats(campaign: Campaign, members_count: int, delivered: int, replied: int)
         'recipients': members_count,
         'delivered': delivered,
         'replied': replied,
+        'positive_replies': positive_replies,
         # Every selected property that has not replied is shown as "No reply",
         # including addresses whose phone attempt was rejected by the carrier.
         'no_reply': max(members_count - replied, 0),
@@ -1739,6 +1921,132 @@ def _stats(campaign: Campaign, members_count: int, delivered: int, replied: int)
         # in another thread. Zero for a draft, which has not tried yet.
         'not_sent': max(members_count - delivered, 0) if campaign.status == 'sent' else 0,
     }
+
+
+def audience_distributions(session: Session, user: User) -> list[dict]:
+    """Property-based audience mix for each visible campaign.
+
+    Campaign outcomes are property-based, so this view is too: co-owner contact
+    rows at one canonical address count once. Signals are multi-select and may
+    therefore add up to more than the campaign's recipient total.
+    """
+    rows = (session.query(
+        Lead.id, Lead.campaign_id, Lead.property_address, Lead.signals,
+        Lead.area, Lead.score, Lead.source,
+    ).filter(
+        Lead.user_id.in_(brokerage_user_ids(session, user)),
+        Lead.campaign_id.isnot(None),
+    ).all())
+    properties: dict[tuple[int, str], dict] = {}
+    for lead_id, campaign_id, property_address, signals, area, score, source in rows:
+        property_key = address_key.canonical(property_address) or f'__lead_{lead_id}'
+        item = properties.setdefault((campaign_id, property_key), {
+            'signals': set(), 'area': '', 'score': 0, 'source': '',
+        })
+        item['signals'].update(_valid_signals(signals))
+        item['area'] = item['area'] or str(area or '').strip()
+        item['source'] = item['source'] or str(source or '').strip()
+        item['score'] = max(item['score'], int(score or 0))
+
+    grouped: dict[int, list[tuple[str, dict]]] = {}
+    for (campaign_id, property_key), item in properties.items():
+        grouped.setdefault(campaign_id, []).append((property_key, item))
+
+    campaign_ids = set(grouped)
+    delivered_message_rows = (
+        session.query(Message.id, Message.campaign_id, Message.property_key,
+                      Message.conversation_id)
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .filter(
+            Message.campaign_id.in_(campaign_ids),
+            Message.event_type == 'outreach.initial',
+            ~Message.status.in_(NON_DELIVERED_STATUSES),
+            Conversation.user_id.in_(brokerage_user_ids(session, user)),
+        ).all()
+    ) if campaign_ids else []
+    delivered_properties = {
+        (campaign_id, property_key or f'__message_{message_id}')
+        for message_id, campaign_id, property_key, _conversation_id in delivered_message_rows
+    }
+    delivered_threads = {
+        (campaign_id, conversation_id)
+        for _message_id, campaign_id, _property_key, conversation_id in delivered_message_rows
+    }
+    if delivered_threads:
+        covered_leads = (session.query(
+                            Lead.id, Lead.campaign_id, Lead.conversation_id,
+                            Lead.property_address,
+                         )
+                         .filter(
+                             Lead.campaign_id.in_({row[0] for row in delivered_threads}),
+                             Lead.conversation_id.in_({row[1] for row in delivered_threads}),
+                         ).all())
+        for lead_id, campaign_id, conversation_id, property_address in covered_leads:
+            if (campaign_id, conversation_id) not in delivered_threads:
+                continue
+            property_key = address_key.canonical(property_address) or f'__lead_{lead_id}'
+            delivered_properties.add((campaign_id, property_key))
+    replied_properties, positive_properties = _reply_outcome_properties(
+        session, user, campaign_ids,
+    ) if campaign_ids else (set(), set())
+
+    def buckets(counts: dict[str, int], total: int, labels=None) -> list[dict]:
+        labels = labels or {}
+        return [{
+            'key': key,
+            'label': labels.get(key, key),
+            'count': count,
+            'share': count / total if total else 0,
+        } for key, count in sorted(counts.items(), key=lambda row: (-row[1], row[0]))]
+
+    result = []
+    for campaign_id, audience in sorted(grouped.items()):
+        total = len(audience)
+        signal_counts: dict[str, int] = {}
+        area_counts: dict[str, int] = {}
+        source_counts: dict[str, int] = {}
+        area_outcomes: dict[str, dict[str, int]] = {}
+        score_counts = {'high': 0, 'medium': 0, 'low': 0}
+        for property_key, item in audience:
+            for signal in item['signals']:
+                signal_counts[signal] = signal_counts.get(signal, 0) + 1
+            area = item['area'] or 'unknown'
+            area_counts[area] = area_counts.get(area, 0) + 1
+            source = item['source'] or 'unknown'
+            source_counts[source] = source_counts.get(source, 0) + 1
+            band = 'high' if item['score'] >= 70 else 'medium' if item['score'] >= 40 else 'low'
+            score_counts[band] += 1
+            outcome = area_outcomes.setdefault(area, {
+                'audience': 0, 'outreached': 0, 'replied': 0, 'positive_replies': 0,
+            })
+            outcome['audience'] += 1
+            key = (campaign_id, property_key)
+            outcome['outreached'] += int(key in delivered_properties)
+            outcome['replied'] += int(key in replied_properties)
+            outcome['positive_replies'] += int(key in positive_properties)
+        result.append({
+            'campaign_id': campaign_id,
+            'recipients': total,
+            'signals': buckets(signal_counts, total, {
+                key: signal_label(key) for key in signal_counts
+            }),
+            'areas': buckets(area_counts, total, {'unknown': 'Unknown area'}),
+            'score_bands': buckets(score_counts, total, {
+                'high': 'High (70+)', 'medium': 'Medium (40–69)', 'low': 'Low (0–39)',
+            }),
+            'sources': buckets(source_counts, total, {
+                key: ('Unknown source' if key == 'unknown'
+                      else key.replace('_', ' ').title()) for key in source_counts
+            }),
+            'area_outcomes': [{
+                'key': key,
+                'label': 'Unknown area' if key == 'unknown' else key,
+                **values,
+            } for key, values in sorted(
+                area_outcomes.items(), key=lambda row: (-row[1]['outreached'], row[0]),
+            )],
+        })
+    return result
 
 
 def overview(session: Session, user: User, progress=None) -> list[dict]:
@@ -1750,13 +2058,14 @@ def overview(session: Session, user: User, progress=None) -> list[dict]:
     total = len(campaigns)
     if progress:
         progress(total, 0)
-    member_counts, delivered, replied = _counts_by_campaign(session, user)
+    member_counts, delivered, replied, positive = _counts_by_campaign(session, user)
     owners = {owner.id: owner for owner in session.query(User).filter(
         User.id.in_({campaign.user_id for campaign in campaigns})).all()} if campaigns else {}
     rows = []
     for loaded, campaign in enumerate(campaigns, start=1):
         stats = _stats(campaign, member_counts.get(campaign.id, 0),
-                       delivered.get(campaign.id, 0), replied.get(campaign.id, 0))
+                       delivered.get(campaign.id, 0), replied.get(campaign.id, 0),
+                       positive.get(campaign.id, 0))
         owner = owners.get(campaign.user_id)
         stats.update(
             broker_id=owner.id if owner else campaign.user_id,
@@ -1778,11 +2087,12 @@ def suggest_reasons(session: Session, user: User, campaign: Campaign,
 
 def detail(session: Session, user: User, campaign: Campaign,
            preview_page: int = 1, filters: dict | None = None) -> dict:
-    member_counts, delivered, replied = _counts_by_campaign(
+    member_counts, delivered, replied, positive = _counts_by_campaign(
         session, user, {campaign.id},
     )
     stats = _stats(campaign, member_counts.get(campaign.id, 0),
-                   delivered.get(campaign.id, 0), replied.get(campaign.id, 0))
+                   delivered.get(campaign.id, 0), replied.get(campaign.id, 0),
+                   positive.get(campaign.id, 0))
     owner = session.query(User).filter(User.id == campaign.user_id).first()
     stats.update(
         broker_id=owner.id if owner else campaign.user_id,

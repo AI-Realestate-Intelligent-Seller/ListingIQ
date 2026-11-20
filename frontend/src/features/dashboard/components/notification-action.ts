@@ -1,4 +1,4 @@
-export type DashboardTab = "overview" | "directory" | "assignments" | "leads" | "campaigns" | "followups" | "calendar" | "persona";
+export type DashboardTab = "overview" | "directory" | "assignments" | "leads" | "campaigns" | "analysis" | "followups" | "calendar" | "persona";
 
 export type NotificationAction = {
   view: DashboardTab;
@@ -6,9 +6,11 @@ export type NotificationAction = {
   booking_id?: number;
   lead_id?: number;
   campaign_id?: number;
+  /** An experiment can open Follow-ups scoped to all of its variant campaigns. */
+  campaign_ids?: readonly number[];
 };
 
-const tabs: DashboardTab[] = ["overview", "directory", "assignments", "leads", "campaigns", "followups", "calendar", "persona"];
+const tabs: DashboardTab[] = ["overview", "directory", "assignments", "leads", "campaigns", "analysis", "followups", "calendar", "persona"];
 
 export function parseNotificationAction(value: unknown): NotificationAction | null {
   if (!value || typeof value !== "object") return null;
@@ -19,6 +21,11 @@ export function parseNotificationAction(value: unknown): NotificationAction | nu
     const id = Number(raw[key]);
     if (Number.isSafeInteger(id) && id > 0) action[key] = id;
   }
+  const campaignIds = Array.isArray(raw.campaign_ids)
+    ? raw.campaign_ids
+    : typeof raw.campaign_ids === "string" ? raw.campaign_ids.split(",") : [];
+  const validCampaignIds = campaignIds.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0);
+  if (validCampaignIds.length) action.campaign_ids = [...new Set(validCampaignIds)];
   return action;
 }
 

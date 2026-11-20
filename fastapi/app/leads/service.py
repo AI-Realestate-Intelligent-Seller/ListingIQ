@@ -8,6 +8,7 @@ state, so it can never drift out of sync with the conversation it points at.
 from __future__ import annotations
 
 from datetime import datetime
+import random
 
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -384,6 +385,12 @@ def _pool_leads(session: Session, user: User) -> list[Lead]:
 def pool_total(session: Session, user: User) -> int:
     """The exact unfiltered count shown in Lead Pool."""
     return len(_pool_leads(session, user))
+
+
+def random_pool_lead_ids(session: Session, user: User, count: int) -> list[int]:
+    """A non-repeating random sample from exactly what the Lead Pool can show."""
+    rows = _pool_leads(session, user)
+    return [lead.id for lead in random.sample(rows, min(count, len(rows)))]
 
 
 def _city_states(locations: list[Location]) -> dict[str, str]:

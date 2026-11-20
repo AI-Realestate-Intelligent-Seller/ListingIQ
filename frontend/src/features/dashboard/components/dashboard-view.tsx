@@ -14,6 +14,7 @@ import { endSession, markActivity, watchSession } from "@/features/auth/lib/sess
 import type { AuthUser, BrokerageOverview, DirectoryMember, InvitableRole } from "@/features/auth/types/auth.types";
 import { createInvitation, getBrokerageOverview, getTeamDirectory } from "@/features/auth/api/auth-api";
 import { CampaignsView } from "@/features/campaigns/components/campaigns-view";
+import { AnalysisView } from "@/features/analysis/components/analysis-view";
 import { FollowUpsBoard } from "@/features/followups/components/followups-board";
 import type { FollowUpCategory } from "@/features/followups/components/followups-board";
 import { LeadPool } from "@/features/leads/components/lead-pool";
@@ -31,6 +32,7 @@ import { actionFromUrl, parseNotificationAction, type DashboardTab, type Notific
 import {
   actionFromDashboardPath,
   dashboardPath,
+  isAddressableAnalysisPath,
   legacyActionFromSearch,
   pathForRole,
   resolveDestination,
@@ -303,7 +305,9 @@ export function DashboardView() {
   const [draftCampaignId, setDraftCampaignId] = useState<number | null>(null);
   /** Set when Campaigns sends the broker to one campaign's replies. */
   const [followUpCampaignId, setFollowUpCampaignId] = useState<number | null>(null);
-  const [followUpCategory, setFollowUpCategory] = useState<FollowUpCategory>("others");
+  /** Variant campaign ids when Follow-ups was opened from an experiment. */
+  const [followUpCampaignIds, setFollowUpCampaignIds] = useState<number[]>([]);
+  const [followUpCategory, setFollowUpCategory] = useState<FollowUpCategory>("replied");
   const [hobOverview, setHobOverview] = useState<BrokerageOverview | null>(null);
   const [hobOverviewError, setHobOverviewError] = useState("");
   const [agentOverview, setAgentOverview] = useState<AgentOverview | null>(null);
@@ -519,7 +523,7 @@ useEffect(() => {
 
   /** Choosing a tab closes the drawer so the phone lands on the content. */
   function openTab(tab: DashboardTab): void {
-    if (tab === "followups") setFollowUpCategory("others");
+    if (tab === "followups") setFollowUpCategory("replied");
     navigateDashboard({ view: tab });
   }
 
@@ -547,6 +551,7 @@ useEffect(() => {
     setFocusBookingId(action.booking_id ?? null);
     setFocusLeadId(action.lead_id ?? null);
     setFollowUpCampaignId(action.view === "followups" ? action.campaign_id ?? null : null);
+    setFollowUpCampaignIds(action.view === "followups" ? [...(action.campaign_ids ?? [])] : []);
     setDraftCampaignId(action.view === "campaigns" ? action.campaign_id ?? null : null);
     setNotificationNavigationId((current) => current + 1);
     setView(destination.view);
@@ -609,8 +614,22 @@ useEffect(() => {
     const initialAction = actionFromDashboardPath(initialPath, initialSearch)
       ?? legacyActionFromSearch(initialPath, initialSearch)
       ?? pendingAction ?? savedAction ?? { view: "overview" as const };
-    // Hydrate navigation from browser URL/storage after authentication.
-    navigateDashboard(initialAction, "replace");
+    // Analysis owns its nested draft/launch/comparison path. Preserve it rather
+    // than normalizing a copied deep link back to the section root.
+    if (initialAction.view === "analysis" && isAddressableAnalysisPath(initialPath)) {
+      const current = initialPath + initialSearch;
+      // Hydrate the persistent dashboard shell from the external browser URL.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setView("analysis");
+      appliedPathRef.current = current;
+      awaitingUrlRef.current = false;
+      try {
+        sessionStorage.setItem(`listingiq-dashboard:${user.id}`, JSON.stringify(initialAction));
+      } catch { /* The URL remains the source of truth. */ }
+    } else {
+      // Hydrate navigation from browser URL/storage after authentication.
+      navigateDashboard(initialAction, "replace");
+    }
     const handlePushNavigation = (event: MessageEvent) => {
       if (event.data?.type !== "NOTIFICATION_NAVIGATE") return;
       const action = parseNotificationAction(event.data.action) ?? actionFromUrl(event.data.url);
@@ -643,6 +662,17 @@ useEffect(() => {
       setPendingPersonaNavigation(action);
       return;
     }
+    if (action.view === "analysis" && isAddressableAnalysisPath(pathname)) {
+      // Browser back/forward is an external navigation source for this shell.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setView("analysis");
+      appliedPathRef.current = current;
+      awaitingUrlRef.current = false;
+      try {
+        sessionStorage.setItem(`listingiq-dashboard:${user.id}`, JSON.stringify(action));
+      } catch { /* The URL remains the source of truth. */ }
+      return;
+    }
     navigateDashboard(action, "replace");
   }, [user, pathname, search, navigateDashboard, router]);
 
@@ -654,6 +684,12 @@ useEffect(() => {
   if (!user) return null;
 
   const brokerageDomain = user.email.split("@")[1];
+  const tabHref = (tab: DashboardTab) => dashboardPath(user.role, { view: tab });
+  const openSidebarLink = (event: React.MouseEvent<HTMLAnchorElement>, tab: DashboardTab) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    openTab(tab);
+  };
 
   return (
     <RealtimeProvider>
@@ -690,12 +726,12 @@ useEffect(() => {
           ✕
         </button>
         <nav className="dashboard-nav-list" role="tablist" aria-label="Dashboard sections">
-          <button
-            type="button"
+          <a
+            href={tabHref("overview")}
             role="tab"
             aria-selected={view === "overview"}
             className={view === "overview" ? "active" : undefined}
-            onClick={() => openTab("overview")}
+            onClick={(event) => openSidebarLink(event, "overview")}
           >
             <svg className="dashboard-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
               <rect x="2.5" y="2.5" width="6.5" height="6.5" rx="1.3" />
@@ -704,65 +740,78 @@ useEffect(() => {
               <rect x="2.5" y="11.5" width="6.5" height="6" rx="1.3" />
             </svg>
             <span>Overview</span>
-          </button>
-          <button
-            type="button"
+          </a>
+          <a
+            href={tabHref("leads")}
             role="tab"
             aria-selected={view === "leads"}
             className={view === "leads" ? "active" : undefined}
-            onClick={() => openTab("leads")}
+            onClick={(event) => openSidebarLink(event, "leads")}
           >
             <svg className="dashboard-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
               <path d="M3 4h14l-5.5 6.5v5L8.5 17v-6.5L3 4z" />
             </svg>
             <span>{user.role === "agent" ? "Leads" : "Lead Pool"}</span>
-          </button>
-          {user.role !== "agent" ? <button
-            type="button"
+          </a>
+          {user.role !== "agent" ? <a
+            href={tabHref("campaigns")}
             role="tab"
             aria-selected={view === "campaigns"}
             className={view === "campaigns" ? "active" : undefined}
-            onClick={() => openTab("campaigns")}
+            onClick={(event) => openSidebarLink(event, "campaigns")}
           >
             <svg className="dashboard-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
               <rect x="2.5" y="4" width="15" height="12" rx="2" />
               <path d="M3 6l7 5 7-5" />
             </svg>
             <span>Campaigns</span>
-          </button> : null}
+          </a> : null}
+          {user.role !== "agent" ? <a
+            href={tabHref("analysis")}
+            role="tab"
+            aria-selected={view === "analysis"}
+            className={view === "analysis" ? "active" : undefined}
+            onClick={(event) => openSidebarLink(event, "analysis")}
+          >
+            <svg className="dashboard-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
+              <path d="M3 16.5V12h3v4.5M8.5 16.5V7h3v9.5M14 16.5V3.5h3v13" />
+              <path d="M2.5 16.5h15" />
+            </svg>
+            <span>Analysis</span>
+          </a> : null}
           {user.role === "broker" ? (
-            <button
-              type="button"
+            <a
+              href={tabHref("assignments")}
               role="tab"
               aria-selected={view === "assignments"}
               className={view === "assignments" ? "active" : undefined}
-              onClick={() => openTab("assignments")}
+              onClick={(event) => openSidebarLink(event, "assignments")}
             >
               <svg className="dashboard-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
                 <path d="M3 5.5h9M3 10h7M3 14.5h5M13 12l2 2 3-4" />
               </svg>
               <span>Assignments</span>
-            </button>
+            </a>
           ) : null}
-          <button
-            type="button"
+          <a
+            href={tabHref("followups")}
             role="tab"
             aria-selected={view === "followups"}
             className={view === "followups" ? "active" : undefined}
-            onClick={() => openTab("followups")}
+            onClick={(event) => openSidebarLink(event, "followups")}
           >
             <svg className="dashboard-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
               <path d="M3 4.5h14v9H8l-3.5 3v-3H3v-9z" />
             </svg>
             <span>Follow-ups</span>
-          </button>
+          </a>
           {user.role === "hob" ? (
-            <button
-              type="button"
+            <a
+              href={tabHref("directory")}
               role="tab"
               aria-selected={view === "directory"}
               className={view === "directory" ? "active" : undefined}
-              onClick={() => openTab("directory")}
+              onClick={(event) => openSidebarLink(event, "directory")}
             >
               <svg className="dashboard-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
                 <circle cx="7" cy="6" r="2.5" />
@@ -770,16 +819,16 @@ useEffect(() => {
                 <path d="M2.5 16c.4-3.2 2-4.8 4.5-4.8s4.1 1.6 4.5 4.8M11.5 12c2.8-.7 5.2.7 5.8 3.5" />
               </svg>
               <span>Team Management</span>
-            </button>
+            </a>
           ) : null}
 
    {user.role === "agent" ? (
-  <button
-    type="button"
+  <a
+    href={tabHref("calendar")}
     role="tab"
     aria-selected={view === "calendar"}
     className={view === "calendar" ? "active" : undefined}
-    onClick={() => openTab("calendar")}
+    onClick={(event) => openSidebarLink(event, "calendar")}
   >
     <svg
       className="dashboard-nav-icon"
@@ -791,20 +840,20 @@ useEffect(() => {
     </svg>
 
     <span>Calendar</span>
-  </button>
+  </a>
 ) : null}
-          <button
-            type="button"
+          <a
+            href={tabHref("persona")}
             role="tab"
             aria-selected={view === "persona"}
             className={view === "persona" ? "active" : undefined}
-            onClick={() => openTab("persona")}
+            onClick={(event) => openSidebarLink(event, "persona")}
           >
             <svg className="dashboard-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
               <path d="M10 2.5l1.5 4 4 1.5-4 1.5-1.5 4-1.5-4-4-1.5 4-1.5 1.5-4zM15.5 13l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7.7-1.8z" />
             </svg>
             <span>My AI Persona</span>
-          </button>
+          </a>
         </nav>
         <button type="button" onClick={logout}>Log out</button>
       </aside>
@@ -922,11 +971,16 @@ useEffect(() => {
           />
         ) : null}
 
+        {view === "analysis" ? (
+          <AnalysisView />
+        ) : null}
+
         {view === "followups" ? (
           <FollowUpsBoard
             key={notificationNavigationId}
             focusConversationId={focusConversationId}
             campaignId={followUpCampaignId}
+            campaignIds={followUpCampaignIds}
             initialCategory={followUpCategory}
             onConversationChange={recordFollowUpConversation}
           />

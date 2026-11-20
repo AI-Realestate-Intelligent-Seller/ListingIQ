@@ -48,7 +48,7 @@
 .sms-list-item {
   display: flex; gap: 11px; padding: 11px; width: 100%;
   border: 1px solid transparent; border-radius: 10px;
-  background: transparent; text-align: left; cursor: pointer;
+  background: transparent; color: inherit; text-align: left; text-decoration: none; cursor: pointer;
 }
 .sms-list-item:hover { background: var(--paper); }
 .sms-list-item.active { border-color: var(--accent-line); background: #eef6f2; }

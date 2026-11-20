@@ -18,6 +18,8 @@ export type Campaign = {
   delivered: number;
   /** Of those property addresses, the ones with an owner reply. */
   replied: number;
+  /** Replied properties currently classified as interested or otherwise positive. */
+  positive_replies: number;
   /** Selected property addresses still without a reply. */
   no_reply: number;
   /** Selected property addresses the send could not reach. */
@@ -26,6 +28,30 @@ export type Campaign = {
   broker_name: string | null;
   broker_email: string | null;
   broker_role: string | null;
+};
+
+export type CampaignDistributionBucket = {
+  key: string;
+  label: string;
+  count: number;
+  share: number;
+};
+
+export type CampaignAudienceDistribution = {
+  campaign_id: number;
+  recipients: number;
+  signals: CampaignDistributionBucket[];
+  areas: CampaignDistributionBucket[];
+  score_bands: CampaignDistributionBucket[];
+  sources: CampaignDistributionBucket[];
+  area_outcomes: {
+    key: string;
+    label: string;
+    audience: number;
+    outreached: number;
+    replied: number;
+    positive_replies: number;
+  }[];
 };
 
 /** One recipient of a draft, with the message they would actually receive. */

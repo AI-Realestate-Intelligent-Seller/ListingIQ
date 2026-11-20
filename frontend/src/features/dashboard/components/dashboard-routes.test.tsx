@@ -4,6 +4,7 @@ import {
   actionFromDashboardPath,
   allowedTarget,
   dashboardPath,
+  isAddressableAnalysisPath,
   legacyActionFromSearch,
   pathForRole,
   resolveDestination,
@@ -16,8 +17,10 @@ describe("dashboardPath / actionFromDashboardPath", () => {
     [{ view: "leads", lead_id: 45 }, "/dashboard/broker/leads/45"],
     [{ view: "assignments", lead_id: 9 }, "/dashboard/broker/assignments/9"],
     [{ view: "campaigns", campaign_id: 12 }, "/dashboard/broker/campaigns/12"],
+    [{ view: "analysis" }, "/dashboard/broker/analysis"],
     [{ view: "followups", conversation_id: 123 }, "/dashboard/broker/followups?conversation_id=123"],
     [{ view: "followups", campaign_id: 7 }, "/dashboard/broker/followups?campaign_id=7"],
+    [{ view: "followups", campaign_ids: [7, 8] }, "/dashboard/broker/followups?campaign_ids=7%2C8"],
     [{ view: "followups", conversation_id: 3, campaign_id: 7 }, "/dashboard/broker/followups?conversation_id=3&campaign_id=7"],
     [{ view: "calendar", booking_id: 5 }, "/dashboard/broker/calendar/5"],
     [{ view: "directory" }, "/dashboard/broker/directory"],
@@ -32,6 +35,17 @@ describe("dashboardPath / actionFromDashboardPath", () => {
 
   it("still opens the earlier /followups/{id} links", () => {
     expect(actionFromDashboardPath("/dashboard/broker/followups/18")).toEqual({ view: "followups", conversation_id: 18 });
+  });
+
+  it("opens addressable analysis states", () => {
+    expect(actionFromDashboardPath("/dashboard/broker/analysis/drafted/local-draft-id")).toEqual({ view: "analysis" });
+    expect(actionFromDashboardPath("/dashboard/broker/analysis/launched/42")).toEqual({ view: "analysis" });
+    expect(actionFromDashboardPath("/dashboard/broker/analysis/experiments/27")).toEqual({ view: "analysis" });
+    expect(actionFromDashboardPath("/dashboard/broker/analysis/comparison/experiments", "ids=7,9")).toEqual({ view: "analysis" });
+    expect(actionFromDashboardPath("/dashboard/broker/analysis/comparison/campaigns", "ids=3,4")).toEqual({ view: "analysis" });
+    expect(isAddressableAnalysisPath("/dashboard/broker/analysis/launched/42")).toBe(true);
+    expect(isAddressableAnalysisPath("/dashboard/broker/analysis")).toBe(false);
+    expect(isAddressableAnalysisPath("/dashboard/broker/analysis/launched/nope")).toBe(false);
   });
 
   it("returns null when the path has no section", () => {
@@ -53,6 +67,8 @@ describe("role rules", () => {
     expect(allowedTarget("directory", "broker")).toBe("overview");
     expect(allowedTarget("directory", "hob")).toBe("directory");
     expect(allowedTarget("campaigns", "agent")).toBe("overview");
+    expect(allowedTarget("analysis", "agent")).toBe("overview");
+    expect(allowedTarget("analysis", "broker")).toBe("analysis");
   });
 
   it("drops ids when the section was redirected", () => {

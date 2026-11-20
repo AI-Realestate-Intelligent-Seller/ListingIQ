@@ -22,6 +22,7 @@ import { ApiRequestError } from "@/lib/api/http-client";
 import { LeadDetailDrawer } from "@/features/leads/components/lead-detail-drawer";
 import { LeadTimeline } from "@/features/leads/components/lead-timeline";
 import { NotificationBell } from "@/features/dashboard/components/notification-bell";
+import { dashboardPath } from "@/features/dashboard/components/dashboard-routes";
 import { RetrievalProgress } from "@/components/loading/retrieval-progress";
 import type { QueryProgress } from "@/lib/api/query-progress";
 
@@ -81,16 +82,23 @@ type FollowUpsBoardProps = {
   focusConversationId?: number | null;
   /** Narrows the board to one campaign's replies, e.g. from the Campaigns tab. */
   campaignId?: number | null;
+  /** Narrows the board to all variant campaigns in one experiment. */
+  campaignIds?: number[];
   /** Opens the list on a dashboard outcome category. */
   initialCategory?: FollowUpCategory;
   /** Called when the user opens a chat, so the page URL can carry it. */
   onConversationChange?: (conversationId: number | null) => void;
 };
 
-export type FollowUpCategory = "leads" | "others" | "not_replied" | "all";
+export type FollowUpCategory = "replied" | "leads" | "opt_out" | "all";
+const EMPTY_CAMPAIGN_IDS: number[] = [];
+
+function isOptedOut(item: FollowUp): boolean {
+  return item.lead_status === "dnc" || item.dnc_alert || item.reason === "opted_out";
+}
 
 function isPositiveLead(item: FollowUp): boolean {
-  return item.reply_count > 0 && item.lead_status !== "dnc" && (
+  return item.reply_count > 0 && !isOptedOut(item) && (
     item.sent_to_lofty || item.meeting_booked ||
     ["interested", "ready_to_sell", "location_discussion"].includes(item.lead_status)
   );
@@ -99,7 +107,8 @@ function isPositiveLead(item: FollowUp): boolean {
 export function FollowUpsBoard({
   focusConversationId = null,
   campaignId = null,
-  initialCategory = "others",
+  campaignIds = EMPTY_CAMPAIGN_IDS,
+  initialCategory = "replied",
   onConversationChange,
 }: FollowUpsBoardProps) {
   const [followUps, setFollowUps] = useState<FollowUp[]>([]);
@@ -173,7 +182,7 @@ export function FollowUpsBoard({
       // A fresh load must not show the previous load's finished progress bar.
       if (withProgress) setLoadProgress(null);
       try {
-        const campaignFilter = selectedCampaignId ? Number(selectedCampaignId) : undefined;
+        const campaignFilter = campaignIds.length === 0 && selectedCampaignId ? Number(selectedCampaignId) : undefined;
         setFollowUps(
           await listFollowUps(
             token,
@@ -193,7 +202,7 @@ export function FollowUpsBoard({
         if (!signal?.aborted) setIsLoading(false);
       }
     },
-    [token, selectedCampaignId, handleApiError],
+    [token, selectedCampaignId, campaignIds, handleApiError],
   );
 
   const refreshMessages = useCallback(
@@ -269,6 +278,14 @@ export function FollowUpsBoard({
     setCategory("all");
   }, [campaignId]);
 
+  useEffect(() => {
+    if (campaignIds.length === 0) return;
+    // Experiment navigation owns this filter until the user leaves Follow-ups.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSelectedCampaignId("");
+    setCategory("all");
+  }, [campaignIds]);
+
   // Follow new messages only when the reader is at the bottom; never on a plain refresh.
   const followNextMessage = useThreadAutoscroll(threadRef, messages, activeId);
 
@@ -307,10 +324,11 @@ export function FollowUpsBoard({
   const needle = search.trim().toLowerCase();
   const selectedCampaign = campaigns.find((item) => String(item.id) === selectedCampaignId);
   const visible = followUps.filter((item) => {
+    if (campaignIds.length && !campaignIds.includes(item.campaign_id ?? -1)) return false;
     if (selectedCampaignId && item.campaign_id !== Number(selectedCampaignId)) return false;
     if (category === "leads" && !isPositiveLead(item)) return false;
-    if (category === "others" && (item.reply_count === 0 || isPositiveLead(item))) return false;
-    if (category === "not_replied" && item.reply_count > 0) return false;
+    if (category === "replied" && (item.reply_count === 0 || isPositiveLead(item) || isOptedOut(item))) return false;
+    if (category === "opt_out" && !isOptedOut(item)) return false;
     if (!needle) return true;
     return [item.name, item.contact, item.property_address]
       .filter(Boolean)
@@ -516,7 +534,7 @@ useEffect(() => {
   }
 
   return (
-    <section className="followups-board">
+    <section className={`followups-board${isPropertiesOpen ? " properties-open" : ""}`}>
       <header className="followups-header">
         <div>
           <span className="sms-eyebrow">CONVERSATIONS</span>
@@ -533,8 +551,8 @@ useEffect(() => {
       <div className="followups-layout">
         <aside className="followups-list-panel">
           <div className="followups-scope" role="group" aria-label="Conversation scope">
-            {(["others", "not_replied", "leads", "all"] as const).map((item) => {
-              const label = item === "leads" ? "Leads" : item === "others" ? "Replied" : item === "not_replied" ? "Not replied" : "All";
+            {(["replied", "leads", "opt_out", "all"] as const).map((item) => {
+              const label = item === "leads" ? "Leads" : item === "replied" ? "Replied" : item === "opt_out" ? "Opt-out" : "All";
               return (
                 <button
                   key={item}
@@ -561,8 +579,14 @@ useEffect(() => {
 
           <div className="followups-list-head">
             <div className="followups-campaign-filter">
-              <span>Campaign</span>
+              <span>{campaignIds.length ? "Experiment" : "Campaign"}</span>
               <div className="followups-campaign-select">
+                {campaignIds.length ? <button
+                  id="followup-campaign-filter"
+                  type="button"
+                  className="followups-campaign-box"
+                  disabled
+                >{campaignIds.length} variant campaigns</button> : <>
                 <button
                   id="followup-campaign-filter"
                   type="button"
@@ -611,6 +635,7 @@ useEffect(() => {
                     })}
                   </div>
                 ) : null}
+                </>}
               </div>
             </div>
             <span className="sms-count" title={`${visible.length} conversations`}>
@@ -640,12 +665,14 @@ useEffect(() => {
             ) : null}
 
             {visible.map((item) => (
-              <button
+              <a
                 key={item.id}
-                type="button"
+                href={viewer ? dashboardPath(viewer.role, { view: "followups", conversation_id: item.id }) : "#"}
                 role="listitem"
                 className={`followup-card${item.id === activeId ? " active" : ""}`}
-                onClick={() => {
+                onClick={(event) => {
+                  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                  event.preventDefault();
                   setActiveId(item.id);
                   onConversationChange?.(item.id);
                 }}
@@ -660,7 +687,7 @@ useEffect(() => {
                 <span className={`followup-reason reason-${
                   item.reply_count > 0 ? item.reason : "reply_needed"
                 }`}>
-                  {item.reply_count > 0 ? item.reason_label : "Waiting for first reply"}
+                  {LEAD_LABELS[item.lead_status]}
                 </span>
                 {item.has_multiple_properties ? <span className="followup-multiple-signal">Multiple properties</span> : null}
                 {item.followup_state === "pending" ? null : (
@@ -668,7 +695,7 @@ useEffect(() => {
                     {STATE_LABELS[item.followup_state]}
                   </span>
                 )}
-              </button>
+              </a>
             ))}
           </div>
         </aside>
@@ -694,7 +721,10 @@ useEffect(() => {
                   <button
                     type="button"
                     className="followup-multiple-properties"
-                    onClick={() => setIsPropertiesOpen(true)}
+                    onClick={() => {
+                      setIsActionsMenuOpen(false);
+                      setIsPropertiesOpen(true);
+                    }}
                     aria-label="View multiple properties for this owner"
                     data-tooltip="This person owns multiple properties that are expected to sell. Click to view all addresses."
                   >
@@ -770,7 +800,7 @@ useEffect(() => {
               {active.reply_count > 0 ? (
                 <p className="followups-summary">
                   <span className={`followup-reason reason-${active.reason}`}>
-                    {active.reason_label}
+                    {LEAD_LABELS[active.lead_status]}
                   </span>
                   <span>
                     {active.reply_count} {active.reply_count === 1 ? "reply" : "replies"}

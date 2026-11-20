@@ -835,7 +835,7 @@ def test_campaign_reporting_counts_unique_property_addresses(session):
     session.commit()
 
     # Both phone attempts remain, but the campaign reports one property.
-    members, delivered, replied = campaign_service._counts_by_campaign(session, user)
+    members, delivered, replied, _positive = campaign_service._counts_by_campaign(session, user)
     assert members[campaign.id] == 1
     assert delivered[campaign.id] == 1
     assert replied.get(campaign.id, 0) == 0
@@ -845,7 +845,7 @@ def test_campaign_reporting_counts_unique_property_addresses(session):
     session.add(Message(conversation_id=conversations[0].id, direction='inbound',
                         event_type='sms.inbound', status='received', text='Interested'))
     session.commit()
-    _members, _delivered, replied = campaign_service._counts_by_campaign(session, user)
+    _members, _delivered, replied, _positive = campaign_service._counts_by_campaign(session, user)
     assert replied[campaign.id] == 1
     assert campaign_service._stats(campaign, members[campaign.id],
                                    delivered[campaign.id], replied[campaign.id])['no_reply'] == 0
@@ -1482,32 +1482,32 @@ def test_a_landlord_s_other_property_is_free_for_another_brokerage(
     assert len(sent_sms) == 2
 
 
-def test_one_owner_two_properties_is_two_messages_in_one_thread(
+def test_one_owner_two_properties_is_one_message_in_one_thread(
         client, make_user, auth_header, sent_sms, session):
-    """A second thread would swallow the first one's replies — see _send_to_lead."""
+    """One phone is one recipient, even when the owner has multiple properties."""
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
     upload(client, headers, LANDLORD_CSV)
     northview = lead_id_for(client, headers, '415 Northview Lane')
     rosewood = lead_id_for(client, headers, '22 Rosewood Ct')
 
-    first = draft(client, headers, [northview])['campaign']['id']
-    client.post(f'{CAMPAIGNS_URL}/{first}/send', headers=headers)
-    second = draft(client, headers, [rosewood])['campaign']['id']
-    result = client.post(f'{CAMPAIGNS_URL}/{second}/send', headers=headers).json()
+    campaign_id = draft(client, headers, [northview, rosewood])['campaign']['id']
+    result = client.post(f'{CAMPAIGNS_URL}/{campaign_id}/send', headers=headers).json()
 
-    # The owner was texted about both, and each text names its own property.
+    # The primary property is personalized once; the other-property ask is part
+    # of that same SMS instead of becoming another outbound bubble.
     assert len(result['started']) == 1, result
-    assert len(sent_sms) == 2
+    assert len(sent_sms) == 1
     assert '415 Northview Lane' in sent_sms[0]['text']
-    assert '22 Rosewood Ct' in sent_sms[1]['text']
+    assert campaign_service.MULTI_PROPERTY_OUTREACH_NOTE in sent_sms[0]['text']
+    assert sent_sms[0]['text'].lower().rfind('reply stop') > sent_sms[0]['text'].find(
+        campaign_service.MULTI_PROPERTY_OUTREACH_NOTE)
 
     # One thread, so an inbound reply has somewhere unambiguous to land.
     threads = session.query(Conversation).filter(Conversation.contact == '+13125550142').all()
     assert len(threads) == 1
-    # Bobbie is grounded in the property just written about, and still knows the other.
-    assert '22 Rosewood Ct' in threads[0].property_address
-    assert '415 Northview Lane' in threads[0].lead_context
+    assert '415 Northview Lane' in threads[0].property_address
+    assert '22 Rosewood Ct' in threads[0].lead_context
 
     followup = client.get('/api/v1/followups?scope=all', headers=headers).json()[0]
     assert followup['has_multiple_properties'] is True
@@ -1517,10 +1517,13 @@ def test_one_owner_two_properties_is_two_messages_in_one_thread(
     }
     assert all(row['campaign_name'] for row in followup['properties'])
 
+    summary = client.get(CAMPAIGNS_URL, headers=headers).json()[0]
+    assert summary['delivered'] == 2
 
-def test_shared_thread_reports_each_delivery_but_reply_only_for_latest_campaign(
+
+def test_later_campaign_does_not_retext_an_owner_at_the_same_number(
         client, make_user, auth_header, sent_sms, session):
-    """Counting threads instead of messages would credit one and lose the other."""
+    """Other properties stay actionable through the owner's existing thread."""
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)
     upload(client, headers, LANDLORD_CSV)
@@ -1528,19 +1531,21 @@ def test_shared_thread_reports_each_delivery_but_reply_only_for_latest_campaign(
 
     first = draft(client, headers, [ids[0]])['campaign']['id']
     client.post(f'{CAMPAIGNS_URL}/{first}/send', headers=headers)
-    second = draft(client, headers, [ids[1]])['campaign']['id']
-    client.post(f'{CAMPAIGNS_URL}/{second}/send', headers=headers)
+    second_draft = client.post(
+        f'{CAMPAIGNS_URL}/draft', headers=headers, json={'lead_ids': [ids[1]]},
+    )
 
     counts = {row['id']: row for row in client.get(CAMPAIGNS_URL, headers=headers).json()}
     assert counts[first]['delivered'] == 1
-    assert counts[second]['delivered'] == 1
-    assert counts[first]['replied'] == 0 and counts[second]['replied'] == 0
+    assert counts[first]['replied'] == 0
+    assert len(sent_sms) == 1
+    assert second_draft.status_code == 400
+    assert campaign_service.OWNER_CONTACTED_HERE in second_draft.json()['detail']
 
-    # One reply must not inflate the conversion metrics of both campaigns.
+    # The reply belongs to the one campaign that actually sent the outreach.
     owner_replies(client, '+13125550142')
     counts = {row['id']: row for row in client.get(CAMPAIGNS_URL, headers=headers).json()}
-    assert counts[first]['replied'] == 0
-    assert counts[second]['replied'] == 1
+    assert counts[first]['replied'] == 1
 
 
 # -- a lead lives in one place ---------------------------------------------

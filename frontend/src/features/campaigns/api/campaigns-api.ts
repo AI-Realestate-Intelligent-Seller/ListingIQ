@@ -3,6 +3,7 @@ import { loadQueryWithProgress, type QueryProgress } from "@/lib/api/query-progr
 
 import type {
   Campaign,
+  CampaignAudienceDistribution,
   CampaignDetail,
   CampaignDraftResult,
   CampaignFilters,
@@ -26,6 +27,14 @@ function campaignPreviewParams(previewPage: number, filters: CampaignFilters): U
 /** Every campaign with its delivered / replied / no-reply counts. */
 export function listCampaigns(accessToken: string, signal?: AbortSignal): Promise<Campaign[]> {
   return getJson<Campaign[]>(CAMPAIGNS, accessToken, signal);
+}
+
+/** Audience mix for each campaign, used to spot unbalanced A/B/n runs. */
+export function fetchCampaignAudienceAnalysis(
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<CampaignAudienceDistribution[]> {
+  return getJson<CampaignAudienceDistribution[]>(`${CAMPAIGNS}/analysis/audiences`, accessToken, signal);
 }
 
 export function listCampaignsWithProgress(
@@ -68,26 +77,44 @@ export function createCampaignDraft(
   return createCampaignDraftInBackground(leadIds, accessToken);
 }
 
+/** Starts a draft using a non-repeating random sample of the current Lead Pool. */
+export function createRandomCampaignDraft(
+  count: number,
+  accessToken: string,
+): Promise<CampaignDraftResult> {
+  return createDraftInBackground(
+    `${CAMPAIGNS}/draft/random/load`,
+    `${CAMPAIGNS}/draft/random`,
+    { count },
+    accessToken,
+  );
+}
+
 async function createCampaignDraftInBackground(
   leadIds: number[],
   accessToken: string,
 ): Promise<CampaignDraftResult> {
   const payload = { lead_ids: leadIds };
+  return createDraftInBackground(
+    `${CAMPAIGNS}/draft/load`, `${CAMPAIGNS}/draft`, payload, accessToken,
+  );
+}
+
+async function createDraftInBackground<TPayload>(
+  jobPath: string,
+  fallbackPath: string,
+  payload: TPayload,
+  accessToken: string,
+): Promise<CampaignDraftResult> {
   let jobId: string;
   try {
-    const started = await postJson<{ job_id: string }, typeof payload>(
-      `${CAMPAIGNS}/draft/load`,
-      payload,
-      accessToken,
-    );
+    const started = await postJson<{ job_id: string }, TPayload>(jobPath, payload, accessToken);
     jobId = started.job_id;
   } catch (error) {
     // Older deployments and a known Redis outage have definitely not queued a
     // job, so the established synchronous endpoint remains a safe fallback.
     if (error instanceof ApiRequestError && (error.status === 404 || error.status === 503)) {
-      return postJson<CampaignDraftResult, typeof payload>(
-        `${CAMPAIGNS}/draft`, payload, accessToken,
-      );
+      return postJson<CampaignDraftResult, TPayload>(fallbackPath, payload, accessToken);
     }
     throw error;
   }

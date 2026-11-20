@@ -2,7 +2,7 @@
 
 import { requestJson } from "@/lib/api/http-client";
 
-import { clearAuthSession, readAuthSession, saveAuthSession } from "./auth-storage";
+import { authSessionPersistence, clearAuthSession, readAuthSession, saveAuthSession } from "./auth-storage";
 import type { AuthResponse } from "../types/auth.types";
 
 /** Sessions end after this much inactivity, regardless of token lifetime. */
@@ -80,7 +80,7 @@ export async function ensureFreshSession(): Promise<boolean> {
       method: "POST",
       payload: { refresh_token: session.refresh_token },
     });
-    saveAuthSession(refreshed, window.localStorage.getItem("ListingIQ.auth") ? "local" : "session");
+    saveAuthSession(refreshed, authSessionPersistence());
     return true;
   } catch {
     // Refresh token rejected or expired: the session is genuinely over.

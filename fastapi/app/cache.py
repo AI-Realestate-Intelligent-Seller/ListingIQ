@@ -65,6 +65,7 @@ DASHBOARD_TABLES: tuple[str, ...] = (
     'messages',
     'bookings',
     'campaigns',
+    'experiments',
     'outbound_sms_jobs',
     'leads',
     'lead_events',

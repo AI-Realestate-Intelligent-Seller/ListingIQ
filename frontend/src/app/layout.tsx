@@ -13,6 +13,8 @@ import "leaflet.markercluster/dist/MarkerCluster.css";
 import "leaflet.markercluster/dist/MarkerCluster.Default.css";
 import "../styles/followups.css";
 import "../styles/campaigns.css";
+import "../styles/analysis.css";
+import "../styles/experiments.css";
 import "../styles/responsive.css";
 import "../styles/platform-admin.css";
 import "../styles/persona.css";

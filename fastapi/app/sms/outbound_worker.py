@@ -88,7 +88,7 @@ def _worker_name(slot: int) -> str:
 
 
 def _recipient_lock(phone: str) -> threading.Lock:
-    """Keep two properties for one owner on the existing single thread."""
+    """Serialize the one owner-level outreach and its grouped properties."""
     slot = hashlib.sha256(phone.encode('utf-8')).digest()[0]
     return _recipient_locks[slot]
 
@@ -394,6 +394,35 @@ def finalize_campaign_if_complete(campaign_id: int) -> bool:
                     .with_for_update().first())
         if campaign is None or campaign.status != 'sending':
             return False
+        grouped_jobs = (session.query(OutboundSmsJob)
+                        .filter(
+                            OutboundSmsJob.campaign_id == campaign_id,
+                            OutboundSmsJob.status == campaign_service.GROUPED_OUTREACH_STATUS,
+                        ).all())
+        for grouped in grouped_jobs:
+            primary = (session.query(OutboundSmsJob)
+                       .filter(
+                           OutboundSmsJob.campaign_id == campaign_id,
+                           OutboundSmsJob.to_number == grouped.to_number,
+                           OutboundSmsJob.id != grouped.id,
+                           OutboundSmsJob.status.in_(TERMINAL),
+                       ).order_by(OutboundSmsJob.id).first())
+            if primary is None:
+                continue
+            if primary.status == 'accepted':
+                grouped.status = 'accepted'
+                grouped.last_error = None
+                message = session.get(Message, primary.message_id) if primary.message_id else None
+                lead = session.get(Lead, grouped.lead_id)
+                if message is not None and lead is not None:
+                    lead.conversation_id = message.conversation_id
+                    lead.last_activity_at = datetime.utcnow()
+            else:
+                grouped.status = 'skipped'
+                grouped.last_error = (
+                    primary.last_error or 'The owner-level outreach was not sent.'
+                )
+        session.flush()
         pending = (session.query(OutboundSmsJob.id)
                    .filter(OutboundSmsJob.campaign_id == campaign_id,
                            ~OutboundSmsJob.status.in_(TERMINAL)).first())

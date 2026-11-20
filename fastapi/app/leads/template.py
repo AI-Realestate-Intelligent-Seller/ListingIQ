@@ -15,16 +15,21 @@ from __future__ import annotations
 import re
 
 from ..models import Lead, User
+from .location import parse as parse_location
 from .service import outreach_reason
 
 TOKEN_PATTERN = re.compile(r'\{\{\s*([A-Za-z_]+)\s*\}\}')
 
 # Shown beside the composer so the broker knows what each token becomes.
 TOKEN_HELP: dict[str, str] = {
+    'name': 'The owner’s full name as imported.',
     'first_name': 'The owner’s first name, or “there” when the import has no name.',
     'owner_name': 'The owner’s full name as imported.',
     'address': 'The property address this lead is about.',
     'area': 'The neighbourhood or city from the import, if there is one.',
+    'city': 'The city parsed from the property address.',
+    'state': 'The two-letter state code parsed from the property address.',
+    'zip_code': 'The ZIP code parsed from the property address.',
     'reason': 'Why this owner is being contacted, from the lead’s own signal.',
     'brokerage': 'Your brokerage name.',
     'agent_name': 'Your full name.',
@@ -73,11 +78,16 @@ def values_for(lead: Lead, user: User, reason_override: str = '') -> dict[str, s
     """What each token resolves to for one lead."""
     owner = (lead.owner_name or '').strip()
     reason = outreach_reason(lead, reason_override).strip()
+    location = parse_location(lead.property_address, lead.area)
     return {
+        'name': owner or 'there',
         'first_name': owner.split()[0] if owner else 'there',
         'owner_name': owner or 'there',
         'address': (lead.property_address or '').strip(),
         'area': (lead.area or '').strip(),
+        'city': location.city,
+        'state': location.state,
+        'zip_code': location.postal,
         # The reason is a sentence in its own right wherever it lands in the
         # copy, so it carries its own full stop.
         'reason': reason if _ends_sentence(reason) else f'{reason}.',

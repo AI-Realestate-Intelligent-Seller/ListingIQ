@@ -13,6 +13,7 @@ from .routes import (
     batchdata,
     calendar,
     campaigns,
+    experiments,
     conversations,
     dealmachine,
     followups,
@@ -94,6 +95,7 @@ app.include_router(sms.router, prefix="/api/v1/sms", tags=["sms"])
 app.include_router(leads.router, prefix="/api/v1/leads", tags=["leads"])
 app.include_router(followups.router, prefix="/api/v1/followups", tags=["followups"])
 app.include_router(campaigns.router, prefix="/api/v1/campaigns", tags=["campaigns"])
+app.include_router(experiments.router, prefix="/api/v1/experiments", tags=["experiments"])
 app.include_router(query_progress.router, prefix="/api/v1/query-progress", tags=["query-progress"])
 app.include_router(
     assignments.router, prefix="/api/v1/assignments", tags=["assignments"]
@@ -189,6 +191,9 @@ def startup_event():
     from .sms.followup_scheduler import start_followup_scheduler
 
     start_followup_scheduler()
+    from .experiments.scheduler import start_scheduler as start_experiment_scheduler
+
+    start_experiment_scheduler()
     if os.getenv('BOBBIE_LEGACY_KNOWLEDGE_WARMUP', '').strip().lower() in {'1', 'true', 'yes', 'on'}:
         _warm_knowledge_base()
     start_reminder_worker()
@@ -210,10 +215,12 @@ def shutdown_event():
     from .personas.imports import stop_worker as stop_persona_import_worker
     from .personas.knowledge_indexing import stop_worker as stop_persona_index_worker
     from .sms.outbound_worker import stop_embedded_worker
+    from .experiments.scheduler import stop_scheduler as stop_experiment_scheduler
 
     # Stop claiming new Persona imports first; an in-flight job keeps its lease.
     stop_persona_import_worker()
     stop_persona_index_worker()
+    stop_experiment_scheduler()
     stop_embedded_worker()
 
 

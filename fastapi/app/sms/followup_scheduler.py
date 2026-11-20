@@ -6,7 +6,8 @@ from datetime import datetime, timedelta
 from ..core.config import settings
 from ..db import SessionLocal
 from ..logger import get_logger
-from ..models import Conversation, Message
+from ..leads import template as message_template
+from ..models import Campaign, Conversation, Lead, Message, User
 from . import bobbie
 from .runtime_context import AgentResolutionError, resolve_agent_runtime_context, runtime_context_is_current
 from .service import SmsDeliveryError, history_for, send_and_store_message
@@ -33,14 +34,20 @@ def _has_inbound(session, conversation: Conversation) -> bool:
 
 def schedule_initial_followup(session, conversation: Conversation, now: datetime | None = None) -> None:
     """Start a fresh cadence after a successful campaign outreach."""
-    if not settings['sms']['followup_enabled']:
+    campaign = session.get(Campaign, conversation.campaign_id) if conversation.campaign_id else None
+    if campaign is not None and campaign.followup_enabled is False:
+        return
+    if not settings['sms']['followup_enabled'] and not (campaign and campaign.followup_enabled):
         return
     now = now or datetime.utcnow()
     conversation.followup_attempt_count = 0
     conversation.followup_started_at = now
     conversation.final_followup_sent_at = None
     conversation.dead_at = None
-    conversation.next_followup_at = now + _hours('followup_first_delay_hours')
+    delay = (timedelta(hours=campaign.followup_delay_hours)
+             if campaign and campaign.followup_enabled and campaign.followup_delay_hours
+             else _hours('followup_first_delay_hours'))
+    conversation.next_followup_at = now + delay
     session.add(conversation)
     session.commit()
 
@@ -100,6 +107,10 @@ def process_due_conversation(session, conversation_id: int,
         return 'cancelled'
 
     maximum = max(int(settings['sms']['followup_max_attempts']), 1)
+    campaign = session.get(Campaign, conversation.campaign_id) if conversation.campaign_id else None
+    custom_followup = bool(campaign and campaign.followup_enabled and campaign.followup_template)
+    if custom_followup:
+        maximum = 1
     if conversation.followup_attempt_count >= maximum:
         conversation.next_followup_at = None
         conversation.dead_at = now
@@ -112,26 +123,35 @@ def process_due_conversation(session, conversation_id: int,
         return 'dead'
 
     attempt = conversation.followup_attempt_count + 1
-    try:
-        agent_context = resolve_agent_runtime_context(session, conversation)
-    except AgentResolutionError as error:
-        logger.warning('[followup] conversation=%s cancelled=true reason=%s', conversation.id, error)
-        cancel_followup_cadence(session, conversation)
-        return 'cancelled'
-    message = bobbie.generate_no_response_followup(
-        conversation, history_for(session, conversation), attempt, maximum,
-        agent_context=agent_context)
-    try:
-        current = runtime_context_is_current(session, conversation, agent_context)
-    except AgentResolutionError:
-        current = False
-    if not current:
-        # The agent or their active Persona changed while the text was written.
-        logger.warning('[followup] conversation=%s skipped=true reason=agent_context_changed', conversation.id)
-        conversation.next_followup_at = now + timedelta(minutes=10)
-        session.add(conversation)
-        session.commit()
-        return 'retry'
+    if custom_followup:
+        lead = (session.query(Lead).filter(Lead.conversation_id == conversation.id,
+                                           Lead.campaign_id == campaign.id).first())
+        owner = session.get(User, campaign.user_id)
+        if lead is None or owner is None:
+            cancel_followup_cadence(session, conversation)
+            return 'cancelled'
+        message = message_template.render(campaign.followup_template, lead, owner)
+    else:
+        try:
+            agent_context = resolve_agent_runtime_context(session, conversation)
+        except AgentResolutionError as error:
+            logger.warning('[followup] conversation=%s cancelled=true reason=%s', conversation.id, error)
+            cancel_followup_cadence(session, conversation)
+            return 'cancelled'
+        message = bobbie.generate_no_response_followup(
+            conversation, history_for(session, conversation), attempt, maximum,
+            agent_context=agent_context)
+        try:
+            current = runtime_context_is_current(session, conversation, agent_context)
+        except AgentResolutionError:
+            current = False
+        if not current:
+            # The agent or their active Persona changed while the text was written.
+            logger.warning('[followup] conversation=%s skipped=true reason=agent_context_changed', conversation.id)
+            conversation.next_followup_at = now + timedelta(minutes=10)
+            session.add(conversation)
+            session.commit()
+            return 'retry'
     try:
         send_and_store_message(session, conversation, message, f'ai.followup.{attempt}', True)
     except SmsDeliveryError as error:
@@ -143,7 +163,7 @@ def process_due_conversation(session, conversation_id: int,
         return 'retry'
 
     conversation.followup_attempt_count = attempt
-    conversation.next_followup_at = now + _hours('followup_gap_hours')
+    conversation.next_followup_at = None if custom_followup else now + _hours('followup_gap_hours')
     if attempt >= maximum:
         conversation.final_followup_sent_at = now
     session.add(conversation)

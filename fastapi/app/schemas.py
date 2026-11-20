@@ -322,6 +322,51 @@ class CampaignDraftRequest(BaseModel):
     name: Optional[str] = Field(None, max_length=200)
     message_template: Optional[str] = Field(None, max_length=1600)
 
+class CampaignRandomDraftRequest(BaseModel):
+    """Start a draft from a random sample of the current Lead Pool."""
+    count: int = Field(ge=1, le=10_000)
+
+class ExperimentVariantCreate(BaseModel):
+    label: str = Field(min_length=1, max_length=80)
+    message_template: str = Field(min_length=1, max_length=1600)
+    lead_ids: List[int] = Field(min_items=1, max_items=100_000)
+    followup_enabled: bool = False
+    followup_template: Optional[str] = Field(None, max_length=1600)
+    followup_delay_hours: Optional[float] = Field(None, ge=1, le=720)
+
+class ExperimentCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    goal_notes: Optional[str] = Field(None, max_length=4000)
+    test_dimension: str = Field(min_length=1, max_length=40)
+    test_dimension_other: Optional[str] = Field(None, max_length=200)
+    winner_metric: str = Field(min_length=1, max_length=40)
+    allocation_mode: str = Field(default='balanced', max_length=20)
+    timezone: str = Field(min_length=1, max_length=100)
+    scheduled_at: Optional[datetime] = None
+    launch_now: bool = False
+    variants: List[ExperimentVariantCreate] = Field(min_items=2, max_items=8)
+
+class ExperimentOut(BaseModel):
+    id: int
+    name: str
+    goal_notes: str = ''
+    test_dimension: str
+    test_dimension_other: str = ''
+    winner_metric: str
+    allocation_mode: str
+    timezone: str
+    scheduled_at: datetime
+    status: str
+    variants: List[dict] = Field(default_factory=list)
+    campaign_ids: List[int] = Field(default_factory=list)
+    total_leads: int = 0
+    outreach_conversations: int = 0
+    expected_max_cost: float = 0
+    error: str = ''
+    launched_at: Optional[datetime] = None
+    cancelled_at: Optional[datetime] = None
+    created_at: datetime
+
 class CampaignReasonGroupUpdate(BaseModel):
     signal: str = Field(min_length=1, max_length=64)
     reason: str = Field(default='', max_length=300)
@@ -449,12 +494,37 @@ class CampaignOut(BaseModel):
     recipients: int = 0
     delivered: int = 0
     replied: int = 0
+    positive_replies: int = 0
     no_reply: int = 0
     not_sent: int = 0
     broker_id: Optional[int] = None
     broker_name: Optional[str] = None
     broker_email: Optional[EmailStr] = None
     broker_role: Optional[str] = None
+
+class CampaignDistributionBucket(BaseModel):
+    key: str
+    label: str
+    count: int
+    share: float
+
+class CampaignAreaOutcome(BaseModel):
+    key: str
+    label: str
+    audience: int = 0
+    outreached: int = 0
+    replied: int = 0
+    positive_replies: int = 0
+
+class CampaignAudienceDistribution(BaseModel):
+    """The recipient mix behind one campaign experiment run."""
+    campaign_id: int
+    recipients: int = 0
+    signals: List[CampaignDistributionBucket] = Field(default_factory=list)
+    areas: List[CampaignDistributionBucket] = Field(default_factory=list)
+    score_bands: List[CampaignDistributionBucket] = Field(default_factory=list)
+    sources: List[CampaignDistributionBucket] = Field(default_factory=list)
+    area_outcomes: List[CampaignAreaOutcome] = Field(default_factory=list)
 
 class CampaignDetail(CampaignOut):
     preview: CampaignPreview

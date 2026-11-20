@@ -56,7 +56,7 @@
   display: flex; align-items: center; gap: 11px;
   width: 100%; padding: 9px 10px; border: 0; border-radius: 8px;
   background: transparent; color: #46504b; font: inherit; font-size: 13.5px; font-weight: 600;
-  text-align: left; cursor: pointer;
+  text-align: left; text-decoration: none; cursor: pointer;
 }
 .dashboard-sidebar nav a.active, .dashboard-sidebar nav a:hover,
 .dashboard-sidebar nav button.active, .dashboard-sidebar nav button:hover {
@@ -67,7 +67,7 @@
   fill: none; stroke: currentColor; stroke-width: 1.6;
   stroke-linecap: round; stroke-linejoin: round;
 }
-.dashboard-sidebar nav button.active .dashboard-nav-icon { opacity: 1; }
+.dashboard-sidebar nav a.active .dashboard-nav-icon, .dashboard-sidebar nav button.active .dashboard-nav-icon { opacity: 1; }
 .dashboard-sidebar > button {
   margin-top: auto; padding: 14px 6px 0; border: 0; border-top: 1px solid var(--line);
   border-radius: 0; background: transparent; color: var(--muted); font-size: 11px;

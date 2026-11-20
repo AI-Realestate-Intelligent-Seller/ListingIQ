@@ -277,6 +277,23 @@ def test_marking_do_not_contact_stops_autopilot(client, make_user, auth_header, 
     assert body['reason'] == 'opted_out'
 
 
+def test_manual_status_change_clears_stale_opt_out_reason(
+        client, make_user, auth_header, sent_sms):
+    make_user(BROKER_EMAIL, role='broker')
+    headers = auth_header(BROKER_EMAIL)
+    conversation_id = start_conversation(client, headers)
+    owner_replies(client)
+
+    client.patch(f'{FOLLOWUPS_URL}/{conversation_id}',
+                 json={'lead_status': 'dnc'}, headers=headers)
+    body = client.patch(f'{FOLLOWUPS_URL}/{conversation_id}',
+                        json={'lead_status': 'interested'}, headers=headers).json()
+
+    assert body['lead_status'] == 'interested'
+    assert body['dnc_alert'] is False
+    assert body['reason'] == 'reply_needed'
+
+
 def test_an_unknown_status_is_rejected(client, make_user, auth_header, sent_sms):
     make_user(BROKER_EMAIL, role='broker')
     headers = auth_header(BROKER_EMAIL)

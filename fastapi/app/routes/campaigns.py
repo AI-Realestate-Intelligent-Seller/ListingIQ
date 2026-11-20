@@ -16,6 +16,7 @@ from ..models import User
 from .. import cache, query_progress
 from ..schemas import (
     CampaignDetail,
+    CampaignAudienceDistribution,
     CampaignDraftRequest,
     CampaignDraftResult,
     CampaignOut,
@@ -24,6 +25,7 @@ from ..schemas import (
     CampaignReasonSuggestionRequest,
     CampaignReasonSuggestions,
     CampaignRemoveRecipientsRequest,
+    CampaignRandomDraftRequest,
     CampaignUpdateRequest,
 )
 from .auth import get_current_user, get_db
@@ -86,6 +88,19 @@ def _load_campaigns_job(job_id: str, user_id: int) -> None:
         query_progress.fail(job_id, error)
     finally:
         session.close()
+
+
+@router.get('/analysis/audiences', response_model=list[CampaignAudienceDistribution])
+def campaign_audience_analysis(current_user: User = Depends(get_current_user),
+                               session: Session = Depends(get_db)):
+    """Recipient distributions for comparing campaign experiment runs."""
+    _require_access(current_user)
+    return cache.get_or_load(
+        'campaign-audience-analysis-v1',
+        cache.DASHBOARD_TABLES,
+        {'user': current_user.id, 'role': current_user.role},
+        lambda: campaign_service.audience_distributions(session, current_user),
+    )
 
 
 def _create_draft_job(job_id: str, user_id: int, payload: dict) -> None:
@@ -165,6 +180,24 @@ def create_draft(payload: CampaignDraftRequest,
             'not_added': not_added}
 
 
+@router.post('/draft/random', response_model=CampaignDraftResult)
+def create_random_draft(payload: CampaignRandomDraftRequest,
+                        current_user: User = Depends(get_current_user),
+                        session: Session = Depends(get_db)):
+    """Open the campaign editor with a random sample from the current Lead Pool."""
+    _require_access(current_user)
+    try:
+        campaign, not_added = campaign_service.create_random_draft(
+            session, current_user, payload.count,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return {
+        'campaign': campaign_service.detail(session, current_user, campaign, preview_page=1),
+        'not_added': not_added,
+    }
+
+
 @router.post('/draft/load', status_code=202)
 def start_draft_creation(
     payload: CampaignDraftRequest,
@@ -181,6 +214,32 @@ def start_draft_creation(
         'lead_ids': payload.lead_ids,
         'name': payload.name,
         'message_template': payload.message_template,
+    })
+    return {'job_id': job['job_id']}
+
+
+@router.post('/draft/random/load', status_code=202)
+def start_random_draft_creation(
+    payload: CampaignRandomDraftRequest,
+    background: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+):
+    """Queue a random Lead Pool sample through the normal large-draft worker."""
+    _require_access(current_user)
+    try:
+        lead_ids = campaign_service.random_draft_lead_ids(
+            session, current_user, payload.count,
+        )
+        job = query_progress.create(current_user.id, 'campaign-draft')
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except query_progress.ProgressStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error))
+    background.add_task(_create_draft_job, job['job_id'], current_user.id, {
+        'lead_ids': lead_ids,
+        'name': '',
+        'message_template': '',
     })
     return {'job_id': job['job_id']}
 

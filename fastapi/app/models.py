@@ -263,11 +263,41 @@ class Campaign(Base):
     # Versioned JSON text for per-main-signal draft reasons. NULL identifies a
     # legacy campaign and preserves its established campaign-wide precedence.
     reason_groups = Column(Text, nullable=True)
+    experiment_id = Column(Integer, ForeignKey('experiments.id'), nullable=True, index=True)
+    experiment_variant = Column(String(80), nullable=True)
+    followup_enabled = Column(Boolean, nullable=True)
+    followup_template = Column(Text, nullable=True)
+    followup_delay_hours = Column(Float, nullable=True)
     # 'draft' before enqueue, 'sending' while durable jobs run, 'sent' once all
     # jobs are terminal. A non-draft campaign never submits twice.
     status = Column(String(20), nullable=False, default='draft')
     sent_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    user = relationship('User')
+
+
+class Experiment(Base):
+    """One A/B/n test whose variants are implemented by ordinary campaigns."""
+    __tablename__ = 'experiments'
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    goal_notes = Column(Text, nullable=True)
+    test_dimension = Column(String(40), nullable=False)
+    test_dimension_other = Column(String(200), nullable=True)
+    winner_metric = Column(String(40), nullable=False)
+    allocation_mode = Column(String(20), nullable=False, default='balanced')
+    timezone = Column(String(100), nullable=False)
+    scheduled_at = Column(DateTime, nullable=False, index=True)
+    status = Column(String(24), nullable=False, default='scheduled', index=True)
+    variant_config = Column(Text, nullable=False, default='[]')
+    campaign_ids = Column(Text, nullable=False, default='[]')
+    total_leads = Column(Integer, nullable=False, default=0)
+    expected_max_cost = Column(Float, nullable=False, default=0)
+    error = Column(Text, nullable=True)
+    launched_at = Column(DateTime, nullable=True)
+    cancelled_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     user = relationship('User')
 
 

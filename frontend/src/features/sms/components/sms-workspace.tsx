@@ -10,6 +10,7 @@ import { endSession } from "@/features/auth/lib/session-guard";
 import { ConfirmDialog, type ConfirmRequest } from "@/components/dialog/confirm-dialog";
 import { ApiRequestError } from "@/lib/api/http-client";
 import { LeadDetailDrawer } from "@/features/leads/components/lead-detail-drawer";
+import { dashboardPath } from "@/features/dashboard/components/dashboard-routes";
 
 import {
   deleteConversation,
@@ -64,7 +65,8 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
 
   const threadRef = useRef<HTMLDivElement | null>(null);
   const router = useRouter();
-  const token = useMemo(() => readAuthSession()?.access_token ?? "", []);
+  const session = useMemo(() => readAuthSession(), []);
+  const token = session?.access_token ?? "";
 
   /** A rejected token means the session is over; stop polling and sign out. */
   const handleApiError = useCallback(
@@ -113,6 +115,7 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
   // Initial load.
   useEffect(() => {
     const controller = new AbortController();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void refreshConversations(controller.signal);
     return () => controller.abort();
   }, [refreshConversations]);
@@ -129,6 +132,7 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
   // Load a thread when the selection changes.
   useEffect(() => {
     if (activeId === null) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setMessages([]);
       return;
     }
@@ -140,6 +144,7 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
   // Arriving from the Lead Pool with a thread in mind.
   useEffect(() => {
     if (focusConversationId === null) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setActiveId(focusConversationId);
     setIsListOpen(false);
   }, [focusConversationId]);
@@ -272,12 +277,16 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
           ) : null}
 
           {visible.map((item) => (
-            <button
+            <a
               key={item.id}
-              type="button"
+              href={session ? dashboardPath(session.user.role, { view: "followups", conversation_id: item.id }) : "#"}
               role="listitem"
               className={`sms-list-item${item.id === activeId ? " active" : ""}`}
-              onClick={() => openConversation(item.id)}
+              onClick={(event) => {
+                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                event.preventDefault();
+                openConversation(item.id);
+              }}
             >
               <span className="sms-avatar" aria-hidden="true">{initials(item)}</span>
               <span className="sms-list-body">
@@ -300,7 +309,7 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
                   {item.dnc_alert ? <span className="sms-badge dnc">DNC</span> : null}
                 </span>
               </span>
-            </button>
+            </a>
           ))}
         </div>
       </aside>

@@ -68,7 +68,7 @@
 .followup-card {
   display: grid; gap: 5px; width: 100%; padding: 13px 14px; text-align: left;
   border: 1px solid var(--line); border-radius: 8px;
-  background: var(--surface); cursor: pointer;
+  background: var(--surface); color: inherit; text-decoration: none; cursor: pointer;
   transition: border-color .15s ease, box-shadow .15s ease;
 }
 .followup-card:hover { border-color: #a9bcb5; }
@@ -372,6 +372,11 @@
   flex: 0 0 34px; width: 34px; min-width: 34px; height: 34px;
 }
 .followups-actions-menu > .sms-icon-button { font-size: 18px; line-height: 1; }
+.followups-board.properties-open .followups-actions-menu {
+  z-index: 0;
+  visibility: hidden;
+}
+.followups-board.properties-open .followup-multiple-properties::after { display: none; }
 .followups-actions-menu-list {
   position: absolute; z-index: 60; top: calc(100% + 6px); right: 0; min-width: 180px;
   white-space: nowrap;

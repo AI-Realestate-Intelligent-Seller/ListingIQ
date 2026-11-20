@@ -312,10 +312,14 @@ def drain_campaign_queue(monkeypatch):
         started, skipped = [], list(result['skipped'])
         for job_id, lead_id, owner_name in jobs:
             job = session.get(OutboundSmsJob, job_id)
-            if job is not None and job.status == 'accepted':
+            if job is not None and job.status == 'accepted' and job.message_id is not None:
                 message = session.get(Message, job.message_id)
                 started.append({'lead_id': lead_id, 'owner_name': owner_name,
                                 'conversation_id': message.conversation_id, 'text': job.text})
+            elif job is not None and job.status == 'accepted':
+                # A grouped property shares the primary phone-level message.
+                # It is covered, but is not a second started SMS.
+                continue
             elif lead_id not in reported:
                 skipped.append({'lead_id': lead_id, 'owner_name': owner_name,
                                 'reason': job.last_error if job is not None else 'Not sent.'})

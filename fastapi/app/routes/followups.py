@@ -526,6 +526,11 @@ def update_followup_status(
     if payload.lead_status in ('dnc', 'realtor'):
         # An owner marked do-not-contact (or a realtor) must never be texted again, by anyone.
         updates.update(dnc_alert=True, ai_enabled=False, handled_by='broker')
+    else:
+        # A manual override outranks the earlier classification in both directions.
+        # Without clearing this flag, the API would keep serializing the old
+        # opt-out reason after the visible lead status had changed.
+        updates['dnc_alert'] = False
     service.update_lead_progress(session, conversation, **updates)
     logger.info('[followup] conversation %s status set to %s by user %s',
                 conversation.id, payload.lead_status, current_user.id)

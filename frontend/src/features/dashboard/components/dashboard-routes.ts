@@ -8,14 +8,18 @@ import { actionFromUrl, parseNotificationAction, type DashboardTab, type Notific
  * the next segment:
  *
  *   /dashboard/{role}                         → last section this tab used (or Overview)
- *   /dashboard/{role}/{section}               → overview | leads | campaigns | assignments
+ *   /dashboard/{role}/{section}               → overview | leads | campaigns | analysis | assignments
  *                                               | followups | directory | calendar | persona
- *   /dashboard/{role}/followups?conversation_id={id}[&campaign_id={id}]
+ *   /dashboard/{role}/followups?conversation_id={id}[&campaign_id={id}|&campaign_ids={ids}]
  *                                               → the open chat, shareable
  *   /dashboard/{role}/followups/{conversationId} (older form, still read)
  *   /dashboard/{role}/leads/{leadId}
  *   /dashboard/{role}/assignments/{leadId}
  *   /dashboard/{role}/campaigns/{campaignId}  → the draft to compose
+ *   /dashboard/{role}/analysis/drafted/{draftId}
+ *   /dashboard/{role}/analysis/launched/{experimentId}
+ *   /dashboard/{role}/analysis/experiments/{experimentId}
+ *   /dashboard/{role}/analysis/comparison/{experiments|campaigns}?ids=1,2
  *   /dashboard/{role}/calendar/{bookingId}
  *
  * Legacy `/dashboard?view=…&conversation_id=…` links (push notifications,
@@ -36,7 +40,7 @@ export function allowedTarget(view: DashboardTab, role: UserRole | undefined): D
   if (target === "assignments" && role === "agent") target = "leads";
   if ((target === "directory" && role !== "hob") ||
       (target === "assignments" && role !== "broker") ||
-      (target === "campaigns" && role === "agent")) target = "overview";
+      ((target === "campaigns" || target === "analysis") && role === "agent")) target = "overview";
   return target;
 }
 
@@ -53,6 +57,9 @@ export function resolveDestination(action: NotificationAction, role: UserRole | 
       const id = action[key];
       if (id !== undefined) destination[key] = id;
     }
+    if (target === "followups" && action.campaign_ids?.length) {
+      destination.campaign_ids = action.campaign_ids;
+    }
   }
   return destination;
 }
@@ -68,13 +75,22 @@ export function dashboardPath(role: string, action: NotificationAction): string 
   if (action.view === "followups") {
     if (action.conversation_id !== undefined) query.set("conversation_id", String(action.conversation_id));
     if (action.campaign_id !== undefined) query.set("campaign_id", String(action.campaign_id));
+    if (action.campaign_ids?.length) query.set("campaign_ids", action.campaign_ids.join(","));
   }
   const search = query.toString();
   return segments.join("/") + (search ? `?${search}` : "");
 }
 
+/** Analysis owns nested draft, launch, and comparison URLs inside its mounted view. */
+export function isAddressableAnalysisPath(pathname: string): boolean {
+  return /^\/dashboard\/[^/]+\/analysis\/(?:drafted(?:\/[^/]+)?|launched(?:\/\d+)?|experiments\/\d+|comparison\/(?:experiments|campaigns))\/?$/.test(pathname);
+}
+
 /** Parse `/dashboard/{role}/{section}[/{id}]`. Null when no section is in the path. */
 export function actionFromDashboardPath(pathname: string, search = ""): NotificationAction | null {
+  if (/^\/dashboard\/[^/]+\/analysis\/?$/.test(pathname) || isAddressableAnalysisPath(pathname)) {
+    return { view: "analysis" };
+  }
   const match = pathname.match(/^\/dashboard\/[^/]+\/([^/]+)(?:\/(\d+))?\/?$/);
   if (!match) return null;
   const view = match[1];
@@ -85,6 +101,7 @@ export function actionFromDashboardPath(pathname: string, search = ""): Notifica
   if (view === "followups") {
     raw.conversation_id = query.get("conversation_id") ?? match[2];
     if (query.get("campaign_id")) raw.campaign_id = query.get("campaign_id");
+    if (query.get("campaign_ids")) raw.campaign_ids = query.get("campaign_ids");
   }
   return parseNotificationAction(raw);
 }
