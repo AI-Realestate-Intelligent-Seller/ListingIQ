@@ -312,6 +312,22 @@ class LeadCampaignRequest(BaseModel):
     # Optional: when blank, each lead's own signals supply the reason.
     outreach_reason: Optional[str] = Field(None, max_length=300)
 
+class LeadIndividualMessageRequest(BaseModel):
+    """Text one lead directly from the Lead Pool, outside any campaign batch.
+
+    `phones` chooses which of the lead's numbers to text; left out, every
+    contactable number on the lead is messaged.
+    """
+    text: str = Field(min_length=1, max_length=1600)
+    phones: Optional[List[str]] = Field(None, max_items=25)
+
+class LeadIndividualMessageResult(BaseModel):
+    campaign_id: int
+    campaign_name: str
+    text: str
+    started: List[dict] = Field(default_factory=list)
+    skipped: List[dict] = Field(default_factory=list)
+
 class CampaignDraftRequest(BaseModel):
     """Turn a selection in the Lead Pool into a draft campaign to compose.
 
@@ -346,6 +362,20 @@ class ExperimentCreateRequest(BaseModel):
     launch_now: bool = False
     variants: List[ExperimentVariantCreate] = Field(min_items=2, max_items=8)
 
+
+class ExperimentFollowupUpdate(BaseModel):
+    followup_enabled: bool
+    followup_template: Optional[str] = Field(None, max_length=1600)
+    followup_delay_hours: float = Field(default=48, ge=1, le=720)
+
+
+class ExperimentRandomLeadAdd(BaseModel):
+    count: int = Field(ge=1, le=10_000)
+
+
+class ExperimentRenameRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
 class ExperimentOut(BaseModel):
     id: int
     name: str
@@ -361,6 +391,7 @@ class ExperimentOut(BaseModel):
     campaign_ids: List[int] = Field(default_factory=list)
     total_leads: int = 0
     outreach_conversations: int = 0
+    outreach_complete: bool = False
     expected_max_cost: float = 0
     error: str = ''
     launched_at: Optional[datetime] = None
@@ -488,6 +519,7 @@ class CampaignOut(BaseModel):
     message_template: str
     outreach_reason: str = ''
     group_reason_mode: bool = False
+    kind: str = ''
     status: str
     sent_at: Optional[datetime] = None
     created_at: Optional[datetime] = None

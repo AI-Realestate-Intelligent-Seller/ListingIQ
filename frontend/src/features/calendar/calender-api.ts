@@ -1,5 +1,6 @@
 
 import { readAuthSession } from "../auth/lib/auth-storage";
+import { fetchWithCurrentSession } from "@/lib/api/http-client";
 import type { CalendarEvent, CalendarEventType } from "./type";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL;
@@ -136,15 +137,12 @@ export async function fetchCalendarEvents(): Promise<CalendarEvent[]> {
     throw new Error("NEXT_PUBLIC_API_URL is not configured");
   }
 
-  const response = await fetch(
+  const response = await fetchWithCurrentSession(
     `${API_URL}/sms/calendar/bookings`,
     {
       method: "GET",
-
-      headers: {
-        Authorization: `Bearer ${session.access_token}`,
-      },
-    }
+    },
+    session.access_token,
   );
 
   const responseText = await response.text();

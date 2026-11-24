@@ -846,6 +846,130 @@
 .experiment-list-detail small {
   color: #777067;
 }
+.experiment-launched-followups {
+  margin-top: 16px;
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+}
+.experiment-followup-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(20, 26, 23, .42);
+}
+.experiment-followup-dialog {
+  width: min(1100px, 100%);
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  padding: 20px;
+  border: 1px solid #d7d1c7;
+  border-radius: 13px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgba(20, 26, 23, .25);
+}
+.experiment-followup-dialog .experiment-launched-followups { margin-top: 0; }
+.experiment-random-lead-dialog > section { display: grid; gap: 14px; }
+.experiment-random-lead-dialog > section > header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.experiment-random-lead-dialog > section > header div { display: grid; gap: 4px; }
+.experiment-random-lead-dialog > section > header span { color: #1d5b4b; font-size: 9px; font-weight: 800; letter-spacing: .12em; }
+.experiment-random-lead-dialog > section > header h3,
+.experiment-random-lead-dialog > section > header p { margin: 0; }
+.experiment-random-lead-dialog > section > header p { max-width: 720px; color: #777067; font-size: 11px; }
+.experiment-random-lead-dialog > section > header button,
+.experiment-random-lead-dialog article > button {
+  padding: 7px 11px;
+  border: 1px solid #1d5b4b;
+  border-radius: 7px;
+  background: #1d5b4b;
+  color: #fff;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.experiment-random-lead-dialog > section > header button { border-color: #d7d1c7; background: #fff; color: #4d5753; }
+.experiment-random-lead-dialog button:disabled { opacity: .55; cursor: not-allowed; }
+.experiment-random-lead-dialog > section > div {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+.experiment-random-lead-dialog article {
+  display: grid;
+  align-content: start;
+  gap: 11px;
+  padding: 13px;
+  border: 1px solid #dcd7ce;
+  border-radius: 9px;
+  background: #fff;
+}
+.experiment-random-lead-dialog article > div,
+.experiment-random-lead-dialog label { display: grid; gap: 4px; }
+.experiment-random-lead-dialog article small,
+.experiment-random-lead-dialog label span { color: #777067; font-size: 10px; }
+.experiment-random-lead-dialog input { padding: 9px; border: 1px solid #d7d1c7; border-radius: 7px; font: inherit; }
+.experiment-random-lead-dialog article > button { justify-self: end; }
+.experiment-random-lead-dialog .experiment-audience-notice { margin: 0; padding: 9px 11px; border-radius: 7px; background: #eef6f2; color: #1d5b4b; font-size: 11px; font-weight: 700; }
+.experiment-launched-followups > header {
+  position: relative;
+  display: grid;
+  gap: 3px;
+  margin-bottom: 10px;
+}
+.experiment-launched-followups > header span {
+  color: #1d5b4b;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .12em;
+}
+.experiment-launched-followups > header h3,
+.experiment-launched-followups > header p { margin: 0; }
+.experiment-launched-followups > header p { color: #777067; font-size: 11px; }
+.experiment-launched-followups > header > button { position: absolute; top: 0; right: 0; padding: 5px 8px; border: 1px solid #d7d1c7; border-radius: 6px; background: #fff; color: #4d5753; font: inherit; font-size: 10px; cursor: pointer; }
+.experiment-launched-followups > div {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.experiment-launched-followup-card {
+  display: grid;
+  align-content: start;
+  gap: 11px;
+  padding: 13px;
+  border: 1px solid #dcd7ce;
+  border-radius: 9px;
+  background: #fff;
+}
+.experiment-launched-followup-card > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+.experiment-launched-followup-card > header div { display: grid; gap: 2px; }
+.experiment-launched-followup-card > header span { color: #777067; font-size: 10px; }
+.experiment-launched-followup-card > label:not(.toggle) { display: grid; gap: 5px; font-size: 11px; }
+.experiment-launched-followup-card textarea {
+  min-height: 84px;
+  resize: vertical;
+  padding: 9px;
+  border: 1px solid #d7d1c7;
+  border-radius: 7px;
+  font: inherit;
+}
+.experiment-launched-followup-delay { grid-template-columns: auto 72px 1fr !important; align-items: center; }
+.experiment-launched-followup-delay input { width: 72px; padding: 7px; border: 1px solid #d7d1c7; border-radius: 7px; }
+.experiment-launched-followup-card > button { justify-self: end; padding: 7px 11px; border: 1px solid #1d5b4b; border-radius: 7px; background: #1d5b4b; color: #fff; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; }
+.experiment-launched-followup-card > button:disabled { opacity: .55; cursor: not-allowed; }
+.experiment-launched-followup-card > p { margin: 0; color: #777067; font-size: 11px; }
 @media (max-width: 800px) {
   .experiment-modal {
     padding: 0;
@@ -865,6 +989,7 @@
   .experiment-groups,
   .experiment-followups,
   .experiment-review,
+  .experiment-launched-followups > div,
   .experiment-list-detail > div {
     grid-template-columns: 1fr;
   }

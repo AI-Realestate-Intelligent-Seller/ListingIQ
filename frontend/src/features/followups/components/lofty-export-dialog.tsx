@@ -258,7 +258,7 @@ export function LoftyExportDialog({ conversationId, accessToken, onClose }: Loft
                         />
                         <span>Lead #{leadId}</span>
                         <a
-                          href={`https://crm.lofty.com/admin/home/lead/detail/${leadId}`}
+                          href={`https://crm.lofty.com/admin/home/detail?leadId=${leadId}&type=all`}
                           target="_blank"
                           rel="noopener noreferrer"
                         >

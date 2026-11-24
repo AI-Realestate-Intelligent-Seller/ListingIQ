@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { LeadPool } from "./lead-pool";
-import { fetchLeadPool } from "../api/leads-api";
+import { fetchLeadPool, messageLead } from "../api/leads-api";
 import type { Lead } from "../types/leads.types";
 import {
   getByCity,
@@ -26,6 +26,7 @@ vi.mock("../api/leads-api", () => ({
   deleteLeads: vi.fn(),
   fetchLeadPool: vi.fn(),
   importLeads: vi.fn(),
+  messageLead: vi.fn(),
   previewImport: vi.fn(),
   repreviewImport: vi.fn(),
 }));
@@ -276,8 +277,73 @@ describe("LeadPool dependent location filters", () => {
     });
 
     render(<LeadPool />);
-    fireEvent.click(await screen.findByRole("button", { name: "Mapped Owner" }));
+    // The owner name now opens the message composer; the address locates the lead.
+    fireEvent.click(await screen.findByRole("button", { name: /123 Main St, Chicago, IL 60601/ }));
     expect(screen.getByRole("button", { name: "Hide map" })).toBeTruthy();
+  });
+
+  it("opens the individual message composer from an owner name", async () => {
+    vi.mocked(fetchLeadPool).mockResolvedValueOnce({
+      ...emptyPool,
+      leads: [{
+        id: 72,
+        owner_name: "Two Number Owner",
+        phone: "+13125550172",
+        phone_numbers: [
+          { phone: "+13125550172", dnc: false },
+          { phone: "+13125550199", dnc: false },
+          { phone: "+13125550100", dnc: true },
+        ],
+        property_address: "99 Oak St, Chicago, IL 60601",
+        area: "Chicago",
+        latitude: 41.88,
+        longitude: -87.63,
+        geocoding_status: "success",
+        geocoding_provider: "nominatim",
+        source: "csv_import",
+        property_type: null,
+        estimated_value: null,
+        listing_price: null,
+        signals: [],
+        score: 50,
+        outreach_reason: null,
+        stage: "ready",
+        last_activity_at: null,
+        conversation_id: null,
+        created_at: null,
+      }],
+      map: { mappable_count: 1, pending_count: 0, failed_count: 0 },
+      facets: { total: 1, signals: {}, stages: { ready: 1 } },
+    });
+    vi.mocked(messageLead).mockResolvedValue({
+      campaign_id: 5,
+      campaign_name: "Individually contacted",
+      text: "Hi there",
+      started: [
+        { lead_id: 72, phone: "+13125550199", owner_name: "Two Number Owner", conversation_id: 11 },
+        { lead_id: 72, phone: "+13125550172", owner_name: "Two Number Owner", conversation_id: 12 },
+      ],
+      skipped: [],
+    });
+
+    render(<LeadPool />);
+    fireEvent.click(await screen.findByRole("button", { name: "Two Number Owner" }));
+    const dialog = await screen.findByRole("dialog", { name: /Message Two Number Owner/ });
+    // Both contactable numbers are pre-selected; the DNC one cannot be chosen.
+    const boxes = dialog.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+    expect([...boxes].map((box) => [box.checked, box.disabled])).toEqual([
+      [true, false], [true, false], [false, true],
+    ]);
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), {
+      target: { value: "Hi there" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send to 2 numbers" }));
+
+    await waitFor(() => expect(messageLead).toHaveBeenCalledWith(
+      72, "Hi there", ["+13125550172", "+13125550199"], expect.any(String),
+    ));
+    expect(await screen.findByRole("status")).toBeTruthy();
   });
 
   it("shows only the selected state's cities and ZIP codes after the state changes", async () => {

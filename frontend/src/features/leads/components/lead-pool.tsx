@@ -19,6 +19,7 @@ import {
   deleteLeads,
   fetchLeadPool,
   importLeads,
+  messageLead,
   previewImport,
   repreviewImport,
 } from "../api/leads-api";
@@ -27,6 +28,7 @@ import type {
   ImportPreview,
   Lead,
   LeadDetail,
+  LeadMessageResult,
   LeadPoolResponse,
   LeadStage,
   MapBounds,
@@ -34,6 +36,7 @@ import type {
 } from "../types/leads.types";
 import { ImportDialog } from "./import-dialog";
 import { LeadDetailDrawer } from "./lead-detail-drawer";
+import { LeadMessageDialog } from "./lead-message-dialog";
 import {
   LocationFilter,
   NO_LOCATION,
@@ -212,6 +215,8 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
   /** The lead whose details panel is open, or null. */
   const [detailId, setDetailId] = useState<number | null>(null);
+  /** The lead the broker is writing an individual message to, or null. */
+  const [messagingLead, setMessagingLead] = useState<Lead | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [notice, setNotice] = useState("");
   const [isDraggingFile, setIsDraggingFile] = useState(false);
@@ -579,6 +584,47 @@ export function LeadPool({ onDraftCampaign, onOpenConversation }: LeadPoolProps)
       handleApiError(error, "Could not start a campaign from that selection.");
     } finally {
       setIsDrafting(false);
+    }
+  }
+
+  /**
+   * Texts one lead now, on each number chosen in the dialog. These threads are
+   * filed under the brokerage's one "Individually contacted" campaign, so a
+   * direct message reports as a single category beside the campaign batches.
+   */
+  async function handleSendIndividualMessage(
+    lead: Lead,
+    text: string,
+    phones: string[],
+  ): Promise<LeadMessageResult> {
+    setErrorMessage("");
+    try {
+      const result = await messageLead(lead.id, text, phones, token);
+      const who = lead.owner_name || lead.phone || "the owner";
+      const reached = result.started.length;
+      setMessagingLead(null);
+      setNotice(
+        `Messaged ${who} on ${reached} ${reached === 1 ? "number" : "numbers"} · ` +
+          `filed under ${result.campaign_name}.`,
+      );
+      if (result.skipped.length) {
+        // Say which numbers were left out rather than implying every one went.
+        setErrorMessage(
+          `${result.skipped.length} ${result.skipped.length === 1 ? "number was" : "numbers were"} not messaged: ` +
+            result.skipped
+              .slice(0, 3)
+              .map((item) => `${item.phone} — ${item.reason ?? "not contactable"}`)
+              .join(" "),
+        );
+      }
+      await refresh();
+      return result;
+    } catch (error) {
+      // 401 ends the session; anything else stays on the dialog with its reason.
+      if (error instanceof ApiRequestError && error.status === 401) {
+        handleApiError(error, "Could not send the message.");
+      }
+      throw error;
     }
   }
 
@@ -1378,15 +1424,20 @@ useEffect(() => {
                     <button
                       type="button"
                       className="leads-owner"
-                      onClick={() => focusLeadOnMap(lead)}
-                      title={lead.latitude == null || lead.longitude == null ? "Map location pending" : "Locate this lead on the map"}
+                      onClick={() => setMessagingLead(lead)}
+                      title={`Write a message to ${lead.owner_name || "this owner"}`}
                     >
                       {lead.owner_name || lead.phone || "Unnamed owner"}
                     </button>
-                    <span className="leads-address">
+                    <button
+                      type="button"
+                      className="leads-address leads-address-locate"
+                      onClick={() => focusLeadOnMap(lead)}
+                      title={lead.latitude == null || lead.longitude == null ? "Map location pending" : "Locate this lead on the map"}
+                    >
                       {lead.property_address || "No address on file"}
                       {lead.area ? ` · ${lead.area}` : ""}
-                    </span>
+                    </button>
                   </td>
                   <td>
                     <span className="leads-signals">
@@ -1483,6 +1534,14 @@ useEffect(() => {
         <p className="sms-toast" role="status" onAnimationEnd={() => setNotice("")}>
           {notice}
         </p>
+      ) : null}
+
+      {messagingLead ? (
+        <LeadMessageDialog
+          lead={messagingLead}
+          onClose={() => setMessagingLead(null)}
+          onSend={(text, phones) => handleSendIndividualMessage(messagingLead, text, phones)}
+        />
       ) : null}
 
       <LeadDetailDrawer

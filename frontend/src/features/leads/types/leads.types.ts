@@ -7,6 +7,23 @@ export type LeadSignal = {
 /** Stages are derived by the backend; the broker never sets one by hand. */
 export type LeadStage = "dnc" | "in_campaign" | "needs_review" | "not_mobile" | "ready";
 
+/** One number an individual message was sent to, or could not be sent to. */
+export type LeadMessageRecipient = {
+  lead_id: number;
+  phone: string;
+  owner_name: string | null;
+  conversation_id?: number;
+  reason?: string;
+};
+
+export type LeadMessageResult = {
+  campaign_id: number;
+  campaign_name: string;
+  text: string;
+  started: LeadMessageRecipient[];
+  skipped: LeadMessageRecipient[];
+};
+
 export type Lead = {
   id: number;
   owner_name: string | null;

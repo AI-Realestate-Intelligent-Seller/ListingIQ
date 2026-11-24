@@ -28,6 +28,7 @@ vi.mock("@/features/campaigns/api/campaigns-api", () => ({
 }));
 
 vi.mock("@/features/sms/api/sms-api", () => ({
+  getSmsConfig: vi.fn(() => Promise.resolve({ from_number: "+12245798015" })),
   listMessages: vi.fn(() => Promise.resolve([])),
   sendMessage: vi.fn(),
   setHandover: vi.fn(),

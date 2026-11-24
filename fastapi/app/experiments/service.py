@@ -1,7 +1,7 @@
 """Build, schedule, launch, and cancel A/B/n experiments."""
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import func
@@ -9,13 +9,14 @@ from sqlalchemy.orm import Session
 
 from ..leads import campaign as campaign_service
 from ..leads import template as message_template
-from ..models import Campaign, Experiment, Message, User
+from ..models import Campaign, Conversation, Experiment, Message, User
 from ..tenancy import brokerage_user_ids
 
 TEST_DIMENSIONS = {'tone', 'length', 'reason', 'open_question', 'other'}
 WINNER_METRICS = {'reply_rate', 'positive_response_rate'}
 ALLOCATION_MODES = {'balanced', 'random'}
 MESSAGE_COST = 0.0195
+DEFAULT_FOLLOWUP_DELAY_HOURS = 48.0
 
 
 def _naive_utc(value: datetime) -> datetime:
@@ -53,10 +54,53 @@ def serialize(experiment: Experiment, session: Session,
     except ValueError:
         campaign_ids = []
     campaign_ids = campaign_ids if isinstance(campaign_ids, list) else []
+    campaigns = ({row.id: row for row in session.query(Campaign).filter(
+        Campaign.id.in_(campaign_ids),
+    ).all()} if campaign_ids else {})
+    followup_started = ({row[0] for row in session.query(Conversation.campaign_id)
+                         .join(Message, Message.conversation_id == Conversation.id)
+                         .filter(
+                             Conversation.campaign_id.in_(campaign_ids),
+                             Message.event_type.like('ai.followup.%'),
+                         ).distinct().all()} if campaign_ids else set())
+    next_followups = (dict(session.query(
+        Conversation.campaign_id,
+        func.min(Conversation.next_followup_at),
+    ).filter(
+        Conversation.campaign_id.in_(campaign_ids),
+        Conversation.next_followup_at.isnot(None),
+    ).group_by(Conversation.campaign_id).all()) if campaign_ids else {})
+    enriched_variants = []
+    for stored in variants if isinstance(variants, list) else []:
+        item = dict(stored)
+        campaign_id = item.get('campaign_id')
+        campaign = campaigns.get(campaign_id)
+        if campaign is not None:
+            item['followup_enabled'] = bool(campaign.followup_enabled)
+            item['followup_template'] = campaign.followup_template
+            item['followup_delay_hours'] = (
+                campaign.followup_delay_hours or DEFAULT_FOLLOWUP_DELAY_HOURS
+            )
+        item['followup_editable'] = bool(
+            experiment.status == 'running' and campaign_id not in followup_started
+        )
+        item['followup_scheduled_at'] = next_followups.get(campaign_id)
+        enriched_variants.append(item)
     if outreach_conversations is None:
         outreach_conversations = _outreach_conversation_counts(
             session, [experiment.id],
         ).get(experiment.id, 0)
+    # Outreach is finished once the outbound worker has marked every variant
+    # 'sent', which it does only after each queued job reaches a terminal
+    # state. A variant extended with extra recipients returns to 'sending',
+    # so this reports the batch in flight, not the experiment's whole history.
+    launched_campaigns = [campaigns[row] for row in campaign_ids if row in campaigns]
+    outreach_complete = bool(
+        experiment.status == 'running'
+        and campaign_ids
+        and len(launched_campaigns) == len(campaign_ids)
+        and all(row.status == 'sent' for row in launched_campaigns)
+    )
     return {
         'id': experiment.id,
         'name': experiment.name,
@@ -68,10 +112,11 @@ def serialize(experiment: Experiment, session: Session,
         'timezone': experiment.timezone,
         'scheduled_at': experiment.scheduled_at,
         'status': experiment.status,
-        'variants': variants if isinstance(variants, list) else [],
+        'variants': enriched_variants,
         'campaign_ids': campaign_ids,
         'total_leads': experiment.total_leads,
         'outreach_conversations': outreach_conversations,
+        'outreach_complete': outreach_complete,
         'expected_max_cost': experiment.expected_max_cost,
         'error': experiment.error or '',
         'launched_at': experiment.launched_at,
@@ -126,8 +171,6 @@ def create(session: Session, user: User, payload) -> Experiment:
         message_template.validate(variant.message_template)
         if variant.followup_enabled:
             message_template.validate(variant.followup_template or '')
-            if variant.followup_delay_hours is None:
-                raise ValueError(f'Choose a follow-up delay for {variant.label}.')
         overlap = seen.intersection(variant.lead_ids)
         if overlap or len(set(variant.lead_ids)) != len(variant.lead_ids):
             raise ValueError('A lead cannot appear in more than one experiment group.')
@@ -148,7 +191,12 @@ def create(session: Session, user: User, payload) -> Experiment:
         allocation_mode=payload.allocation_mode,
         timezone=payload.timezone,
         scheduled_at=scheduled_at,
-        status='scheduled',
+        # Variant campaigns commit while they are being assembled. Keep the
+        # experiment out of the scheduler's runnable state until every variant
+        # is linked and the final configuration has been saved. This matters
+        # most for Send Now, whose scheduled_at is already due while a large
+        # audience can still take many seconds to attach.
+        status='building',
         created_at=datetime.utcnow(),
     )
     session.add(experiment)
@@ -159,17 +207,26 @@ def create(session: Session, user: User, payload) -> Experiment:
     config: list[dict] = []
     try:
         for index, variant in enumerate(payload.variants):
-            campaign, not_added = campaign_service.create_draft(
-                session, user, variant.lead_ids,
-                name=f'{experiment.name} · {variant.label}',
-                template=variant.message_template,
-                group_mode=True,
-            )
-            campaigns.append(campaign)
-            if not_added:
+            try:
+                campaign, not_added = campaign_service.create_draft(
+                    session, user, variant.lead_ids,
+                    name=f'{experiment.name} · {variant.label}',
+                    template=variant.message_template,
+                    group_mode=True,
+                )
+            except ValueError as error:
                 raise ValueError(
-                    f'{len(not_added)} leads in {variant.label} became unavailable. '
-                    'Return to the audience step and create the groups again.'
+                    f'{variant.label} has no eligible leads remaining. '
+                    'Return to the audience step and recreate the groups.'
+                ) from error
+            campaigns.append(campaign)
+            accepted_count = campaign_service.member_count(
+                session, user, campaign,
+            )
+            if accepted_count < 1:
+                raise ValueError(
+                    f'{variant.label} has no eligible leads remaining. '
+                    'Return to the audience step and recreate the groups.'
                 )
             campaign.experiment_id = experiment.id
             campaign.experiment_variant = variant.label
@@ -177,8 +234,11 @@ def create(session: Session, user: User, payload) -> Experiment:
             campaign.followup_template = (
                 variant.followup_template.strip() if variant.followup_enabled else None
             )
+            followup_delay = (
+                variant.followup_delay_hours or DEFAULT_FOLLOWUP_DELAY_HOURS
+            )
             campaign.followup_delay_hours = (
-                variant.followup_delay_hours if variant.followup_enabled else None
+                followup_delay if variant.followup_enabled else None
             )
             session.add(campaign)
             session.commit()
@@ -186,10 +246,12 @@ def create(session: Session, user: User, payload) -> Experiment:
                 'label': variant.label,
                 'message_template': variant.message_template,
                 'campaign_id': campaign.id,
-                'lead_count': len(variant.lead_ids),
+                'lead_count': accepted_count,
+                'requested_lead_count': len(set(variant.lead_ids)),
+                'skipped_lead_count': len(not_added),
                 'followup_enabled': variant.followup_enabled,
                 'followup_template': variant.followup_template or '',
-                'followup_delay_hours': variant.followup_delay_hours,
+                'followup_delay_hours': followup_delay,
                 'color_index': index,
             })
     except Exception:
@@ -204,10 +266,182 @@ def create(session: Session, user: User, payload) -> Experiment:
     followup_messages = sum(
         item['lead_count'] for item in config if item['followup_enabled']
     )
+    accepted_leads = sum(item['lead_count'] for item in config)
     experiment.variant_config = json.dumps(config)
     experiment.campaign_ids = json.dumps([campaign.id for campaign in campaigns])
-    experiment.total_leads = len(seen)
-    experiment.expected_max_cost = round((len(seen) + followup_messages) * MESSAGE_COST, 4)
+    experiment.total_leads = accepted_leads
+    experiment.expected_max_cost = round(
+        (accepted_leads + followup_messages) * MESSAGE_COST, 4,
+    )
+    experiment.status = 'scheduled'
+    session.add(experiment)
+    session.commit()
+    session.refresh(experiment)
+    return experiment
+
+
+def update_followup(session: Session, user: User, experiment: Experiment,
+                    campaign_id: int, payload) -> Experiment:
+    """Edit one launched variant until its first follow-up is sent."""
+    if experiment.status != 'running':
+        raise ValueError('Follow-ups can be edited after the experiment launches.')
+    campaign = (session.query(Campaign)
+                .filter(
+                    Campaign.id == campaign_id,
+                    Campaign.experiment_id == experiment.id,
+                    Campaign.user_id.in_(brokerage_user_ids(session, user)),
+                ).with_for_update().first())
+    if campaign is None:
+        raise LookupError('Experiment variant not found.')
+
+    conversations = (session.query(Conversation)
+                     .filter(Conversation.campaign_id == campaign.id)
+                     .with_for_update().all())
+    conversation_ids = [row.id for row in conversations]
+    if conversation_ids and session.query(Message.id).filter(
+        Message.conversation_id.in_(conversation_ids),
+        Message.event_type.like('ai.followup.%'),
+    ).first():
+        raise ValueError('This variant has already started its follow-up and is locked.')
+
+    inbound_ids = ({row[0] for row in session.query(Message.conversation_id).filter(
+        Message.conversation_id.in_(conversation_ids),
+        Message.direction == 'inbound',
+    ).distinct().all()} if conversation_ids else set())
+    if campaign.followup_enabled and any(
+        row.id not in inbound_ids
+        and row.followup_started_at is not None
+        and row.next_followup_at is None
+        and not row.followup_attempt_count
+        for row in conversations
+    ):
+        raise ValueError('This variant is starting its follow-up now and is locked.')
+
+    template = (payload.followup_template or '').strip()
+    delay = float(payload.followup_delay_hours or DEFAULT_FOLLOWUP_DELAY_HOURS)
+    if payload.followup_enabled:
+        message_template.validate(template)
+    elif not template:
+        template = campaign.followup_template or ''
+
+    initial_rows = (session.query(Message.conversation_id, func.min(Message.created_at))
+                    .filter(
+                        Message.conversation_id.in_(conversation_ids),
+                        Message.campaign_id == campaign.id,
+                        Message.event_type == 'outreach.initial',
+                    ).group_by(Message.conversation_id).all()
+                    if conversation_ids else [])
+    initial_at = dict(initial_rows)
+    for conversation in conversations:
+        if conversation.id in inbound_ids:
+            conversation.next_followup_at = None
+        elif payload.followup_enabled:
+            cadence_start = (
+                initial_at.get(conversation.id)
+                or conversation.followup_started_at
+                or campaign.sent_at
+                or datetime.utcnow()
+            )
+            conversation.followup_started_at = cadence_start
+            conversation.next_followup_at = cadence_start + timedelta(hours=delay)
+        else:
+            conversation.next_followup_at = None
+        session.add(conversation)
+
+    campaign.followup_enabled = payload.followup_enabled
+    campaign.followup_template = template or None
+    campaign.followup_delay_hours = delay
+    session.add(campaign)
+
+    try:
+        config = json.loads(experiment.variant_config or '[]')
+    except ValueError:
+        config = []
+    for item in config if isinstance(config, list) else []:
+        if item.get('campaign_id') == campaign.id:
+            item['followup_enabled'] = payload.followup_enabled
+            item['followup_template'] = template
+            item['followup_delay_hours'] = delay
+    experiment.variant_config = json.dumps(config)
+    followup_messages = sum(
+        int(item.get('lead_count') or 0)
+        for item in config
+        if item.get('followup_enabled')
+    )
+    experiment.expected_max_cost = round(
+        (experiment.total_leads + followup_messages) * MESSAGE_COST, 4,
+    )
+    session.add(experiment)
+    session.commit()
+    session.refresh(experiment)
+    return experiment
+
+
+def add_random_leads(session: Session, user: User, experiment: Experiment,
+                     campaign_id: int, count: int) -> Experiment:
+    """Add random Lead Pool recipients to one running experiment variant."""
+    if experiment.status != 'running':
+        raise ValueError(
+            'Random leads can be added only after the experiment launches.'
+        )
+    campaign = (session.query(Campaign)
+                .filter(
+                    Campaign.id == campaign_id,
+                    Campaign.experiment_id == experiment.id,
+                    Campaign.user_id.in_(brokerage_user_ids(session, user)),
+                ).first())
+    if campaign is None:
+        raise LookupError('Experiment variant not found.')
+    result = campaign_service.add_random_recipients(
+        session, user, campaign, count,
+    )
+    added = int(result['added'])
+
+    try:
+        config = json.loads(experiment.variant_config or '[]')
+    except ValueError:
+        config = []
+    for item in config if isinstance(config, list) else []:
+        if item.get('campaign_id') == campaign.id:
+            item['lead_count'] = int(item.get('lead_count') or 0) + added
+            item['requested_lead_count'] = int(
+                item.get('requested_lead_count') or item['lead_count'] - added
+            ) + count
+            item['skipped_lead_count'] = int(item.get('skipped_lead_count') or 0) + (
+                count - added
+            )
+            break
+    experiment.variant_config = json.dumps(config)
+    experiment.total_leads = int(experiment.total_leads or 0) + added
+    followup_messages = sum(
+        int(item.get('lead_count') or 0)
+        for item in config
+        if item.get('followup_enabled')
+    )
+    experiment.expected_max_cost = round(
+        (experiment.total_leads + followup_messages) * MESSAGE_COST, 4,
+    )
+    session.add(experiment)
+    session.commit()
+    session.refresh(experiment)
+    return experiment
+
+
+def rename(session: Session, user: User, experiment: Experiment, name: str) -> Experiment:
+    """Rename the experiment and keep its variant campaign labels aligned."""
+    cleaned = name.strip()
+    if not cleaned:
+        raise ValueError('Give this experiment a name.')
+    campaigns = (session.query(Campaign)
+                 .filter(
+                     Campaign.experiment_id == experiment.id,
+                     Campaign.user_id.in_(brokerage_user_ids(session, user)),
+                 ).all())
+    experiment.name = cleaned
+    for campaign in campaigns:
+        label = campaign.experiment_variant or f'Variant {campaign.id}'
+        campaign.name = f'{cleaned} · {label}'
+        session.add(campaign)
     session.add(experiment)
     session.commit()
     session.refresh(experiment)

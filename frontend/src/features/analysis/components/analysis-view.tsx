@@ -6,12 +6,18 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { RetrievalProgress } from "@/components/loading/retrieval-progress";
 import { fetchCampaignAudienceAnalysis, listCampaignsWithProgress } from "@/features/campaigns/api/campaigns-api";
 import type { Campaign, CampaignAudienceDistribution } from "@/features/campaigns/types/campaigns.types";
+import { getBrokerageOverview } from "@/features/auth/api/auth-api";
 import { readAuthSession } from "@/features/auth/lib/auth-storage";
 import { endSession } from "@/features/auth/lib/session-guard";
+import type { DashboardCommunicationTotals } from "@/features/auth/types/auth.types";
+import { getBrokerOverview } from "@/features/assignments/api/assignments-api";
 import { NotificationBell } from "@/features/dashboard/components/notification-bell";
 import { dashboardPath } from "@/features/dashboard/components/dashboard-routes";
 import { listExperiments } from "@/features/experiments/api/experiments-api";
 import { ExperimentWorkspace } from "@/features/experiments/components/experiment-workspace";
+import { ExperimentDetailMenu } from "@/features/experiments/components/experiment-detail-menu";
+import { ExperimentFollowupEditor } from "@/features/experiments/components/experiment-followup-editor";
+import { ExperimentRandomLeadEditor } from "@/features/experiments/components/experiment-random-lead-editor";
 import type { Experiment } from "@/features/experiments/types/experiments.types";
 import { ApiRequestError } from "@/lib/api/http-client";
 import type { QueryProgress } from "@/lib/api/query-progress";
@@ -190,6 +196,7 @@ export function AnalysisView() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [experiments, setExperiments] = useState<Experiment[]>([]);
   const [audiences, setAudiences] = useState<CampaignAudienceDistribution[]>([]);
+  const [communicationTotals, setCommunicationTotals] = useState<DashboardCommunicationTotals | null>(null);
   const [activeTemplateKey, setActiveTemplateKey] = useState("");
   const [templateSelection, setTemplateSelection] = useState<string[]>([]);
   const [campaignSelection, setCampaignSelection] = useState<number[]>([]);
@@ -203,6 +210,8 @@ export function AnalysisView() {
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
   const [loadProgress, setLoadProgress] = useState<QueryProgress<Campaign[]> | null>(null);
+  const [followupEditorExperimentId, setFollowupEditorExperimentId] = useState<number | null>(null);
+  const [randomLeadEditorExperimentId, setRandomLeadEditorExperimentId] = useState<number | null>(null);
   const [detailPanelHeight, setDetailPanelHeight] = useState<number | null>(null);
   const outcomeFilterRef = useRef<HTMLDivElement | null>(null);
   const detailPanelRef = useRef<HTMLElement | null>(null);
@@ -222,12 +231,18 @@ export function AnalysisView() {
     if (!token) return;
     setIsLoading(true);
     try {
-      const [campaignRows, audienceRows, experimentRows] = await Promise.all([
-        listCampaignsWithProgress(token, setLoadProgress), fetchCampaignAudienceAnalysis(token), listExperiments(token),
+      const overviewRequest = session?.user.role === "hob"
+        ? getBrokerageOverview(token)
+        : session?.user.role === "broker"
+          ? getBrokerOverview(token)
+          : Promise.resolve(null);
+      const [campaignRows, audienceRows, experimentRows, overview] = await Promise.all([
+        listCampaignsWithProgress(token, setLoadProgress), fetchCampaignAudienceAnalysis(token), listExperiments(token), overviewRequest,
       ]);
       setCampaigns(campaignRows);
       setAudiences(audienceRows);
       setExperiments(experimentRows);
+      setCommunicationTotals(overview);
       setErrorMessage("");
     } catch (error) {
       if (error instanceof ApiRequestError && error.status === 401) {
@@ -239,7 +254,7 @@ export function AnalysisView() {
     } finally {
       setIsLoading(false);
     }
-  }, [router, token]);
+  }, [router, session?.user.role, token]);
 
   useEffect(() => {
     // Mounting this workspace starts the same remote campaign query used by Campaigns.
@@ -306,6 +321,9 @@ export function AnalysisView() {
     ? variants.find((variant) => experimentNumberByKey.get(variant.key) === routedExperimentId)
     : undefined;
   const activeVariant = routedVariant ?? variants.find((variant) => variant.key === activeTemplateKey) ?? variants[0];
+  const activeExperiment = activeVariant?.experimentId
+    ? experiments.find((experiment) => experiment.id === activeVariant.experimentId)
+    : undefined;
   const activeAreas = activeVariant ? areaOutcomes(activeVariant.campaigns.map((campaign) => campaign.id), audienceByCampaign) : [];
   const campaignPages = Math.max(1, Math.ceil((activeVariant?.campaigns.length ?? 0) / CAMPAIGNS_PER_PAGE));
   const currentCampaignPage = Math.min(campaignPage, campaignPages);
@@ -315,6 +333,12 @@ export function AnalysisView() {
   ) ?? [];
   const testedCampaigns = filteredCampaigns;
   const overall = campaignMetrics(testedCampaigns);
+  const dashboardSummary = filtersActive ? null : communicationTotals;
+  const summaryCampaigns = dashboardSummary?.total_campaigns ?? filteredCampaigns.length;
+  const summaryOutreached = dashboardSummary?.total_leads_outreached ?? overall.delivered;
+  const summaryReplied = dashboardSummary?.total_leads_replied ?? overall.replied;
+  const summaryPositive = dashboardSummary?.total_positive_leads ?? overall.positiveReplies;
+  const summaryReplyRate = summaryOutreached ? summaryReplied / summaryOutreached : null;
   const comparedTemplates = templateSelection.map((key) => variants.find((variant) => variant.key === key)).filter((variant): variant is TemplateVariant => Boolean(variant));
   const comparedCampaigns = campaignSelection.map((id) => filteredCampaigns.find((campaign) => campaign.id === id)).filter((campaign): campaign is Campaign => Boolean(campaign));
   const templateComparisonItems = comparedTemplates.map((variant) => ({
@@ -380,7 +404,7 @@ export function AnalysisView() {
       {filtersActive ? <button type="button" onClick={() => { setDateFrom(""); setDateTo(""); setOutcomeFilter("all"); setIsOutcomeFilterOpen(false); }}>Clear filters</button> : null}
     </section>
 
-    <ExperimentWorkspace token={token} campaigns={campaigns} dateFrom={dateFrom} dateTo={dateTo} outcomeFilter={outcomeFilter} routeSection={routeSection === "drafted" || routeSection === "launched" ? routeSection : undefined} routeId={routeId} onRouteChange={openManagementRoute} open={showCreate} onClose={() => setShowCreate(false)} onUnauthorized={() => { endSession(); router.replace("/login?expired=1"); }} />
+    <ExperimentWorkspace token={token} campaigns={campaigns} dateFrom={dateFrom} dateTo={dateTo} outcomeFilter={outcomeFilter} routeSection={routeSection === "drafted" || routeSection === "launched" ? routeSection : undefined} routeId={routeId} onRouteChange={openManagementRoute} onOpenDetail={(id) => router.push(`${analysisBase}/experiments/${id}`, { scroll: false })} open={showCreate} onClose={() => setShowCreate(false)} onUnauthorized={() => { endSession(); router.replace("/login?expired=1"); }} />
 
     {errorMessage ? <div className="analysis-error" role="alert"><span>{errorMessage}</span><button type="button" onClick={() => void load()}>Retry</button></div> : null}
     {isLoading ? <RetrievalProgress eyebrow="ANALYSIS" title="Building your campaign story" description="Grouping matching messages and calculating their outcomes." status="Retrieving campaign results" detail="Loading templates, campaigns, areas, and replies" ariaLabel="Loading campaign analysis" progress={loadProgress} progressUnit="campaigns" /> : null}
@@ -388,9 +412,9 @@ export function AnalysisView() {
     {!isLoading && analyzedCampaigns.length > 0 ? <div className="analysis-scroll-area">
       <section className="analysis-summary" aria-label="Analysis totals">
         <article><span>Experiments</span><strong>{variants.length}</strong><small>Variant campaigns stay grouped under their experiment</small></article>
-        <article><span>Total campaigns</span><strong>{filteredCampaigns.length}</strong><small>Only campaigns matching the current filters are included</small></article>
-        <article><span>Leads outreached</span><strong>{overall.delivered.toLocaleString()}</strong><small>{overall.replied.toLocaleString()} replied</small></article>
-        <article><span>Positive responses</span><strong>{overall.positiveReplies.toLocaleString()}</strong><small>{percent(overall.replyRate)} overall reply rate</small></article>
+        <article><span>Total campaigns</span><strong>{summaryCampaigns.toLocaleString()}</strong><small>{dashboardSummary ? "Matches the Overview lifetime total" : "Only campaigns matching the current filters are included"}</small></article>
+        <article><span>Leads outreached</span><strong>{summaryOutreached.toLocaleString()}</strong><small>{summaryReplied.toLocaleString()} replied</small></article>
+        <article><span>Positive responses</span><strong>{summaryPositive.toLocaleString()}</strong><small>{percent(summaryReplyRate)} overall reply rate</small></article>
       </section>
 
       {filteredCampaigns.length ? <><section className="analysis-compare-toolbar">
@@ -416,7 +440,7 @@ export function AnalysisView() {
         {activeVariant ? <article className="analysis-template-detail" ref={detailPanelRef}>
           <header>
             <div><span>EXPERIMENT DETAIL</span><h2>{activeVariant.name}</h2><p>Experiment #{experimentNumberByKey.get(activeVariant.key)} · {activeVariant.campaigns.length} campaign runs · {activeVariant.messages.length} message variants</p></div>
-            <div className="analysis-detail-actions"><a className="analysis-conversation-link" href={dashboardPath(session?.user.role ?? "broker", { view: "followups", campaign_ids: activeVariant.campaigns.map((campaign) => campaign.id).sort((a, b) => a - b) })}>View all conversations</a><label className="analysis-compare-check"><input type="checkbox" checked={templateSelection.includes(activeVariant.key)} onChange={() => { const next = toggleValue(templateSelection, activeVariant.key); setTemplateSelection(next); setCompareMode("templates"); recordComparison("templates", next); }} /> Select experiment to compare</label></div>
+            <div className="analysis-detail-actions"><a className="analysis-conversation-link" href={dashboardPath(session?.user.role ?? "broker", { view: "followups", campaign_ids: activeVariant.campaigns.map((campaign) => campaign.id).sort((a, b) => a - b) })}>View all conversations</a><label className="analysis-compare-check"><input type="checkbox" checked={templateSelection.includes(activeVariant.key)} onChange={() => { const next = toggleValue(templateSelection, activeVariant.key); setTemplateSelection(next); setCompareMode("templates"); recordComparison("templates", next); }} /> Select experiment to compare</label>{activeExperiment ? <ExperimentDetailMenu experiment={activeExperiment} token={token} onEditFollowup={() => { setRandomLeadEditorExperimentId(null); setFollowupEditorExperimentId(activeExperiment.id); }} onAddRandomLeads={() => { setFollowupEditorExperimentId(null); setRandomLeadEditorExperimentId(activeExperiment.id); }} onRenamed={(updated) => setExperiments((rows) => rows.map((row) => row.id === updated.id ? updated : row))} onError={setErrorMessage} /> : null}</div>
           </header>
 
           <section className="analysis-message-story">
@@ -424,6 +448,9 @@ export function AnalysisView() {
           </section>
 
           <MetricStrip metrics={activeVariant.metrics} />
+
+          {activeExperiment && followupEditorExperimentId === activeExperiment.id ? <ExperimentFollowupEditor experiment={activeExperiment} token={token} onSaved={(updated) => setExperiments((rows) => rows.map((row) => row.id === updated.id ? updated : row))} onError={setErrorMessage} onClose={() => setFollowupEditorExperimentId(null)} /> : null}
+          {activeExperiment && randomLeadEditorExperimentId === activeExperiment.id ? <ExperimentRandomLeadEditor experiment={activeExperiment} token={token} onSaved={(updated) => setExperiments((rows) => rows.map((row) => row.id === updated.id ? updated : row))} onError={setErrorMessage} onClose={() => setRandomLeadEditorExperimentId(null)} /> : null}
 
           <section className="analysis-area-section">
             <div><span>AREA RESULTS</span><h3>Outreach and responses by area</h3></div>

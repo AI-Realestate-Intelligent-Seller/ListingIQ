@@ -529,6 +529,31 @@
 }
 .leads-owner:hover { color: var(--blue); text-decoration: underline; text-underline-offset: 3px; }
 .leads-address { display: block; margin-top: 1px; color: var(--muted); font-size: 12px; }
+/* The address keeps the map lookup the owner name used to carry, so clicking
+   the name can open the message composer instead. */
+.leads-address-locate {
+  padding: 0; border: 0; background: none; font: inherit; font-size: 12px;
+  text-align: left; cursor: pointer;
+}
+.leads-address-locate:hover { color: var(--blue); text-decoration: underline; text-underline-offset: 2px; }
+
+/* Individual message composer, opened from an owner name in the pool. */
+.leads-message-address { margin: 4px 0 0; color: var(--muted); font-size: 11.5px; }
+.leads-message-numbers { margin: 0 0 14px; padding: 0; border: 0; }
+.leads-message-numbers legend {
+  margin-bottom: 7px; padding: 0; color: var(--ink); font-size: 12px; font-weight: 700;
+}
+.leads-message-number {
+  display: flex; align-items: flex-start; gap: 9px; padding: 8px 10px; margin-bottom: 6px;
+  border: 1px solid var(--line); border-radius: 9px; background: var(--white); cursor: pointer;
+}
+.leads-message-number input { margin-top: 2px; width: 15px; height: 15px; accent-color: var(--blue); }
+.leads-message-number span { display: grid; gap: 1px; }
+.leads-message-number strong { color: var(--ink); font-size: 13px; font-variant-numeric: tabular-nums; }
+.leads-message-number small { color: var(--muted); font-size: 10.5px; }
+.leads-message-number.blocked { background: #fbf6f6; border-color: #e8d2d2; cursor: not-allowed; }
+.leads-message-number.blocked strong { color: #9a6a6a; text-decoration: line-through; }
+.leads-message-hint { display: block; color: var(--muted); font-size: 10.5px; }
 
 .leads-select-cell { width: 44px; }
 .leads-select-cell input { width: 16px; height: 16px; accent-color: var(--blue); cursor: pointer; }

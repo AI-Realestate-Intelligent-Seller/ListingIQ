@@ -43,7 +43,7 @@ function status(overrides: Partial<LoftyExportStatus> = {}): LoftyExportStatus {
     step: "done",
     revision: 1,
     lofty_lead_id: "9001",
-    lofty_url: "https://crm.lofty.com/admin/home/lead/detail/9001",
+    lofty_url: "https://crm.lofty.com/admin/home/detail?leadId=9001&type=all",
     lead_action: "created",
     mute_verified: true,
     notes_saved: 1,
@@ -128,7 +128,9 @@ describe("LoftyExportDialog", () => {
     expect(await screen.findByText("Sent to Lofty successfully")).toBeTruthy();
     expect(screen.getByText("✓ Anna muted")).toBeTruthy();
     const link = screen.getByRole("link", { name: "Open in Lofty ↗" });
-    expect(link.getAttribute("href")).toBe("https://crm.lofty.com/admin/home/lead/detail/9001");
+    expect(link.getAttribute("href")).toBe(
+      "https://crm.lofty.com/admin/home/detail?leadId=9001&type=all",
+    );
   });
 
   it("shows partial failure progress and lets the agent pick an ambiguous lead", async () => {

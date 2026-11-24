@@ -14,6 +14,7 @@ import { dashboardPath } from "@/features/dashboard/components/dashboard-routes"
 
 import {
   deleteConversation,
+  getSmsConfig,
   listConversations,
   listMessages,
   sendMessage,
@@ -55,6 +56,7 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
   const [search, setSearch] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isSending, setIsSending] = useState(false);
+  const [smsFromNumber, setSmsFromNumber] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [notice, setNotice] = useState("");
   /** Mobile only: the conversation list is an off-canvas drawer over the thread. */
@@ -81,6 +83,19 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
     },
     [router],
   );
+
+  useEffect(() => {
+    if (!token) return;
+    const controller = new AbortController();
+    getSmsConfig(token, controller.signal)
+      .then((config) => setSmsFromNumber(config.from_number))
+      .catch((error) => {
+        if (error instanceof ApiRequestError && error.status === 401) {
+          handleApiError(error, "Could not load the texting number.");
+        }
+      });
+    return () => controller.abort();
+  }, [handleApiError, token]);
 
   const active = conversations.find((item) => item.id === activeId) ?? null;
 
@@ -430,6 +445,7 @@ export function SmsWorkspace({ focusConversationId = null }: SmsWorkspaceProps) 
             </div>
 
             <form className="sms-composer" onSubmit={handleSend}>
+              <div className="sms-composer-from"><span>Texting from</span><strong>{smsFromNumber ?? "Loading…"}</strong></div>
               <textarea
                 name="text"
                 rows={2}

@@ -1,4 +1,4 @@
-import { getJson, patchJson, postFile, postJson, requestJson } from "@/lib/api/http-client";
+import { fetchWithCurrentSession, getJson, patchJson, postFile, postJson, requestJson } from "@/lib/api/http-client";
 import { publicEnv } from "@/config/public-env";
 import type { ExamplePage, PersonaDetail, PersonaDraft, PersonaExample, PersonaImportJob, PersonaSubmission, PersonaSummary, PersonaValidation, PersonaVersion, ReviewedImport } from "../types";
 
@@ -32,7 +32,7 @@ export const retryPersonaImport = (id: number, jobId: string, token: string) => 
 /** Applies the owner's reviewed form values and examples in one transaction (409 if the draft changed). */
 export const applyPersonaImport = (id: number, jobId: string, revision: number, token: string, reviewed?: ReviewedImport) => postJson<PersonaDraft, { revision: number; reviewed?: ReviewedImport }>(`${ROOT}/${id}/imports/${jobId}/apply`, reviewed ? { revision, reviewed } : { revision }, token);
 export async function downloadPersonaTemplate(token: string): Promise<void> {
-  const response = await fetch(`${publicEnv.apiBaseUrl}${ROOT}/template`, { headers: { Authorization: `Bearer ${token}` } });
+  const response = await fetchWithCurrentSession(`${publicEnv.apiBaseUrl}${ROOT}/template`, {}, token);
   if (!response.ok) throw new Error("Could not download the Persona template.");
   const url = URL.createObjectURL(await response.blob());
   const anchor = document.createElement("a"); anchor.href = url; anchor.download = "listingiq-persona-template.docx"; anchor.click(); URL.revokeObjectURL(url);

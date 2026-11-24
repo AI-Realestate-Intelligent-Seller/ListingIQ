@@ -44,13 +44,19 @@ def upgrade():
     op.add_column('campaigns', sa.Column('followup_enabled', sa.Boolean(), nullable=True))
     op.add_column('campaigns', sa.Column('followup_template', sa.Text(), nullable=True))
     op.add_column('campaigns', sa.Column('followup_delay_hours', sa.Float(), nullable=True))
-    op.create_foreign_key('fk_campaigns_experiment_id', 'campaigns', 'experiments', ['experiment_id'], ['id'])
+    # SQLite cannot ALTER a constraint onto a table that already exists, and it
+    # does not enforce foreign keys unless asked to. The column and its index
+    # are what the application reads, so the key is added where it is enforced.
+    if op.get_bind().dialect.name != 'sqlite':
+        op.create_foreign_key('fk_campaigns_experiment_id', 'campaigns', 'experiments',
+                              ['experiment_id'], ['id'])
     op.create_index('ix_campaigns_experiment_id', 'campaigns', ['experiment_id'])
 
 
 def downgrade():
     op.drop_index('ix_campaigns_experiment_id', table_name='campaigns')
-    op.drop_constraint('fk_campaigns_experiment_id', 'campaigns', type_='foreignkey')
+    if op.get_bind().dialect.name != 'sqlite':
+        op.drop_constraint('fk_campaigns_experiment_id', 'campaigns', type_='foreignkey')
     for column in ('followup_delay_hours', 'followup_template', 'followup_enabled', 'experiment_variant', 'experiment_id'):
         op.drop_column('campaigns', column)
     op.drop_index('ix_experiments_status', table_name='experiments')

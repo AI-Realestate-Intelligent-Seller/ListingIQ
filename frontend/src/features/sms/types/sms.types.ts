@@ -1,3 +1,7 @@
+export type SmsWorkspaceConfig = {
+  from_number: string;
+};
+
 export type LeadStatus =
   | "processing"
   | "want_more_info"

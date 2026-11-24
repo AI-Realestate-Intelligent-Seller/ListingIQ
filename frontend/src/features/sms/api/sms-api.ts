@@ -8,9 +8,17 @@ import type {
   NewConversationResult,
   SmsConversation,
   SmsMessage,
+  SmsWorkspaceConfig,
 } from "../types/sms.types";
 
 const SMS = "/sms";
+
+export function getSmsConfig(
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<SmsWorkspaceConfig> {
+  return getJson<SmsWorkspaceConfig>(`${SMS}/config`, accessToken, signal);
+}
 
 export function listConversations(
   accessToken: string,

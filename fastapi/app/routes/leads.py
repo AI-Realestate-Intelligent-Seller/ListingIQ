@@ -25,7 +25,8 @@ from ..leads.importer import MAPPABLE_FIELDS
 from ..logger import get_logger
 from ..models import Lead, User
 from ..tenancy import brokerage_user_ids
-from ..schemas import LeadCampaignRequest, LeadDeleteRequest
+from ..schemas import (LeadCampaignRequest, LeadDeleteRequest,
+                       LeadIndividualMessageRequest, LeadIndividualMessageResult)
 from .auth import get_current_user, get_db
 
 router = APIRouter()
@@ -103,8 +104,13 @@ def list_leads(
 
 def _lead_pool_cache_key(user: User, search, addresses, signals, stage, states, cities,
                          zip_codes, north, south, east, west, polygon_points):
-    """Cache namespace, dependencies and key — shared by the pool and its /load shortcut."""
-    return ('lead-pool', cache.DASHBOARD_TABLES,
+    """Cache namespace, dependencies and key — shared by the pool and its /load shortcut.
+
+    The namespace carries a version because the pool now leaves out owners who
+    already have an outreach conversation: a payload cached before that rule
+    would put them back on screen until some other write bumped the tables.
+    """
+    return ('lead-pool-v2', cache.DASHBOARD_TABLES,
             {'user': user.id, 'role': user.role, 'search': search,
              'addresses': addresses, 'signals': signals, 'stage': stage, 'states': states,
              'cities': cities, 'zip_codes': zip_codes, 'bounds': [north, south, east, west],
@@ -404,6 +410,29 @@ def start_campaign(
     _require_access(current_user)
     try:
         return campaign_service.launch(session, current_user, payload.lead_ids, payload.outreach_reason or '')
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+
+@router.post('/{lead_id}/message', response_model=LeadIndividualMessageResult)
+def message_lead(
+    lead_id: int,
+    payload: LeadIndividualMessageRequest,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+):
+    """Text one lead now, on each of its chosen numbers.
+
+    Every message sent this way belongs to the brokerage's one 'Individually
+    contacted' campaign, so these threads report as a single category.
+    """
+    _require_access(current_user)
+    try:
+        return campaign_service.contact_individually(
+            session, current_user, lead_id, payload.text, payload.phones,
+        )
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error))
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
 

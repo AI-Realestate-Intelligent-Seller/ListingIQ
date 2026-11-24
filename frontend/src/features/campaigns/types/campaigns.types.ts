@@ -9,6 +9,12 @@ export type Campaign = {
   /** One reason for the whole batch. Blank falls back to each lead's own signal. */
   outreach_reason: string;
   group_reason_mode: boolean;
+  /**
+   * "individual" marks the brokerage's one "Individually contacted" bucket,
+   * which collects every message written to a single lead from the pool.
+   * Absent or "" on an ordinary campaign.
+   */
+  kind?: string;
   status: CampaignStatus;
   sent_at: string | null;
   created_at: string | null;

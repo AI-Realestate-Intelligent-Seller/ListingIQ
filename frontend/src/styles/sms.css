@@ -265,6 +265,15 @@
 .sms-attention strong { color: #5d3702; }
 
 .sms-composer { padding: 14px 20px 18px; border-top: 1px solid var(--line); }
+.sms-composer-from {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 7px;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+.sms-composer-from strong { color: var(--ink); font-variant-numeric: tabular-nums; }
 .sms-composer textarea {
   width: 100%; padding: 11px 13px; border: 1px solid var(--line);
   border-radius: 10px; font: inherit; font-size: 14px; resize: vertical;

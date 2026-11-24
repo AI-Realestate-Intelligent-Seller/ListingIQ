@@ -15,8 +15,10 @@ from sqlalchemy.orm import Session
 
 import json
 
+from ..dashboard_metrics import UNSENT_MESSAGE_STATUSES
 from ..integration_data.models import CombinedProperty
-from ..models import Campaign, Conversation, Lead, LeadEvent, Message, User
+from ..models import (Campaign, Conversation, Lead, LeadEvent, Message, OutboundSmsJob,
+                      User)
 from ..tenancy import brokerage_user_ids, session_cache
 from . import address as address_key
 from .catalog import SIGNALS, signal_label
@@ -194,6 +196,72 @@ def lead_phone_numbers(lead: Lead) -> list[dict]:
                 row['dnc'] = bool(row['dnc'] or lead.dnc)
                 break
     return stored
+
+
+# An outbound job in one of these states is not finished with: it either still
+# has to be sent or may yet turn out to have been. Named here rather than in
+# `campaign` because the pool reads them too.
+GROUPED_OUTREACH_STATUS = 'grouped_wait'
+ACTIVE_OUTBOUND_STATUSES = (
+    'awaiting_lookup', 'looking_up', 'queued', 'submitting',
+    'retry_wait', 'accepted', 'uncertain', GROUPED_OUTREACH_STATUS,
+)
+# The subset that has not produced a message yet. 'accepted' and 'uncertain'
+# are deliberately left out: by then the message row exists and is what the
+# pool reads, so a broker who deletes the thread undoes the contact and gets
+# the lead back, while the job row would keep it hidden for good.
+PENDING_OUTBOUND_STATUSES = tuple(
+    status for status in ACTIVE_OUTBOUND_STATUSES
+    if status not in ('accepted', 'uncertain')
+)
+
+
+def contacted_phone_keys(session: Session, user: User) -> set[str]:
+    """Every number this brokerage has already opened outreach with.
+
+    Keyed on the number alone and never on the property, because one owner
+    texted once is contacted however many properties they own: the same person
+    usually arrives as several lead rows, one per address, and only the row
+    that was actually texted carries the campaign. Reading the numbers instead
+    keeps the other rows out of the pool too.
+
+    A submission still on its way out counts, so a lead cannot reappear for
+    the seconds before the message row exists. Deleting the thread, which the
+    rest of the pool already treats as undoing the contact, brings the lead
+    back: the messages go with it and no job row keeps it hidden.
+    """
+    cache = session_cache(session)
+    key = ('contacted_phones', user.id)
+    if key not in cache:
+        scope = brokerage_user_ids(session, user)
+        numbers = {contact for (contact,) in (
+            session.query(Conversation.contact)
+            .join(Message, Message.conversation_id == Conversation.id)
+            .filter(Conversation.user_id.in_(scope),
+                    Message.event_type == 'outreach.initial',
+                    # A first message the carrier rejected is not contact, and
+                    # the send already hands that lead back to the pool.
+                    Message.status.notin_(UNSENT_MESSAGE_STATUSES))
+            .distinct().all())}
+        numbers.update(to_number for (to_number,) in (
+            session.query(OutboundSmsJob.to_number)
+            .filter(OutboundSmsJob.user_id.in_(scope),
+                    OutboundSmsJob.status.in_(PENDING_OUTBOUND_STATUSES))
+            .distinct().all()))
+        cache[key] = {normalized for number in numbers
+                      if (normalized := normalize_phone(number or ''))}
+    return cache[key]
+
+
+def lead_phone_keys(lead: Lead) -> set[str]:
+    """Normalized form of every number the lead carries, for comparison."""
+    return {normalized for row in lead_phone_numbers(lead)
+            if (normalized := normalize_phone(row['phone']))}
+
+
+def is_contacted_owner(lead: Lead, contacted: set[str]) -> bool:
+    """True when outreach already exists against any number on this lead."""
+    return bool(contacted) and bool(lead_phone_keys(lead) & contacted)
 
 
 NON_MOBILE_STAGE = 'not_mobile'
@@ -376,9 +444,11 @@ def _pool_leads(session: Session, user: User) -> list[Lead]:
     cache = session_cache(session)
     key = ('pool_leads', user.id)
     if key not in cache:
-        cache[key] = (session.query(Lead)
-                      .filter(Lead.user_id.in_(brokerage_user_ids(session, user)),
-                              Lead.campaign_id.is_(None), pool_textable_filter()).all())
+        rows = (session.query(Lead)
+                .filter(Lead.user_id.in_(brokerage_user_ids(session, user)),
+                        Lead.campaign_id.is_(None), pool_textable_filter()).all())
+        contacted = contacted_phone_keys(session, user)
+        cache[key] = [lead for lead in rows if not is_contacted_owner(lead, contacted)]
     return cache[key]
 
 
@@ -490,7 +560,9 @@ def list_leads(session: Session, user: User, search: str = '', signals: list[str
         polygon = validate_polygon(polygon)
     # A lead in a campaign is shown under that campaign, not here: the pool is
     # what is still to be worked, and a row in both places is a row two people
-    # can pick up at once.
+    # can pick up at once. An owner already texted leaves the pool entirely —
+    # see `is_contacted_owner` in the loop below, which also takes out the rows
+    # for their *other* properties, since those never carried the campaign.
     query = (session.query(Lead)
              .filter(Lead.user_id.in_(brokerage_user_ids(session, user)),
                      Lead.campaign_id.is_(None), pool_textable_filter()))
@@ -534,10 +606,13 @@ def list_leads(session: Session, user: User, search: str = '', signals: list[str
         city_states = _city_states(locations)
         city_zips = _zips_for_cities(locations, want_cities, city_states)
 
+    contacted = contacted_phone_keys(session, user)
     result = []
     for index, lead in enumerate(rows, start=1):
         if progress and (index == 1 or (index - 1) % progress_step == 0):
             progress(total, index - 1)
+        if is_contacted_owner(lead, contacted):
+            continue
         if (polygon and not _point_in_polygon(
                 float(lead.latitude), float(lead.longitude), polygon)):
             continue

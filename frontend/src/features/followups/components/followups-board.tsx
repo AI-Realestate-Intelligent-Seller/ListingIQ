@@ -8,7 +8,7 @@ import { listCampaigns } from "@/features/campaigns/api/campaigns-api";
 import type { Campaign } from "@/features/campaigns/types/campaigns.types";
 import { readAuthSession } from "@/features/auth/lib/auth-storage";
 import { endSession } from "@/features/auth/lib/session-guard";
-import { listMessages, sendMessage, setHandover } from "@/features/sms/api/sms-api";
+import { getSmsConfig, listMessages, sendMessage, setHandover } from "@/features/sms/api/sms-api";
 import {
   LEAD_LABELS,
   LEAD_STATUS_ORDER,
@@ -131,6 +131,7 @@ export function FollowUpsBoard({
   const [loadProgress, setLoadProgress] = useState<QueryProgress<FollowUp[]> | null>(null);
   const [isWorking, setIsWorking] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  const [smsFromNumber, setSmsFromNumber] = useState<string | null>(null);
   const [isSchedulerOpen, setIsSchedulerOpen] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [notice, setNotice] = useState("");
@@ -171,6 +172,19 @@ export function FollowUpsBoard({
     },
     [router],
   );
+
+  useEffect(() => {
+    if (!token) return;
+    const controller = new AbortController();
+    getSmsConfig(token, controller.signal)
+      .then((config) => setSmsFromNumber(config.from_number))
+      .catch((error) => {
+        if (error instanceof ApiRequestError && error.status === 401) {
+          handleApiError(error, "Could not load the texting number.");
+        }
+      });
+    return () => controller.abort();
+  }, [handleApiError, token]);
 
   const active = followUps.find((item) => item.id === activeId) ?? null;
   // Suggestions belong to one thread's history; never show them on another.
@@ -894,6 +908,7 @@ useEffect(() => {
                       </ul>
                     </div>
                   ) : null}
+                  <div className="sms-composer-from"><span>Texting from</span><strong>{smsFromNumber ?? "Loading…"}</strong></div>
                   <div className="followups-compose-field">
                     <textarea
                       ref={composerRef}

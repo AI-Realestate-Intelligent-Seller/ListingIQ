@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { Toast, type ToastTone } from "@/components/toast/toast";
 import { fetchLeadPool } from "@/features/leads/api/leads-api";
 import type { Lead, LeadPoolResponse } from "@/features/leads/types/leads.types";
 import type { Campaign } from "@/features/campaigns/types/campaigns.types";
@@ -46,6 +47,7 @@ type Props = {
   routeSection?: "drafted" | "launched";
   routeId?: string;
   onRouteChange?: (section: "drafted" | "launched", id?: string | number) => void;
+  onOpenDetail?: (id: number) => void;
   onClose: () => void;
   onUnauthorized: () => void;
 };
@@ -87,7 +89,7 @@ const TIME_ZONE_GROUPS = [
 
 function variantLabel(index: number): string { return `Variant ${String.fromCharCode(65 + index)}`; }
 function newVariant(index: number): VariantDraft {
-  return { id: `${Date.now()}-${index}-${Math.random()}`, label: variantLabel(index), message: DEFAULT_MESSAGES[index] ?? DEFAULT_MESSAGES[1], leads: [], followup: false, followupMessage: DEFAULT_FOLLOWUP, followupDelay: 24 };
+  return { id: `${Date.now()}-${index}-${Math.random()}`, label: variantLabel(index), message: DEFAULT_MESSAGES[index] ?? DEFAULT_MESSAGES[1], leads: [], followup: false, followupMessage: DEFAULT_FOLLOWUP, followupDelay: 48 };
 }
 function draftStorageKey(token: string): string {
   try {
@@ -134,6 +136,7 @@ function timeZoneName(timeZone: string): string {
   }
   return timeZone;
 }
+
 function zonedDateTimeToISOString(value: string, timeZone: string): string {
   const [datePart, timePart] = value.split("T");
   const [year, month, day] = datePart.split("-").map(Number);
@@ -302,17 +305,50 @@ function ExperimentWizard({ token, initialDraft, onDone, onSave, onDiscard }: { 
   </div>;
 }
 
-export function ExperimentWorkspace({ token, open, campaigns = [], dateFrom = "", dateTo = "", outcomeFilter = "all", routeSection, routeId, onRouteChange, onClose, onUnauthorized }: Props) {
+/** How often a launching or still-sending experiment is re-read. */
+const PROGRESS_POLL_MS = 8000;
+
+/** What the progress poll watches on each experiment between refreshes. */
+type ExperimentProgress = { status: Experiment["status"]; outreachComplete: boolean };
+
+/**
+ * True while the server is still expected to change this experiment: a due or
+ * running launch, or a launched experiment whose variants are still sending.
+ */
+function isInFlight(item: Experiment): boolean {
+  if (item.status === "launching") return true;
+  if (item.status === "running") return !item.outreach_complete;
+  if (item.status !== "scheduled") return false;
+  const due = new Date(/[Z+]$/.test(item.scheduled_at) ? item.scheduled_at : `${item.scheduled_at}Z`);
+  // A send that is already due is about to be picked up by the scheduler.
+  return due.getTime() <= Date.now() + 60_000;
+}
+
+/** What to announce the moment the wizard's launch or schedule call returns. */
+function launchToast(item: Experiment): { message: string; tone: ToastTone } {
+  const owners = `${item.total_leads} ${item.total_leads === 1 ? "owner" : "owners"}`;
+  if (item.status === "failed") {
+    return { tone: "error", message: `${item.name} could not be launched.${item.error ? ` ${item.error}` : ""}` };
+  }
+  if (item.status === "scheduled") {
+    return { tone: "success", message: `${item.name} is scheduled for ${scheduledLabel(item.scheduled_at, item.timezone)} (${item.timezone}).` };
+  }
+  return { tone: "success", message: `${item.name} launched successfully. Outreach is sending to ${owners}.` };
+}
+
+export function ExperimentWorkspace({ token, open, campaigns = [], dateFrom = "", dateTo = "", outcomeFilter = "all", routeSection, routeId, onRouteChange, onOpenDetail, onClose, onUnauthorized }: Props) {
   const [items, setItems] = useState<Experiment[]>([]);
   const [drafts, setDrafts] = useState<SavedExperimentDraft[]>([]);
   const [activeScreen, setActiveScreen] = useState<"drafts" | "scheduled">("scheduled");
   const [statusFilter, setStatusFilter] = useState("all");
   const [isStatusFilterOpen, setIsStatusFilterOpen] = useState(false);
   const [editingDraft, setEditingDraft] = useState<SavedExperimentDraft | null>(null);
-  const [expanded, setExpanded] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [closedDraftRoute, setClosedDraftRoute] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; tone: ToastTone } | null>(null);
   const statusFilterRef = useRef<HTMLDivElement | null>(null);
+  /** The last seen status of each experiment, so only real changes announce themselves. */
+  const progressRef = useRef<Map<number, ExperimentProgress>>(new Map());
   const load = useCallback(async () => { if (!token) return; try { setItems(await listExperiments(token)); } catch (cause) { if ((cause as { status?: number }).status === 401) onUnauthorized(); else setError(cause instanceof Error ? cause.message : "Could not load experiments."); } }, [onUnauthorized, token]);
   useEffect(() => {
     // Loading is an external API synchronization, not derived local state.
@@ -325,14 +361,43 @@ export function ExperimentWorkspace({ token, open, campaigns = [], dateFrom = ""
     setDrafts(readDrafts(token));
   }, [token]);
   useEffect(() => {
+    // An experiment first seen in this session is only recorded: the launch it
+    // reports already happened, and the wizard announced the one it just sent.
+    const seen = progressRef.current;
+    const announcements: { message: string; tone: ToastTone }[] = [];
+    for (const item of items) {
+      const previous = seen.get(item.id);
+      seen.set(item.id, { status: item.status, outreachComplete: item.outreach_complete });
+      if (!previous) continue;
+      if (previous.status !== item.status && item.status === "running") {
+        announcements.push({ tone: "success", message: `${item.name} launched successfully. Outreach is sending to ${item.total_leads} ${item.total_leads === 1 ? "owner" : "owners"}.` });
+      }
+      if (previous.status !== item.status && item.status === "failed") {
+        announcements.push({ tone: "error", message: `${item.name} failed to launch.${item.error ? ` ${item.error}` : ""}` });
+      }
+      if (!previous.outreachComplete && item.outreach_complete) {
+        announcements.push({ tone: "success", message: `${item.name}: outreach completed. ${item.outreach_conversations} ${item.outreach_conversations === 1 ? "owner" : "owners"} texted across ${item.variants.length} ${item.variants.length === 1 ? "group" : "groups"}.` });
+      }
+    }
+    // One toast is visible at a time; the newest change is the one to show.
+    if (announcements.length) {
+      // Announcing is a reaction to new server state, not derived local state.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setToast(announcements[announcements.length - 1]);
+    }
+  }, [items]);
+  useEffect(() => {
+    // Launching and sending both finish in the background, so the list is
+    // re-read only while something is actually in flight.
+    if (!items.some(isInFlight)) return;
+    const timer = setInterval(() => { void load(); }, PROGRESS_POLL_MS);
+    return () => clearInterval(timer);
+  }, [items, load]);
+  useEffect(() => {
     if (!routeSection) return;
     // A copied Analysis URL restores the same management screen.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setActiveScreen(routeSection === "launched" ? "scheduled" : "drafts");
-    if (routeSection === "launched") {
-      const id = Number(routeId);
-      setExpanded(Number.isSafeInteger(id) && id > 0 ? id : null);
-    }
   }, [routeId, routeSection]);
   useEffect(() => {
     if (closedDraftRoute && closedDraftRoute !== routeId) {
@@ -398,7 +463,8 @@ export function ExperimentWorkspace({ token, open, campaigns = [], dateFrom = ""
   }
   const opensNewRoute = routeSection === "drafted" && routeId === "new" && closedDraftRoute !== "new";
   return <>
-    {open || opensNewRoute || editingDraft ? <ExperimentWizard key={editingDraft?.id ?? "new"} token={token} initialDraft={editingDraft ?? undefined} onSave={saveDraft} onDiscard={() => removeDraft(editingDraft?.id)} onDone={(item) => { removeDraft(editingDraft?.id, false); setItems((rows) => [item, ...rows]); setActiveScreen("scheduled"); setExpanded(item.id); onRouteChange?.("launched", item.id); }} /> : null}
+    {toast ? <Toast message={toast.message} tone={toast.tone} onDone={() => setToast(null)} /> : null}
+    {open || opensNewRoute || editingDraft ? <ExperimentWizard key={editingDraft?.id ?? "new"} token={token} initialDraft={editingDraft ?? undefined} onSave={saveDraft} onDiscard={() => removeDraft(editingDraft?.id)} onDone={(item) => { removeDraft(editingDraft?.id, false); setItems((rows) => [item, ...rows]); setActiveScreen("scheduled"); onRouteChange?.("launched", item.id); setToast(launchToast(item)); }} /> : null}
     <section className="experiment-list experiment-management">
       <header><div><span>EXPERIMENTS</span><h2>Launched and drafted experiments</h2></div><small>{drafts.length + visible.length} total</small></header>
       <nav className="experiment-screen-tabs" aria-label="Experiment status"><button type="button" className={activeScreen === "scheduled" ? "active" : ""} onClick={() => { setActiveScreen("scheduled"); onRouteChange?.("launched"); }}>Launched <b>{visible.length}</b></button><button type="button" className={activeScreen === "drafts" ? "active" : ""} onClick={() => { setActiveScreen("drafts"); onRouteChange?.("drafted"); }}>Drafted <b>{drafts.length}</b></button></nav>
@@ -408,7 +474,7 @@ export function ExperimentWorkspace({ token, open, campaigns = [], dateFrom = ""
         const leadTotal = draft.variants.reduce((sum, variant) => sum + variant.leads.length, 0);
         return <article className="experiment-draft-card" key={draft.id}><header><div><span className="experiment-status draft">Draft</span><h3>{draft.name || "Untitled experiment"}</h3><p>Updated {new Date(draft.updatedAt).toLocaleString()}</p></div><div><button type="button" onClick={() => { setEditingDraft(draft); onRouteChange?.("drafted", draft.id); }}>Continue editing</button><button type="button" className="cancel" onClick={() => removeDraft(draft.id)}>Delete</button></div></header><div className="experiment-card-summary"><span>Step {draft.step} of 5</span><span>{draft.variants.length} groups</span><span>{leadTotal ? `${leadTotal} leads selected` : "Audience not selected"}</span><span>Testing {dimensionLabel(draft.dimension, draft.dimensionOther)}</span></div></article>;
       }) : <div className="experiment-screen-empty"><strong>No experiment drafts</strong><p>Start a new experiment and choose Save draft whenever you want to continue later.</p></div>}</div> : null}
-      {activeScreen === "scheduled" ? <div className="experiment-screen-body">{filteredVisible.length ? filteredVisible.map((item) => { const outcome = experimentOutcomes.get(item.id) ?? { outreached: 0, replied: 0, positive: 0 }; return <article key={item.id}><header><div><span className={`experiment-status ${item.status}`}>{item.status}</span><h3>{item.name}</h3><p>{scheduledLabel(item.scheduled_at, item.timezone)} · {item.timezone}</p><div className="experiment-outcome-summary"><span>{outcome.outreached} properties outreached</span><span>{item.outreach_conversations} conversations</span><span>{outcome.replied} replied</span><span className={outcome.positive > 0 ? "positive" : ""}>{outcome.positive} positive</span></div></div><div><button type="button" onClick={() => { const next = expanded === item.id ? null : item.id; setExpanded(next); onRouteChange?.("launched", next ?? undefined); }}>{expanded === item.id ? "Hide review" : "Review"}</button>{item.status === "scheduled" ? <button className="cancel" type="button" onClick={() => void cancel(item)}>Cancel</button> : null}</div></header>{expanded === item.id ? <div className="experiment-list-detail"><dl><div><dt>Audience</dt><dd>{item.total_leads} leads</dd></div><div><dt>Outreach</dt><dd>{outcome.outreached} properties</dd></div><div><dt>Conversations</dt><dd>{item.outreach_conversations} threads</dd></div><div><dt>Winner</dt><dd>{item.winner_metric.replaceAll("_", " ")}</dd></div><div><dt>Maximum cost</dt><dd>${item.expected_max_cost.toFixed(2)}</dd></div></dl>{outcome.outreached > item.outreach_conversations ? <p className="experiment-conversation-note"><strong>{outcome.outreached} properties are grouped into {item.outreach_conversations} conversations.</strong> Properties with the same owner phone number share one conversation, so no outreach is missing.</p> : null}{item.error ? <p className="experiment-error">{item.error}</p> : null}</div> : null}</article>; }) : <div className="experiment-screen-empty"><strong>{filtersActive ? "No experiments match these filters" : "No launched experiments"}</strong><p>{filtersActive ? "Change or clear the filters to see more experiments." : "Completed drafts appear here after the final review and launch scheduling step."}</p></div>}</div> : null}
+      {activeScreen === "scheduled" ? <div className="experiment-screen-body">{filteredVisible.length ? filteredVisible.map((item) => { const outcome = experimentOutcomes.get(item.id) ?? { outreached: 0, replied: 0, positive: 0 }; return <article key={item.id}><header><div><span className={`experiment-status ${item.status}`}>{item.status}</span><h3>{item.name}</h3><p>{scheduledLabel(item.scheduled_at, item.timezone)} · {item.timezone}</p><div className="experiment-outcome-summary"><span>{outcome.outreached} properties outreached</span><span>{item.outreach_conversations} conversations</span><span>{outcome.replied} replied</span><span className={outcome.positive > 0 ? "positive" : ""}>{outcome.positive} positive</span></div></div><div>{item.status === "running" && onOpenDetail ? <button type="button" onClick={() => onOpenDetail(item.id)}>View details</button> : null}{item.status === "scheduled" ? <button className="cancel" type="button" onClick={() => void cancel(item)}>Cancel</button> : null}</div></header></article>; }) : <div className="experiment-screen-empty"><strong>{filtersActive ? "No experiments match these filters" : "No launched experiments"}</strong><p>{filtersActive ? "Change or clear the filters to see more experiments." : "Completed drafts appear here after the final review and launch scheduling step."}</p></div>}</div> : null}
     </section>
   </>;
 }

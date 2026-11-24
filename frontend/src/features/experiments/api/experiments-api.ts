@@ -1,6 +1,6 @@
-import { getJson, postJson } from "@/lib/api/http-client";
+import { getJson, patchJson, postJson } from "@/lib/api/http-client";
 
-import type { Experiment, ExperimentCreateInput } from "../types/experiments.types";
+import type { Experiment, ExperimentCreateInput, ExperimentFollowupUpdate } from "../types/experiments.types";
 
 const EXPERIMENTS = "/experiments";
 
@@ -14,4 +14,34 @@ export function createExperiment(input: ExperimentCreateInput, token: string): P
 
 export function cancelExperiment(id: number, token: string): Promise<Experiment> {
   return postJson<Experiment, Record<string, never>>(`${EXPERIMENTS}/${id}/cancel`, {}, token);
+}
+
+export function updateExperimentFollowup(
+  experimentId: number,
+  campaignId: number,
+  input: ExperimentFollowupUpdate,
+  token: string,
+): Promise<Experiment> {
+  return patchJson<Experiment, ExperimentFollowupUpdate>(
+    `${EXPERIMENTS}/${experimentId}/followups/${campaignId}`,
+    input,
+    token,
+  );
+}
+
+export function addExperimentRandomLeads(
+  experimentId: number,
+  campaignId: number,
+  count: number,
+  token: string,
+): Promise<Experiment> {
+  return postJson<Experiment, { count: number }>(
+    `${EXPERIMENTS}/${experimentId}/variants/${campaignId}/random-leads`,
+    { count },
+    token,
+  );
+}
+
+export function renameExperiment(id: number, name: string, token: string): Promise<Experiment> {
+  return patchJson<Experiment, { name: string }>(`${EXPERIMENTS}/${id}`, { name }, token);
 }

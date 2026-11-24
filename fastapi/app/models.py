@@ -265,6 +265,10 @@ class Campaign(Base):
     reason_groups = Column(Text, nullable=True)
     experiment_id = Column(Integer, ForeignKey('experiments.id'), nullable=True, index=True)
     experiment_variant = Column(String(80), nullable=True)
+    # NULL for an ordinary campaign. 'individual' marks the one reserved
+    # 'Individually contacted' bucket per brokerage, which collects every
+    # message written to a single lead from the Lead Pool.
+    kind = Column(String(24), nullable=True, index=True)
     followup_enabled = Column(Boolean, nullable=True)
     followup_template = Column(Text, nullable=True)
     followup_delay_hours = Column(Float, nullable=True)

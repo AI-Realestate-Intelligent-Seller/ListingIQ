@@ -1,4 +1,6 @@
 import { publicEnv } from "@/config/public-env";
+import { readAuthSession } from "@/features/auth/lib/auth-storage";
+import { ensureStoredSessionFresh } from "@/features/auth/lib/session-refresh";
 
 type FastApiValidationError = {
   msg?: unknown;
@@ -35,20 +37,20 @@ export async function requestJson<TResponse>(
   let response: Response;
 
   try {
-    response = await fetch(buildApiUrl(path), {
+    response = await fetchWithCurrentSession(buildApiUrl(path), {
       method,
       headers: {
         ...(payload === undefined ? {} : { "Content-Type": "application/json" }),
-        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       },
       ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
       signal,
-    });
+    }, accessToken);
   } catch (error) {
     // An aborted request is a navigation, not a failure worth showing.
     if (error instanceof DOMException && error.name === "AbortError") {
       throw error;
     }
+    if (error instanceof ApiRequestError) throw error;
     throw new ApiRequestError(
       "Unable to reach the server. Make sure the API is running and try again.",
     );
@@ -101,12 +103,12 @@ export async function postFile<TResponse>(
 
   let response: Response;
   try {
-    response = await fetch(buildApiUrl(path), {
+    response = await fetchWithCurrentSession(buildApiUrl(path), {
       method: "POST",
-      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
       body,
-    });
-  } catch {
+    }, accessToken);
+  } catch (error) {
+    if (error instanceof ApiRequestError) throw error;
     throw new ApiRequestError(
       "Unable to reach the server. Make sure the API is running and try again.",
     );
@@ -130,12 +132,12 @@ export async function postForm<TResponse>(
 
   let response: Response;
   try {
-    response = await fetch(buildApiUrl(path), {
+    response = await fetchWithCurrentSession(buildApiUrl(path), {
       method: "POST",
-      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
       body,
-    });
-  } catch {
+    }, accessToken);
+  } catch (error) {
+    if (error instanceof ApiRequestError) throw error;
     throw new ApiRequestError(
       "Unable to reach the server. Make sure the API is running and try again.",
     );
@@ -158,6 +160,58 @@ export async function deleteJson<TResponse>(
 function buildApiUrl(path: string): string {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   return `${publicEnv.apiBaseUrl}${normalizedPath}`;
+}
+
+/**
+ * Every authenticated request resolves the token from shared browser storage.
+ * Components may still hold the token from their first render; using it
+ * directly is what previously caused a logout when that one-hour token expired.
+ *
+ * A 401 gets one forced refresh and retry, covering a browser that slept past
+ * the proactive refresh interval. The refresh helper enforces the eight-hour
+ * inactivity limit before issuing another token.
+ */
+export async function fetchWithCurrentSession(
+  url: string,
+  init: RequestInit,
+  suppliedAccessToken?: string,
+): Promise<Response> {
+  if (!suppliedAccessToken) return fetch(url, init);
+
+  const storedAtStart = readAuthSession();
+  let accessToken = suppliedAccessToken;
+  if (storedAtStart) {
+    try {
+      const current = await ensureStoredSessionFresh();
+      if (!current) throw new ApiRequestError("Your session has expired.", 401);
+      accessToken = current.access_token;
+    } catch (error) {
+      if (error instanceof ApiRequestError) throw error;
+      // Keep the session during a transient refresh failure. The request may
+      // still succeed if the existing access token has time remaining.
+      accessToken = readAuthSession()?.access_token ?? accessToken;
+    }
+  }
+
+  const send = (token: string) => fetch(url, {
+    ...init,
+    headers: { ...Object.fromEntries(new Headers(init.headers).entries()), Authorization: `Bearer ${token}` },
+  });
+  let response = await send(accessToken);
+  if (response.status !== 401 || !readAuthSession()) return response;
+
+  try {
+    const refreshed = await ensureStoredSessionFresh(true);
+    if (!refreshed) return response;
+    response = await send(refreshed.access_token);
+  } catch {
+    // Preserve browser state on connectivity failures. Do not turn a failed
+    // refresh request into a false "session expired" logout.
+    throw new ApiRequestError(
+      "Unable to refresh your session. Check your connection and try again.",
+    );
+  }
+  return response;
 }
 
 async function readResponseBody(response: Response): Promise<unknown> {

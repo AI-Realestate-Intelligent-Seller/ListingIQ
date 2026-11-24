@@ -6,6 +6,7 @@ import type {
   LeadDetail,
   LeadHistory,
   LeadImportResult,
+  LeadMessageResult,
   LeadPoolResponse,
   LeadQuery,
 } from "../types/leads.types";
@@ -123,6 +124,24 @@ export function deleteLeads(leadIds: number[], accessToken: string): Promise<{ d
   return postJson<{ deleted: number }, { lead_ids: number[] }>(
     `${LEADS}/delete`,
     { lead_ids: leadIds },
+    accessToken,
+  );
+}
+
+/**
+ * Text one lead now, from the pool, without building a campaign. `phones`
+ * chooses which of the lead's numbers to reach; omitted, the API texts every
+ * contactable one. The thread is filed under "Individually contacted".
+ */
+export function messageLead(
+  leadId: number,
+  text: string,
+  phones: string[] | undefined,
+  accessToken: string,
+): Promise<LeadMessageResult> {
+  return postJson<LeadMessageResult, { text: string; phones?: string[] }>(
+    `${LEADS}/${leadId}/message`,
+    phones ? { text, phones } : { text },
     accessToken,
   );
 }

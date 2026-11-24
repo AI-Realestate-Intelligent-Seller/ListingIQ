@@ -454,7 +454,10 @@ def finalize_campaign_if_complete(campaign_id: int) -> bool:
             elif lead.source != campaign_service.PROVIDER_LEAD_SOURCE:
                 lead.campaign_id = None
         campaign.status = 'sent'
-        campaign.sent_at = datetime.utcnow()
+        # An experiment may append a later recipient batch to an already-sent
+        # variant. Keep the original launch time instead of making the whole
+        # campaign appear newly launched when that extension finishes.
+        campaign.sent_at = campaign.sent_at or datetime.utcnow()
         session.commit()
         return True
     finally:

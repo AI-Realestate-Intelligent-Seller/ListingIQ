@@ -41,9 +41,20 @@ logger = get_logger(__name__)
 SMS_ROLES = {'hob', 'broker', 'agent'}
 
 
+class SmsWorkspaceConfig(BaseModel):
+    from_number: str
+
+
 def _require_sms_access(user: User) -> None:
     if user.role not in SMS_ROLES:
         raise HTTPException(status_code=403, detail='Your role does not have access to the SMS workspace.')
+
+
+@router.get('/config', response_model=SmsWorkspaceConfig)
+def sms_workspace_config(current_user: User = Depends(get_current_user)):
+    """The non-secret sending identity shown beside the message composer."""
+    _require_sms_access(current_user)
+    return {'from_number': service.sending_number()}
 
 
 def _owned_conversation(session: Session, conversation_id: int, user: User) -> Conversation:

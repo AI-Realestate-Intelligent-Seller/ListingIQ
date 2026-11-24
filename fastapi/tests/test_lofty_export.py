@@ -340,7 +340,9 @@ def test_new_lead_full_flow(client, people, auth_header, fake_lofty):
     assert body['status'] == 'completed'
     assert body['lead_action'] == 'created'
     assert body['lofty_lead_id'] == '9001'
-    assert body['lofty_url'] == 'https://crm.lofty.com/admin/home/lead/detail/9001'
+    assert body['lofty_url'] == (
+        'https://crm.lofty.com/admin/home/detail?leadId=9001&type=all'
+    )
     assert body['mute_verified'] is True
     assert body['notes_saved'] == body['notes_total'] == 1
 

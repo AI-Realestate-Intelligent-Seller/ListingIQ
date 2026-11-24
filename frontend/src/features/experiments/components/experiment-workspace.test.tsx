@@ -27,7 +27,7 @@ describe("ExperimentWorkspace", () => {
     localStorage.clear();
     api.list.mockResolvedValue([]);
     api.pool.mockResolvedValue({ leads: [lead(1, "North", "78701"), lead(2, "South", "78702"), lead(3, "North", "78701"), lead(4, "South", "78702")], map: { mappable_count: 0, pending_count: 0, failed_count: 0 }, facets: { total: 4, signals: {}, stages: { ready: 4 } }, locations: { states: [], cities: [], zips: [] }, signal_catalog: [], stage_catalog: [{ key: "ready", label: "Ready" }] });
-    api.create.mockImplementation(async (payload) => ({ ...payload, id: 9, status: "scheduled", variants: [], campaign_ids: [], total_leads: 4, outreach_conversations: 0, expected_max_cost: .078, error: "", launched_at: null, cancelled_at: null, created_at: new Date().toISOString() }));
+    api.create.mockImplementation(async (payload) => ({ ...payload, id: 9, status: "scheduled", variants: [], campaign_ids: [], total_leads: 4, outreach_conversations: 0, outreach_complete: false, expected_max_cost: .078, error: "", launched_at: null, cancelled_at: null, created_at: new Date().toISOString() }));
   });
 
   it("builds and schedules two non-overlapping campaign groups through five steps", async () => {
@@ -83,6 +83,66 @@ describe("ExperimentWorkspace", () => {
     expect(payload.scheduled_at).toBeNull();
   });
 
+  it("announces a successful launch after Send now", async () => {
+    api.create.mockImplementation(async (payload) => ({ ...payload, id: 9, status: "running", variants: [], campaign_ids: [11], total_leads: 4, outreach_conversations: 0, outreach_complete: false, expected_max_cost: .078, error: "", launched_at: new Date().toISOString(), cancelled_at: null, created_at: new Date().toISOString() }));
+    render(<ExperimentWorkspace token="token" open onClose={vi.fn()} onUnauthorized={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findAllByText("2 leads");
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send now" }));
+
+    const toast = await screen.findByRole("status");
+    expect(toast.textContent).toContain("launched successfully");
+    expect(toast.textContent).toContain("4 owners");
+  });
+
+  it("announces a failed launch as an error", async () => {
+    api.create.mockImplementation(async (payload) => ({ ...payload, id: 9, status: "failed", variants: [], campaign_ids: [], total_leads: 4, outreach_conversations: 0, outreach_complete: false, expected_max_cost: .078, error: "Variant A has no eligible leads remaining.", launched_at: null, cancelled_at: null, created_at: new Date().toISOString() }));
+    render(<ExperimentWorkspace token="token" open onClose={vi.fn()} onUnauthorized={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findAllByText("2 leads");
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send now" }));
+
+    const toast = await screen.findByRole("alert");
+    expect(toast.textContent).toContain("could not be launched");
+    expect(toast.textContent).toContain("no eligible leads remaining");
+  });
+
+  it("announces that outreach completed once every variant has finished sending", async () => {
+    const running = { id: 7, name: "Tone test", goal_notes: "", test_dimension: "tone", test_dimension_other: "", winner_metric: "reply_rate", allocation_mode: "balanced", timezone: "UTC", scheduled_at: "2026-11-01T12:00:00Z", status: "running", variants: [{ label: "Variant A", campaign_id: 101, lead_count: 5, message_template: "Hi", followup_enabled: false, followup_template: null, followup_delay_hours: null, color_index: 0 }], campaign_ids: [101], total_leads: 5, outreach_conversations: 0, outreach_complete: false, expected_max_cost: .1, error: "", launched_at: "2026-11-01T12:00:00Z", cancelled_at: null, created_at: "2026-11-01T11:00:00Z" };
+    api.list.mockResolvedValueOnce([running]);
+    api.list.mockResolvedValue([{ ...running, outreach_conversations: 5, outreach_complete: true }]);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<ExperimentWorkspace token="token" open={false} onClose={vi.fn()} onUnauthorized={vi.fn()} />);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(screen.queryByRole("status")).toBeNull();
+      // The workspace re-reads the list while a launched experiment is still sending.
+      await vi.advanceTimersByTimeAsync(8000);
+      expect(api.list).toHaveBeenCalledTimes(2);
+      const toast = await waitFor(() => screen.getByRole("status"));
+      expect(toast.textContent).toContain("outreach completed");
+      expect(toast.textContent).toContain("5 owners texted");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("defaults new follow-ups to 48 hours", async () => {
+    render(<ExperimentWorkspace token="token" open onClose={vi.fn()} onUnauthorized={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findAllByText("2 leads");
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getAllByRole("checkbox", { name: /follow-up/i })[0]);
+    expect((screen.getByRole("spinbutton") as HTMLInputElement).value).toBe("48");
+  });
+
   it("opens with an editable setup and complete message variants", () => {
     render(<ExperimentWorkspace token="token" open onClose={vi.fn()} onUnauthorized={vi.fn()} />);
     expect((screen.getByRole("textbox", { name: "Experiment name" }) as HTMLInputElement).value).toBe("Seller outreach message test");
@@ -128,13 +188,14 @@ describe("ExperimentWorkspace", () => {
   });
 
   it("applies the general date and outcome filters to scheduled experiments", async () => {
-    const base = { goal_notes: "Compare which message earns more owner replies.", test_dimension: "tone", test_dimension_other: "", winner_metric: "reply_rate", allocation_mode: "balanced", timezone: "UTC", status: "running", variants: [{ label: "Variant A", campaign_id: 101, lead_count: 10, message_template: "Hi {{first_name}}, would you consider selling?", followup_enabled: false, followup_template: null, followup_delay_hours: null, color_index: 0 }], total_leads: 10, outreach_conversations: 8, expected_max_cost: .195, error: "", launched_at: null, cancelled_at: null, created_at: "2026-11-01T00:00:00Z" };
+    const onOpenDetail = vi.fn();
+    const base = { goal_notes: "Compare which message earns more owner replies.", test_dimension: "tone", test_dimension_other: "", winner_metric: "reply_rate", allocation_mode: "balanced", timezone: "UTC", status: "running", variants: [{ label: "Variant A", campaign_id: 101, lead_count: 10, message_template: "Hi {{first_name}}, would you consider selling?", followup_enabled: false, followup_template: null, followup_delay_hours: null, color_index: 0 }], total_leads: 10, outreach_conversations: 8, outreach_complete: false, expected_max_cost: .195, error: "", launched_at: null, cancelled_at: null, created_at: "2026-11-01T00:00:00Z" };
     api.list.mockResolvedValue([
       { ...base, id: 1, name: "Positive experiment", campaign_ids: [101], scheduled_at: "2026-11-10T12:00:00Z" },
       { ...base, id: 2, name: "No reply experiment", campaign_ids: [102], scheduled_at: "2026-11-12T12:00:00Z" },
     ]);
     const campaign = (id: number, replied: number, positive: number): Campaign => ({ id, name: `Campaign ${id}`, message_template: "Hi", outreach_reason: "", group_reason_mode: false, status: "sent", sent_at: "2026-11-10T12:00:00Z", created_at: "2026-11-09T12:00:00Z", recipients: 10, delivered: 10, replied, positive_replies: positive, no_reply: 10 - replied, not_sent: 0, broker_id: 1, broker_name: "Broker", broker_email: "broker@example.com", broker_role: "broker" });
-    render(<ExperimentWorkspace token="token" open={false} campaigns={[campaign(101, 3, 1), campaign(102, 0, 0)]} dateFrom="2026-11-01" dateTo="2026-11-11" outcomeFilter="positive" onClose={vi.fn()} onUnauthorized={vi.fn()} />);
+    render(<ExperimentWorkspace token="token" open={false} campaigns={[campaign(101, 3, 1), campaign(102, 0, 0)]} dateFrom="2026-11-01" dateTo="2026-11-11" outcomeFilter="positive" onOpenDetail={onOpenDetail} onClose={vi.fn()} onUnauthorized={vi.fn()} />);
     expect(await screen.findByText("Positive experiment")).toBeTruthy();
     expect(screen.queryByText("No reply experiment")).toBeNull();
     expect(screen.getByText("1 positive")).toBeTruthy();
@@ -149,10 +210,10 @@ describe("ExperimentWorkspace", () => {
     const tabs = screen.getByRole("navigation", { name: "Experiment status" }).querySelectorAll("button");
     expect(tabs[0].textContent).toContain("Launched");
     expect(tabs[1].textContent).toContain("Drafted");
-    fireEvent.click(screen.getByRole("button", { name: "Review" }));
-    expect(screen.getByText("10 properties are grouped into 8 conversations.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "View details" }));
+    expect(onOpenDetail).toHaveBeenCalledWith(1);
     expect(screen.queryByText("Compare which message earns more owner replies.")).toBeNull();
     expect(screen.queryByText("Hi {{first_name}}, would you consider selling?")).toBeNull();
-    expect(screen.getByRole("button", { name: "Hide review" })).toBeTruthy();
+    expect(screen.queryByText("FOLLOW-UP SCHEDULE")).toBeNull();
   });
 });

@@ -5,6 +5,7 @@ import { CalendarView } from './type';
 import { formatMonthYear } from './date-utils';
 import styles from '../../styles/calender.module.css';
 import { NotificationBell } from '../dashboard/components/notification-bell';
+import { fetchWithCurrentSession } from '@/lib/api/http-client';
 
 
 
@@ -34,14 +35,12 @@ export function CalendarHeader({
     }
 
     try {
-      const response = await fetch(
+      const response = await fetchWithCurrentSession(
         `${process.env.NEXT_PUBLIC_API_URL}/auth/google/login`,
         {
           method: "GET",
-          headers: {
-            Authorization: `Bearer ${session.access_token}`,
-          },
-        }
+        },
+        session.access_token,
       );
 
       if (!response.ok) {

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Campaign } from "@/features/campaigns/types/campaigns.types";
@@ -9,6 +9,10 @@ import { AnalysisView } from "./analysis-view";
 const listCampaignsWithProgress = vi.fn();
 const fetchCampaignAudienceAnalysis = vi.fn();
 const listExperiments = vi.fn();
+const getBrokerOverview = vi.fn();
+const updateExperimentFollowup = vi.fn();
+const addExperimentRandomLeads = vi.fn();
+const renameExperiment = vi.fn();
 const { router, navigation } = vi.hoisted(() => ({ router: { push: vi.fn(), replace: vi.fn() }, navigation: { pathname: "/dashboard/broker/analysis" } }));
 
 vi.mock("next/navigation", () => ({
@@ -20,6 +24,9 @@ vi.mock("@/features/auth/lib/auth-storage", () => ({
   readAuthSession: () => ({ access_token: "token", user: { role: "broker" } }),
 }));
 vi.mock("@/features/auth/lib/session-guard", () => ({ endSession: vi.fn() }));
+vi.mock("@/features/assignments/api/assignments-api", () => ({
+  getBrokerOverview: (...args: unknown[]) => getBrokerOverview(...args),
+}));
 vi.mock("@/features/dashboard/components/notification-bell", () => ({ NotificationBell: () => null }));
 vi.mock("@/components/loading/retrieval-progress", () => ({ RetrievalProgress: () => <div>Loading analysis</div> }));
 vi.mock("@/features/experiments/components/experiment-workspace", () => ({
@@ -31,6 +38,9 @@ vi.mock("@/features/campaigns/api/campaigns-api", () => ({
 }));
 vi.mock("@/features/experiments/api/experiments-api", () => ({
   listExperiments: (...args: unknown[]) => listExperiments(...args),
+  updateExperimentFollowup: (...args: unknown[]) => updateExperimentFollowup(...args),
+  addExperimentRandomLeads: (...args: unknown[]) => addExperimentRandomLeads(...args),
+  renameExperiment: (...args: unknown[]) => renameExperiment(...args),
 }));
 
 function campaign(id: number, template: string, name: string): Campaign {
@@ -48,7 +58,7 @@ function experiment(id: number, name: string, campaigns: Campaign[]): Experiment
     winner_metric: "reply_rate", allocation_mode: "balanced", timezone: "UTC",
     scheduled_at: "2026-11-10T14:00:00Z", status: "running",
     variants: campaigns.map((item, index) => ({ label: `Variant ${String.fromCharCode(65 + index)}`, message_template: item.message_template, campaign_id: item.id, lead_count: item.recipients, followup_enabled: false, followup_template: null, followup_delay_hours: null, color_index: index })),
-    campaign_ids: campaigns.map((item) => item.id), total_leads: campaigns.reduce((sum, item) => sum + item.recipients, 0), outreach_conversations: 0, expected_max_cost: 0,
+    campaign_ids: campaigns.map((item) => item.id), total_leads: campaigns.reduce((sum, item) => sum + item.recipients, 0), outreach_conversations: 0, outreach_complete: false, expected_max_cost: 0,
     error: "", launched_at: "2026-11-10T14:00:00Z", cancelled_at: null, created_at: "2026-11-09T14:00:00Z",
   };
 }
@@ -71,6 +81,11 @@ describe("AnalysisView", () => {
       experiment(2, "Question test", [rows[2]]),
     ]);
     fetchCampaignAudienceAnalysis.mockResolvedValue([]);
+    getBrokerOverview.mockResolvedValue({
+      total_campaigns: 4, total_leads_outreached: 54, total_leads_replied: 18,
+      total_leads_opted_out: 0, total_positive_leads: 9, total_other_reply_leads: 9,
+      total_sent_to_lofty: 0, total_appointments_to_confirm: 0,
+    });
   });
 
   it("groups different variant messages by their persisted experiment", async () => {
@@ -78,6 +93,8 @@ describe("AnalysisView", () => {
 
     expect(await screen.findByText("Experiments", { selector: ".analysis-summary span" })).toBeTruthy();
     expect(screen.getByText("2", { selector: ".analysis-summary strong" })).toBeTruthy();
+    const outreachCard = screen.getByText("Leads outreached").closest("article");
+    expect(within(outreachCard as HTMLElement).getByText("54")).toBeTruthy();
     expect(screen.queryByText("Unsent template")).toBeNull();
     expect(screen.queryByText("Zero outreach")).toBeNull();
     const experimentList = screen.getByRole("complementary", { name: "Experiments" });
@@ -85,6 +102,86 @@ describe("AnalysisView", () => {
     expect(screen.getByText("VARIANT A")).toBeTruthy();
     expect(screen.getByText("VARIANT B")).toBeTruthy();
     expect(screen.getAllByText(/Alex/).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("opens launched follow-up editing outside the experiment detail card", async () => {
+    const row = campaign(1, "Hi {{first_name}}", "Detail experiment · Variant A");
+    const running = experiment(7, "Detail experiment", [row]);
+    running.variants[0] = {
+      ...running.variants[0], followup_editable: true,
+      followup_delay_hours: 48, followup_scheduled_at: null,
+    };
+    listCampaignsWithProgress.mockResolvedValue([row]);
+    listExperiments.mockResolvedValue([running]);
+    updateExperimentFollowup.mockResolvedValue({
+      ...running,
+      variants: [{ ...running.variants[0], followup_enabled: true,
+        followup_template: "Checking in", followup_delay_hours: 72 }],
+    });
+    render(<AnalysisView />);
+
+    await screen.findByRole("heading", { name: "Detail experiment" });
+    expect(screen.queryByText("FOLLOW-UP SCHEDULE")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Experiment actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Edit follow-up details" }));
+    const editor = screen.getByRole("dialog", { name: "Edit before the first follow-up sends" });
+    expect(editor.closest(".analysis-template-detail")).toBeNull();
+    expect(screen.getByText("FOLLOW-UP SCHEDULE")).toBeTruthy();
+    fireEvent.click(screen.getByRole("checkbox", { name: /Send follow-up/i }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Variant A follow-up message" }), { target: { value: "Checking in" } });
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Variant A send after" }), { target: { value: "72" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save follow-up" }));
+
+    await waitFor(() => expect(updateExperimentFollowup).toHaveBeenCalledWith(7, 1, {
+      followup_enabled: true,
+      followup_template: "Checking in",
+      followup_delay_hours: 72,
+    }, "token"));
+  });
+
+  it("renames an experiment from the detail actions menu", async () => {
+    const rows = [campaign(1, "Hi {{first_name}}", "Old name · Variant A")];
+    const current = experiment(1, "Old name", rows);
+    listCampaignsWithProgress.mockResolvedValue(rows);
+    listExperiments.mockResolvedValue([current]);
+    renameExperiment.mockResolvedValue({ ...current, name: "New experiment name" });
+    render(<AnalysisView />);
+
+    await screen.findByRole("heading", { name: "Old name" });
+    fireEvent.click(screen.getByRole("button", { name: "Experiment actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename experiment" }));
+    const input = screen.getByRole("textbox", { name: "Experiment name" });
+    fireEvent.change(input, { target: { value: "New experiment name" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+
+    await waitFor(() => expect(renameExperiment).toHaveBeenCalledWith(
+      1, "New experiment name", "token",
+    ));
+    expect(await screen.findByRole("heading", { name: "New experiment name" })).toBeTruthy();
+  });
+
+  it("adds random leads to a launched variant from the detail actions menu", async () => {
+    const row = campaign(1, "Hi {{first_name}}", "Running experiment · Variant A");
+    const running = experiment(7, "Running experiment", [row]);
+    listCampaignsWithProgress.mockResolvedValue([row]);
+    listExperiments.mockResolvedValue([running]);
+    addExperimentRandomLeads.mockResolvedValue({
+      ...running,
+      total_leads: 25,
+      variants: [{ ...running.variants[0], lead_count: 25 }],
+    });
+    render(<AnalysisView />);
+
+    await screen.findByRole("heading", { name: "Running experiment" });
+    fireEvent.click(screen.getByRole("button", { name: "Experiment actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Add random leads" }));
+    const editor = screen.getByRole("dialog", { name: "Add random leads after launch" });
+    expect(editor.closest(".analysis-template-detail")).toBeNull();
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Variant A random leads to add" }), { target: { value: "5" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add and send outreach" }));
+
+    await waitFor(() => expect(addExperimentRandomLeads).toHaveBeenCalledWith(7, 1, 5, "token"));
+    expect(await screen.findByText("5 random leads added to Variant A. Their outreach is queued.")).toBeTruthy();
   });
 
   it("lets the user compare templates and open the experiment workflow", async () => {

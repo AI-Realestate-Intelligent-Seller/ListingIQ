@@ -1,59 +1,22 @@
 "use client";
 
-import { requestJson } from "@/lib/api/http-client";
+import { clearAuthSession, readAuthSession } from "./auth-storage";
+import { ensureStoredSessionFresh } from "./session-refresh";
+import {
+  clearActivity,
+  IDLE_TIMEOUT_MS,
+  isIdleExpired,
+  lastActivityAt,
+  markActivity,
+} from "./session-lifetime";
 
-import { authSessionPersistence, clearAuthSession, readAuthSession, saveAuthSession } from "./auth-storage";
-import type { AuthResponse } from "../types/auth.types";
+export { IDLE_TIMEOUT_MS, isIdleExpired, lastActivityAt, markActivity };
 
-/** Sessions end after this much inactivity, regardless of token lifetime. */
-export const IDLE_TIMEOUT_MS = 8 * 60 * 60 * 1000;
-
-/** Refresh the access token this long before it expires. */
-const REFRESH_MARGIN_MS = 5 * 60 * 1000;
-
-const ACTIVITY_KEY = "ListingIQ.lastActivity";
 const ACTIVITY_EVENTS = ["mousedown", "keydown", "touchstart", "scroll", "focus"] as const;
-
-export function markActivity(): void {
-  try {
-    window.localStorage.setItem(ACTIVITY_KEY, String(Date.now()));
-  } catch {
-    // Private mode / storage disabled — the in-memory session still works.
-  }
-}
-
-export function lastActivityAt(): number {
-  const stored = Number(window.localStorage.getItem(ACTIVITY_KEY));
-  if (Number.isFinite(stored) && stored > 0) return stored;
-  // No record yet (first load after login): treat now as the start.
-  markActivity();
-  return Date.now();
-}
-
-export function isIdleExpired(): boolean {
-  return Date.now() - lastActivityAt() > IDLE_TIMEOUT_MS;
-}
 
 export function endSession(): void {
   clearAuthSession();
-  try {
-    window.localStorage.removeItem(ACTIVITY_KEY);
-  } catch {
-    // ignore
-  }
-}
-
-/** Seconds remaining on the stored access token, from its JWT `exp` claim. */
-function secondsUntilExpiry(accessToken: string): number {
-  try {
-    const [, payload] = accessToken.split(".");
-    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
-    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
-    const claims = JSON.parse(atob(padded));
-    return Number(claims.exp) * 1000 - Date.now();
-  } catch {
-    return 0;
-  }
+  clearActivity();
 }
 
 /**
@@ -71,21 +34,12 @@ export async function ensureFreshSession(): Promise<boolean> {
     return false;
   }
 
-  if (secondsUntilExpiry(session.access_token) > REFRESH_MARGIN_MS) {
-    return true;
-  }
-
   try {
-    const refreshed = await requestJson<AuthResponse>("/auth/refresh", {
-      method: "POST",
-      payload: { refresh_token: session.refresh_token },
-    });
-    saveAuthSession(refreshed, authSessionPersistence());
-    return true;
+    return (await ensureStoredSessionFresh()) !== null;
   } catch {
-    // Refresh token rejected or expired: the session is genuinely over.
-    endSession();
-    return false;
+    // A temporary network failure is not inactivity and must not log the user
+    // out. The next check or authenticated request will retry the refresh.
+    return readAuthSession() !== null;
   }
 }
 

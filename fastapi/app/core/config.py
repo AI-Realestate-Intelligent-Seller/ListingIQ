@@ -230,7 +230,9 @@ def load_config():
         # Lofty silently truncates note content at 2000 characters.
         'note_max_chars': 1900,
         'timeout_seconds': 20.0,
-        'crm_lead_url': 'https://crm.lofty.com/admin/home/lead/detail/{lead_id}',
+        'crm_lead_url': (
+            'https://crm.lofty.com/admin/home/detail?leadId={lead_id}&type=all'
+        ),
     }
     cfg['frontend_url'] = os.getenv('FRONTEND_URL', cfg.get('frontend_url', 'http://localhost:3000'))
     smtp_port = os.getenv('SMTP_PORT', cfg.get('smtp', {}).get('port') if isinstance(cfg.get('smtp', {}), dict) else None)
