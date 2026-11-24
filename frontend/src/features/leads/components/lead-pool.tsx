@@ -64,10 +64,23 @@ const EMPTY_POOL: LeadPoolResponse = {
   leads: [],
   map: { mappable_count: 0, pending_count: 0, failed_count: 0 },
   facets: { total: 0, signals: {}, stages: {} },
+  unreachable: { total: 0, stages: {} },
   locations: { states: [], cities: [], zips: [] },
   signal_catalog: [],
   stage_catalog: [],
 };
+
+/**
+ * The two stages the pool cannot work as they stand. They are filters beside
+ * the pool rather than rows inside it: a landline will never receive a text,
+ * and a lead with no address has nothing for the opening message to be about.
+ * Choosing one turns the table into that list.
+ */
+const UNREACHABLE_STAGES = ["not_mobile", "no_address"] as const;
+
+function isUnreachableView(stage: string): boolean {
+  return (UNREACHABLE_STAGES as readonly string[]).includes(stage);
+}
 
 const LEADS_PER_PAGE = 20;
 type BulkSelectionOrder = "first" | "last" | "random";
@@ -83,6 +96,7 @@ const STAGE_CLASS: Record<LeadStage, string> = {
   in_campaign: "campaign",
   needs_review: "review",
   not_mobile: "not-mobile",
+  no_address: "no-address",
   dnc: "dnc",
 };
 
@@ -187,6 +201,56 @@ function StageFilter({
           ))}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+type PoolViewTabsProps = {
+  stage: string;
+  onChange: (stage: string) => void;
+  poolCount: number;
+  stageLabels: Record<string, string>;
+  unreachableCounts: Partial<Record<string, number>>;
+};
+
+/**
+ * Pool first, then one filter per reason a lead cannot be worked. The counts
+ * are always shown, including zero: a hidden pile of unworkable leads is how a
+ * pool quietly loses rows nobody ever looks at again.
+ */
+function PoolViewTabs({
+  stage,
+  onChange,
+  poolCount,
+  stageLabels,
+  unreachableCounts,
+}: PoolViewTabsProps) {
+  const tabs = [
+    { value: "", label: "Pool", count: poolCount },
+    ...UNREACHABLE_STAGES.map((key) => ({
+      value: key,
+      label: stageLabels[key] ?? key,
+      count: unreachableCounts[key] ?? 0,
+    })),
+  ];
+  // The pool tab stays current while a stage inside the pool is filtered, so
+  // picking "Ready for Outreach" does not look like leaving the pool.
+  const active = isUnreachableView(stage) ? stage : "";
+  return (
+    <div className="leads-view-tabs" role="tablist" aria-label="Lead pool views">
+      {tabs.map((tab) => (
+        <button
+          key={tab.value || "pool"}
+          type="button"
+          role="tab"
+          aria-selected={tab.value === active}
+          className={`leads-view-tab${tab.value === active ? " active" : ""}`}
+          onClick={() => onChange(tab.value)}
+        >
+          <span>{tab.label}</span>
+          <span className="leads-view-tab-count">{tab.count.toLocaleString()}</span>
+        </button>
+      ))}
     </div>
   );
 }
@@ -1118,20 +1182,38 @@ useEffect(() => {
         </div>
       </header>
 
+      <PoolViewTabs
+        stage={stage}
+        onChange={(value) => {
+          setStage(value);
+          // The two lists hold different rows; a selection made in one of them
+          // means nothing in the other.
+          setSelected([]);
+        }}
+        poolCount={pool.facets.total}
+        stageLabels={stageLabels}
+        unreachableCounts={pool.unreachable?.stages ?? {}}
+      />
+
       <div className="leads-toolbar">
-        <StageFilter
-          value={stage}
-          onChange={setStage}
-          options={[
-            { value: "", label: "All stages" },
-            ...pool.stage_catalog
-              .filter((item) => item.key !== "needs_review" && item.key !== "in_campaign")
-              .map((item) => ({
-                value: item.key,
-                label: `${item.label}${pool.facets.stages[item.key] ? ` (${pool.facets.stages[item.key]})` : ""}`,
-              })),
-          ]}
-        />
+        {/* The toolbar is a fixed five-column grid, so the slot is kept even
+            when there is no stage to choose within an Unreachable list. */}
+        {isUnreachableView(stage) ? <div aria-hidden="true" /> : (
+          <StageFilter
+            value={stage}
+            onChange={setStage}
+            options={[
+              { value: "", label: "All stages" },
+              ...pool.stage_catalog
+                .filter((item) => item.key !== "needs_review" && item.key !== "in_campaign"
+                  && !isUnreachableView(item.key))
+                .map((item) => ({
+                  value: item.key,
+                  label: `${item.label}${pool.facets.stages[item.key] ? ` (${pool.facets.stages[item.key]})` : ""}`,
+                })),
+            ]}
+          />
+        )}
         <LocationCombo
   icon={PIN_ICON}
   ariaLabel="Filter by state"
@@ -1302,14 +1384,19 @@ useEffect(() => {
             <button type="button" className="sms-button-secondary" onClick={confirmRemoveSelected}>
               Remove
             </button>
-            <button
-              className="button"
-              type="button"
-              onClick={() => void handleDraftCampaign(selectedVisible)}
-              disabled={isDrafting}
-            >
-              {isDrafting ? "Opening…" : "✦ Create campaign"}
-            </button>
+            {/* No campaign button here: a campaign, an experiment and an
+                individual message all refuse these leads, so offering it
+                would only produce a page of refusals. */}
+            {isUnreachableView(stage) ? null : (
+              <button
+                className="button"
+                type="button"
+                onClick={() => void handleDraftCampaign(selectedVisible)}
+                disabled={isDrafting}
+              >
+                {isDrafting ? "Opening…" : "✦ Create campaign"}
+              </button>
+            )}
           </div>
         </div>
       ) : null}
@@ -1512,13 +1599,25 @@ useEffect(() => {
         {!isLoading && leadsToShow.length === 0 ? (
           <div className="leads-empty">
             <div aria-hidden="true">◎</div>
-            <h3>{pool.facets.total === 0 ? "No leads yet" : "Nothing matches those filters"}</h3>
+            <h3>
+              {stage === "not_mobile"
+                ? "No landline or VoIP numbers"
+                : stage === "no_address"
+                  ? "Every lead has a property address"
+                  : pool.facets.total === 0
+                    ? "No leads yet"
+                    : "Nothing matches those filters"}
+            </h3>
             <p>
-              {pool.facets.total === 0
-                ? "Upload a .csv or .xlsx file with owner name, phone, property address and signal columns. Column names are matched loosely, so most vendor exports work as-is."
-                : stage === "in_campaign"
-                  ? "Leads handed to a campaign are listed under that campaign, in the Campaigns tab."
-                  : "Try a different location, stage, or signal."}
+              {stage === "not_mobile"
+                ? "Nothing here yet. A lead lands in this list when Telnyx confirms its number cannot receive texts, which happens as a campaign sends."
+                : stage === "no_address"
+                  ? "Nothing here yet. A lead lands in this list when it arrives with a usable number but no property address, which is usually a missing column in the import."
+                  : pool.facets.total === 0
+                    ? "Upload a .csv or .xlsx file with owner name, phone, property address and signal columns. Column names are matched loosely, so most vendor exports work as-is."
+                    : stage === "in_campaign"
+                      ? "Leads handed to a campaign are listed under that campaign, in the Campaigns tab."
+                      : "Try a different location, stage, or signal."}
             </p>
           </div>
         ) : null}

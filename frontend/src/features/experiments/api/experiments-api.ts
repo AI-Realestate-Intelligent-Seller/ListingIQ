@@ -8,6 +8,10 @@ export function listExperiments(token: string): Promise<Experiment[]> {
   return getJson<Experiment[]>(EXPERIMENTS, token);
 }
 
+export function getExperiment(id: number, token: string): Promise<Experiment> {
+  return getJson<Experiment>(`${EXPERIMENTS}/${id}`, token);
+}
+
 export function createExperiment(input: ExperimentCreateInput, token: string): Promise<Experiment> {
   return postJson<Experiment, ExperimentCreateInput>(EXPERIMENTS, input, token);
 }

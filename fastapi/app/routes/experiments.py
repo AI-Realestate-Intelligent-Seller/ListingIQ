@@ -55,13 +55,14 @@ def get_experiment(experiment_id: int, current_user: User = Depends(get_current_
     _require_access(current_user)
     try:
         return cache.get_or_load(
-            'experiment-detail-v3',
+            'experiment-detail-v4',
             cache.DASHBOARD_TABLES,
             {'user': current_user.id, 'role': current_user.role,
              'experiment': experiment_id},
-            lambda: service.serialize(service.owned(
-                session, current_user, experiment_id,
-            ), session),
+            lambda: service.serialize(
+                service.owned(session, current_user, experiment_id), session,
+                include_outreach_detail=True,
+            ),
         )
     except LookupError as error:
         raise HTTPException(status_code=404, detail=str(error))

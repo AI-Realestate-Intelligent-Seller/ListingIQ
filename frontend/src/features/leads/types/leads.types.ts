@@ -5,7 +5,15 @@ export type LeadSignal = {
 };
 
 /** Stages are derived by the backend; the broker never sets one by hand. */
-export type LeadStage = "dnc" | "in_campaign" | "needs_review" | "not_mobile" | "ready";
+export type LeadStage =
+  | "dnc"
+  | "in_campaign"
+  | "needs_review"
+  /** Telnyx confirmed the number is a landline or VoIP: it cannot be texted. */
+  | "not_mobile"
+  /** Good number, but no property for the opening message to be about. */
+  | "no_address"
+  | "ready";
 
 /** One number an individual message was sent to, or could not be sent to. */
 export type LeadMessageRecipient = {
@@ -101,6 +109,11 @@ export type LeadPoolResponse = {
   leads: Lead[];
   map: { mappable_count: number; pending_count: number; failed_count: number };
   facets: LeadFacets;
+  /**
+   * Counts for the Unreachable filters, which sit beside the pool, not in it.
+   * Optional so a frontend deployed ahead of the API still renders.
+   */
+  unreachable?: { total: number; stages: Partial<Record<LeadStage, number>> };
   locations: LocationFacets;
   signal_catalog: LeadSignal[];
   stage_catalog: { key: LeadStage; label: string }[];

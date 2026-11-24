@@ -108,6 +108,10 @@ STAGES: dict[str, str] = {
     'in_campaign': 'In campaign',
     'needs_review': 'Needs review',
     'ready': 'Ready for Outreach',
+    # The two Unreachable filters. Named for what is wrong rather than for what
+    # the system did, because one of them is a data gap the broker can close.
+    'not_mobile': 'No mobile line',
+    'no_address': 'Missing address',
 }
 
 

@@ -4,12 +4,15 @@ import json
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from ..leads import campaign as campaign_service
 from ..leads import template as message_template
-from ..models import Campaign, Conversation, Experiment, Message, User
+from ..models import (
+    Campaign, Conversation, Experiment, Lead, LeadEvent, Message,
+    OutboundSmsJob, User,
+)
 from ..tenancy import brokerage_user_ids
 
 TEST_DIMENSIONS = {'tone', 'length', 'reason', 'open_question', 'other'}
@@ -43,8 +46,139 @@ def _outreach_conversation_counts(session: Session, experiment_ids: list[int]) -
     return {experiment_id: count for experiment_id, count in rows}
 
 
+def _lookup_reason(lead: Lead) -> str | None:
+    """Explain a persisted live-number lookup that prevented submission."""
+    try:
+        details = json.loads(lead.details or '{}')
+    except (TypeError, ValueError):
+        details = {}
+    current_phone = campaign_service.normalize_phone(lead.phone or '')
+    candidates = details.get('_phone_numbers') or []
+    for candidate in candidates if isinstance(candidates, list) else []:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_phone = campaign_service.normalize_phone(
+            str(candidate.get('phone') or candidate.get('number') or ''),
+        )
+        if current_phone and candidate_phone != current_phone:
+            continue
+        lookup = candidate.get('telnyx_lookup')
+        if not isinstance(lookup, dict):
+            continue
+        status = str(lookup.get('status') or candidate.get('lookup_status') or '')
+        line_type = str(lookup.get('line_type') or candidate.get('type') or '').strip()
+        if status == 'unknown':
+            return 'Phone type could not be verified as mobile by Telnyx. No message was sent.'
+        if status == 'error':
+            return 'The phone lookup failed, so no message was sent.'
+        if status == 'verified' and line_type and line_type != 'mobile':
+            label = line_type.replace('_', ' ').replace('-', ' ')
+            return f'Number is {label}; campaigns send only to mobile numbers.'
+    return None
+
+
+def _outreach_detail(session: Session, experiment: Experiment,
+                     campaigns: dict[int, Campaign]) -> tuple[int, list[dict]]:
+    """Selected rows that reached an owner, plus terminal rows that did not."""
+    campaign_ids = set(campaigns)
+    if not campaign_ids:
+        return 0, []
+    campaign_meta = []
+    for campaign_id in campaign_ids:
+        campaign_meta.extend((
+            LeadEvent.meta.like(f'%"campaign_id": {campaign_id}%'),
+            LeadEvent.meta.like(f'%"campaign_id":{campaign_id}%'),
+        ))
+    events = (session.query(LeadEvent)
+              .filter(
+                  LeadEvent.event_type.in_(('locked_to_campaign', 'outreach_sent')),
+                  or_(*campaign_meta),
+              )
+              .order_by(LeadEvent.id)
+              .all())
+    selected: dict[int, int] = {}
+    message_by_lead: dict[int, int] = {}
+    for event in events:
+        try:
+            meta = json.loads(event.meta or '{}')
+        except (TypeError, ValueError):
+            continue
+        campaign_id = meta.get('campaign_id')
+        if campaign_id not in campaign_ids:
+            continue
+        if event.event_type == 'locked_to_campaign':
+            selected[event.lead_id] = campaign_id
+        elif event.event_type == 'outreach_sent' and meta.get('message_id'):
+            message_by_lead[event.lead_id] = int(meta['message_id'])
+
+    message_ids = set(message_by_lead.values())
+    messages = ({row.id: row for row in session.query(Message).filter(
+        Message.id.in_(message_ids),
+    ).all()} if message_ids else {})
+    contacted = {
+        lead_id for lead_id, message_id in message_by_lead.items()
+        if message_id in messages
+        and messages[message_id].status not in campaign_service.NON_DELIVERED_STATUSES
+    }
+    if not selected:
+        # Legacy experiments predate lead-history events. Preserve the existing
+        # property-based outreach total even though per-lead reasons are absent.
+        owner = session.get(User, experiment.user_id)
+        if owner is None:
+            return 0, []
+        _members, delivered, _replied, _positive = campaign_service._counts_by_campaign(
+            session, owner, campaign_ids,
+        )
+        return sum(delivered.values()), []
+
+    missing_ids = set(selected) - contacted
+    if not missing_ids:
+        return len(contacted), []
+    leads = {row.id: row for row in session.query(Lead).filter(
+        Lead.id.in_(missing_ids),
+    ).all()}
+    jobs = (session.query(OutboundSmsJob)
+            .filter(
+                OutboundSmsJob.campaign_id.in_(campaign_ids),
+                OutboundSmsJob.lead_id.in_(missing_ids),
+            ).order_by(OutboundSmsJob.id.desc()).all())
+    job_reason = {
+        job.lead_id: job.last_error for job in jobs
+        if job.last_error and job.status in {'skipped', 'failed', 'uncertain'}
+    }
+    not_contacted = []
+    for lead_id in sorted(missing_ids):
+        campaign_id = selected[lead_id]
+        campaign = campaigns[campaign_id]
+        job = next((row for row in jobs if row.lead_id == lead_id), None)
+        # Queued work is not a failure. Report it only after a terminal job or
+        # after the variant has completed all of its outbound work.
+        if campaign.status != 'sent' and not (
+            job and job.status in {'skipped', 'failed', 'uncertain'}
+        ):
+            continue
+        lead = leads.get(lead_id)
+        message = messages.get(message_by_lead.get(lead_id, -1))
+        reason = job_reason.get(lead_id)
+        if not reason and message is not None:
+            reason = message.failure_reason
+        if not reason and lead is not None:
+            reason = _lookup_reason(lead)
+        if not reason and lead is not None:
+            reason = campaign_service.selection_reason(lead)
+        not_contacted.append({
+            'lead_id': lead_id,
+            'owner_name': lead.owner_name if lead else None,
+            'property_address': lead.property_address if lead else None,
+            'variant': campaign.experiment_variant or campaign.name,
+            'reason': reason or 'No opening message was sent.',
+        })
+    return len(contacted), not_contacted
+
+
 def serialize(experiment: Experiment, session: Session,
-              outreach_conversations: int | None = None) -> dict:
+              outreach_conversations: int | None = None,
+              include_outreach_detail: bool = False) -> dict:
     try:
         variants = json.loads(experiment.variant_config or '[]')
     except ValueError:
@@ -101,6 +235,10 @@ def serialize(experiment: Experiment, session: Session,
         and len(launched_campaigns) == len(campaign_ids)
         and all(row.status == 'sent' for row in launched_campaigns)
     )
+    outreached_leads, not_contacted = (
+        _outreach_detail(session, experiment, campaigns)
+        if include_outreach_detail else (0, [])
+    )
     return {
         'id': experiment.id,
         'name': experiment.name,
@@ -116,6 +254,8 @@ def serialize(experiment: Experiment, session: Session,
         'campaign_ids': campaign_ids,
         'total_leads': experiment.total_leads,
         'outreach_conversations': outreach_conversations,
+        'outreached_leads': outreached_leads,
+        'not_contacted': not_contacted,
         'outreach_complete': outreach_complete,
         'expected_max_cost': experiment.expected_max_cost,
         'error': experiment.error or '',

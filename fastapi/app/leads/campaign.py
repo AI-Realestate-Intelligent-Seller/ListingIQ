@@ -34,7 +34,7 @@ from . import reason_suggest
 from . import template as message_template
 from .catalog import SIGNALS, signal_label
 from .importer import normalize_phone
-from .service import (ACTIVE_OUTBOUND_STATUSES, GROUPED_OUTREACH_STATUS,
+from .service import (ACTIVE_OUTBOUND_STATUSES, GROUPED_OUTREACH_STATUS, UNREACHABLE_STAGES,
                       contacted_phone_keys, conversation_property_details, derive_stage,
                       is_contacted_owner, lead_phone_numbers, outreach_reason,
                       predefined_reason, random_pool_lead_ids, serialize, split_signals)
@@ -1307,6 +1307,7 @@ STAGE_REFUSAL: dict[str, str] = {
     'in_campaign': 'Already texted in a campaign.',
     'needs_review': 'Needs review — no usable phone number.',
     'not_mobile': 'Number is not a mobile; campaigns send only to mobile numbers.',
+    'no_address': 'No property address for Bobbie to reference.',
 }
 
 
@@ -1320,8 +1321,6 @@ def selection_reason(lead: Lead) -> str | None:
     stage = derive_stage(lead)
     if stage != 'ready':
         return STAGE_REFUSAL.get(stage, 'Not ready for outreach.')
-    if not lead.property_address:
-        return 'No property address for Bobbie to reference.'
     return None
 
 
@@ -1922,8 +1921,12 @@ def contact_individually(session: Session, user: User, lead_id: int, text: str,
             .first())
     if lead is None:
         raise LookupError('Lead not found.')
-    if not lead.property_address:
-        raise ValueError('This lead has no property address for Bobbie to reference.')
+    stage = derive_stage(lead)
+    if stage in UNREACHABLE_STAGES:
+        # Listed under Unreachable in the pool, so it is not selectable here
+        # either: a landline cannot receive this, and without an address there
+        # is no property for the message to be about.
+        raise ValueError(STAGE_REFUSAL[stage])
     # Any number on the lead, not just its primary: the owner is one person.
     if lead.conversation_id is not None or is_contacted_owner(
             lead, contacted_phone_keys(session, user)):

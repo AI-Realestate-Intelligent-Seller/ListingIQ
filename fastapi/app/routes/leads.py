@@ -106,11 +106,13 @@ def _lead_pool_cache_key(user: User, search, addresses, signals, stage, states, 
                          zip_codes, north, south, east, west, polygon_points):
     """Cache namespace, dependencies and key — shared by the pool and its /load shortcut.
 
-    The namespace carries a version because the pool now leaves out owners who
-    already have an outreach conversation: a payload cached before that rule
-    would put them back on screen until some other write bumped the tables.
+    The namespace carries a version because the payload's shape and contents
+    have both changed: owners who already have an outreach conversation are
+    left out, the Unreachable rows with them, and `unreachable` is new. A
+    payload cached under an older rule would put those rows back on screen,
+    or arrive without the counts the view reads.
     """
-    return ('lead-pool-v2', cache.DASHBOARD_TABLES,
+    return ('lead-pool-v3', cache.DASHBOARD_TABLES,
             {'user': user.id, 'role': user.role, 'search': search,
              'addresses': addresses, 'signals': signals, 'stage': stage, 'states': states,
              'cities': cities, 'zip_codes': zip_codes, 'bounds': [north, south, east, west],
@@ -172,6 +174,9 @@ def _build_lead_pool_payload(
         'leads': filtered,
         'map': leads_service.map_summary(filtered),
         'facets': leads_service.facets(session, current_user),
+        # Counts for the Unreachable filters, which sit beside the pool rather
+        # than inside it: the rows they hold are the ones the pool leaves out.
+        'unreachable': leads_service.unreachable_facets(session, current_user),
         'locations': leads_service.location_facets(
             session, current_user, states, cities, zip_codes,
         ),

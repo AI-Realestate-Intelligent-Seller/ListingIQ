@@ -94,6 +94,36 @@
 .analysis-rename-dialog footer { display: flex; justify-content: flex-end; gap: 8px; }
 .analysis-rename-dialog footer button { min-height: 36px; padding: 7px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--white); color: var(--ink); font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; }
 .analysis-rename-dialog footer .button { border-color: var(--blue); background: var(--blue); color: var(--white); }
+.analysis-outreach-backdrop { position: fixed; inset: 0; z-index: 1200; display: grid; place-items: center; padding: 20px; background: rgba(20,26,23,.48); }
+.analysis-outreach-dialog { display: grid; width: min(900px, 100%); max-height: min(820px, calc(100vh - 40px)); overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--white); box-shadow: 0 28px 80px rgba(20,26,23,.3); }
+.analysis-outreach-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 19px 20px 17px; border-bottom: 1px solid var(--line); background: #f7faf8; }
+.analysis-outreach-dialog > header > div { display: grid; gap: 4px; }
+.analysis-outreach-dialog > header span, .analysis-not-contacted > div > span { color: var(--blue); font-size: 8.5px; font-weight: 800; letter-spacing: .13em; }
+.analysis-outreach-dialog h3, .analysis-outreach-dialog h4, .analysis-outreach-dialog p { margin: 0; }
+.analysis-outreach-dialog h3 { font-size: 19px; }
+.analysis-outreach-dialog > header p { color: var(--muted); font-size: 11px; }
+.analysis-outreach-dialog > header button { display: grid; width: 34px; height: 34px; flex: 0 0 34px; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--white); color: var(--ink); font: inherit; font-size: 21px; cursor: pointer; }
+.analysis-outreach-content { min-height: 0; overflow-y: auto; padding: 18px 20px 22px; }
+.analysis-outreach-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
+.analysis-outreach-metrics article { display: grid; gap: 5px; min-width: 0; padding: 13px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.analysis-outreach-metrics span { color: var(--muted); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .045em; }
+.analysis-outreach-metrics strong { font-size: 23px; font-variant-numeric: tabular-nums; }
+.analysis-outreach-metrics small { color: var(--muted); font-size: 9.5px; line-height: 1.35; }
+.analysis-not-contacted { display: grid; gap: 11px; margin-top: 20px; }
+.analysis-not-contacted > div:first-child { display: grid; gap: 4px; }
+.analysis-not-contacted h4 { font-size: 14px; }
+.analysis-not-contacted > div:first-child p { color: var(--muted); font-size: 10.5px; }
+.analysis-not-contacted-list { display: grid; gap: 8px; }
+.analysis-not-contacted-list article { display: grid; grid-template-columns: minmax(210px, .9fr) minmax(280px, 1.4fr); gap: 18px; padding: 13px 14px; border: 1px solid #e2d8cf; border-radius: 10px; background: #fffaf6; }
+.analysis-not-contacted-list article > div { display: grid; align-content: start; gap: 3px; min-width: 0; }
+.analysis-not-contacted-list strong { font-size: 12px; }
+.analysis-not-contacted-list article > div span { overflow-wrap: anywhere; color: var(--muted); font-size: 10.5px; }
+.analysis-not-contacted-list small { color: var(--blue); font-size: 9px; font-weight: 700; }
+.analysis-not-contacted-list article > p { display: grid; align-content: start; gap: 4px; color: #67453c; font-size: 11px; line-height: 1.45; }
+.analysis-not-contacted-list article > p span { color: #9b5b49; font-size: 8.5px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.analysis-outreach-state, .analysis-outreach-error { margin: 18px 20px !important; padding: 13px 14px; border-radius: 9px; font-size: 11px; }
+.analysis-outreach-state { border: 1px solid var(--line); background: var(--surface); color: var(--muted); }
+.analysis-outreach-error { border: 1px solid #e5b9b6; background: #fff4f3; color: #913d38; }
 .analysis-conversation-link { display: inline-flex; align-items: center; justify-content: center; min-height: 32px; padding: 7px 11px; border: 1px solid var(--blue); border-radius: 7px; color: var(--blue); font-size: 10.5px; font-weight: 750; text-decoration: none; white-space: nowrap; }
 .analysis-conversation-link:hover { background: #edf6f2; }
 .analysis-compare-check { display: flex; align-items: center; gap: 7px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; color: #46504b; font-size: 10.5px; font-weight: 650; cursor: pointer; }
@@ -200,6 +230,8 @@
   .analysis-template-list-scroll { overflow-y: visible; }
   .analysis-template-detail > header { flex-direction: column; }
   .analysis-template-detail > header > .analysis-detail-actions { align-items: flex-start; flex-direction: column; }
+  .analysis-outreach-metrics { grid-template-columns: 1fr 1fr; }
+  .analysis-not-contacted-list article { grid-template-columns: 1fr; gap: 10px; }
 }
 @media (max-width: 520px) {
   .analysis-general-filters { grid-template-columns: 1fr; }
@@ -208,4 +240,8 @@
   .analysis-template-detail { padding: 14px; }
   .analysis-area-chart { padding-inline: 9px; }
   .analysis-area-chart-body { grid-template-columns: 34px minmax(0, 1fr); }
+  .analysis-outreach-backdrop { padding: 10px; }
+  .analysis-outreach-dialog { max-height: calc(100vh - 20px); }
+  .analysis-outreach-dialog > header, .analysis-outreach-content { padding-inline: 14px; }
+  .analysis-outreach-metrics { grid-template-columns: 1fr; }
 }

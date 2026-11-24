@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 import random
 
-from sqlalchemy import func, or_
+from sqlalchemy import and_, func, not_, or_
 from sqlalchemy.orm import Session
 
 import json
@@ -265,6 +265,11 @@ def is_contacted_owner(lead: Lead, contacted: set[str]) -> bool:
 
 
 NON_MOBILE_STAGE = 'not_mobile'
+NO_ADDRESS_STAGE = 'no_address'
+# The two stages the Lead Pool's Unreachable view is made of. Neither can be
+# texted as it stands, so both are kept out of the workable pool rather than
+# padding it with rows every campaign would refuse.
+UNREACHABLE_STAGES = (NON_MOBILE_STAGE, NO_ADDRESS_STAGE)
 
 
 def has_non_mobile_phone(lead: Lead) -> bool:
@@ -281,6 +286,17 @@ def pool_textable_filter():
                Lead.phone_lookup_number.is_(None), Lead.phone_lookup_number != Lead.phone)
 
 
+def pool_addressable_filter():
+    """SQL form of 'has a property address' — what the opening message names."""
+    return and_(Lead.property_address.isnot(None),
+                func.trim(Lead.property_address) != '')
+
+
+def unreachable_filter():
+    """SQL form of the Unreachable view: no mobile line, or no address."""
+    return or_(not_(pool_textable_filter()), not_(pool_addressable_filter()))
+
+
 def derive_stage(lead: Lead, now: datetime | None = None) -> str:
     """Where this lead stands with us, in strict precedence."""
     if lead.dnc:
@@ -291,8 +307,13 @@ def derive_stage(lead: Lead, now: datetime | None = None) -> str:
         # Nothing can be sent without a number, however good the signals are.
         return 'needs_review'
     if has_non_mobile_phone(lead):
-        # Saved for a later screen; never back in the pool while the number is unchanged.
+        # Listed under Unreachable; never back in the pool while the number is unchanged.
         return NON_MOBILE_STAGE
+    if not (lead.property_address or '').strip():
+        # Bobbie's opening message names the property, so there is nothing to
+        # send without one. The number is good, so this is a data gap the
+        # broker can close and the lead returns to the pool when they do.
+        return NO_ADDRESS_STAGE
     # A freshly imported lead used to sit at "New" for a day. It is the same
     # thing to everyone who reads it — contactable, not yet contacted — and the
     # split only ever delayed outreach, so there is one stage now.
@@ -436,7 +457,11 @@ def _pool_locations(session: Session, user: User) -> list[Location]:
 
 
 def _pool_leads(session: Session, user: User) -> list[Lead]:
-    """The whole unfiltered pool, read once per request.
+    """The whole unfiltered *workable* pool, read once per request.
+
+    Leads that cannot be texted as they stand are not part of it: they are
+    listed under Unreachable instead, and every campaign, experiment and
+    individual message selects from here.
 
     The counts, the location menu and the town-to-ZIP crosswalk all need it, and
     each read is a round trip to the database.
@@ -446,10 +471,41 @@ def _pool_leads(session: Session, user: User) -> list[Lead]:
     if key not in cache:
         rows = (session.query(Lead)
                 .filter(Lead.user_id.in_(brokerage_user_ids(session, user)),
-                        Lead.campaign_id.is_(None), pool_textable_filter()).all())
+                        Lead.campaign_id.is_(None),
+                        pool_textable_filter(), pool_addressable_filter()).all())
         contacted = contacted_phone_keys(session, user)
         cache[key] = [lead for lead in rows if not is_contacted_owner(lead, contacted)]
     return cache[key]
+
+
+def unreachable_leads(session: Session, user: User) -> list[Lead]:
+    """The leads the Unreachable view holds: no mobile line, or no address.
+
+    Read once per request like the pool itself, since the counts beside each
+    filter and the rows under it both need the whole set.
+    """
+    cache = session_cache(session)
+    key = ('unreachable_leads', user.id)
+    if key not in cache:
+        rows = (session.query(Lead)
+                .filter(Lead.user_id.in_(brokerage_user_ids(session, user)),
+                        Lead.campaign_id.is_(None), unreachable_filter()).all())
+        contacted = contacted_phone_keys(session, user)
+        # An owner already in conversation is not unreachable, just done with.
+        cache[key] = [lead for lead in rows if not is_contacted_owner(lead, contacted)]
+    return cache[key]
+
+
+def unreachable_facets(session: Session, user: User) -> dict:
+    """Counts for the Unreachable filters, one per stage plus the total."""
+    rows = unreachable_leads(session, user)
+    stages: dict[str, int] = {stage: 0 for stage in UNREACHABLE_STAGES}
+    now = datetime.utcnow()
+    for lead in rows:
+        stage = derive_stage(lead, now)
+        if stage in stages:
+            stages[stage] += 1
+    return {'total': sum(stages.values()), 'stages': stages}
 
 
 def pool_total(session: Session, user: User) -> int:
@@ -563,9 +619,17 @@ def list_leads(session: Session, user: User, search: str = '', signals: list[str
     # can pick up at once. An owner already texted leaves the pool entirely —
     # see `is_contacted_owner` in the loop below, which also takes out the rows
     # for their *other* properties, since those never carried the campaign.
+    #
+    # Asking for one of the Unreachable stages turns the query around: those
+    # rows are exactly what the workable pool filters out, so the view shows
+    # them instead of showing nothing.
     query = (session.query(Lead)
              .filter(Lead.user_id.in_(brokerage_user_ids(session, user)),
-                     Lead.campaign_id.is_(None), pool_textable_filter()))
+                     Lead.campaign_id.is_(None)))
+    if stage in UNREACHABLE_STAGES:
+        query = query.filter(unreachable_filter())
+    else:
+        query = query.filter(pool_textable_filter(), pool_addressable_filter())
     if None not in (north, south, east, west):
         query = query.filter(
             Lead.latitude.is_not(None),

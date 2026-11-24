@@ -391,6 +391,8 @@ class ExperimentOut(BaseModel):
     campaign_ids: List[int] = Field(default_factory=list)
     total_leads: int = 0
     outreach_conversations: int = 0
+    outreached_leads: int = 0
+    not_contacted: List[dict] = Field(default_factory=list)
     outreach_complete: bool = False
     expected_max_cost: float = 0
     error: str = ''

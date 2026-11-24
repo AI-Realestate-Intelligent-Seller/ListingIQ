@@ -7,7 +7,9 @@ from app import cache, db
 from app.experiments import scheduler as experiment_scheduler
 from app.leads import campaign as campaign_service
 from app.leads.address import canonical
-from app.models import Campaign, Conversation, Experiment, Lead, Message, OutboundSmsJob
+from app.models import (
+    Campaign, Conversation, Experiment, Lead, LeadEvent, Message, OutboundSmsJob,
+)
 
 
 def test_audience_distributions_are_property_based_and_tenant_scoped(
@@ -144,6 +146,99 @@ def test_experiment_reports_distinct_conversations_across_variants(
     assert response.status_code == 200, response.text
     assert response.json()[0]['total_leads'] == 3
     assert response.json()[0]['outreach_conversations'] == 2
+
+
+def test_experiment_detail_explains_selected_lead_that_was_not_contacted(
+        session, make_user, client, auth_header):
+    owner = make_user('experiment-outreach-detail@example.com', role='broker')
+    experiment = Experiment(
+        user_id=owner.id,
+        name='Lookup outcome detail',
+        test_dimension='tone',
+        winner_metric='reply_rate',
+        allocation_mode='balanced',
+        timezone='UTC',
+        scheduled_at=datetime(2026, 11, 24, 14, 5),
+        status='running',
+        total_leads=2,
+    )
+    session.add(experiment)
+    session.flush()
+    campaign = Campaign(
+        user_id=owner.id,
+        name='Lookup outcome detail · Variant A',
+        message_template='Hello',
+        status='sent',
+        experiment_id=experiment.id,
+        experiment_variant='Variant A',
+    )
+    session.add(campaign)
+    session.flush()
+    experiment.campaign_ids = json.dumps([campaign.id])
+    experiment.variant_config = json.dumps([{
+        'label': 'Variant A', 'campaign_id': campaign.id, 'lead_count': 2,
+        'message_template': 'Hello',
+    }])
+    conversation = Conversation(user_id=owner.id, contact='+13125550101')
+    session.add(conversation)
+    session.flush()
+    reached = Lead(
+        user_id=owner.id, owner_name='Reached Owner', phone='+13125550101',
+        property_address='1 Reached Ave', campaign_id=campaign.id,
+        conversation_id=conversation.id,
+    )
+    unknown = Lead(
+        user_id=owner.id, owner_name='Unknown Line', phone='+17876142430',
+        property_address='2 Lookup Ave', details=json.dumps({'_phone_numbers': [{
+            'phone': '+17876142430',
+            'telnyx_lookup': {'status': 'unknown', 'line_type': None},
+        }]}),
+    )
+    session.add_all([reached, unknown])
+    session.flush()
+    message = Message(
+        conversation_id=conversation.id, campaign_id=campaign.id,
+        direction='outbound', event_type='outreach.initial', status='delivered',
+        property_key=canonical(reached.property_address),
+    )
+    session.add(message)
+    session.flush()
+    session.add_all([
+        LeadEvent(
+            lead_id=reached.id, event_category='stage',
+            event_type='locked_to_campaign', actor_type='broker',
+            to_value=campaign.name, meta=json.dumps({'campaign_id': campaign.id}),
+        ),
+        LeadEvent(
+            lead_id=unknown.id, event_category='stage',
+            event_type='locked_to_campaign', actor_type='broker',
+            to_value=campaign.name, meta=json.dumps({'campaign_id': campaign.id}),
+        ),
+        LeadEvent(
+            lead_id=reached.id, event_category='activity',
+            event_type='outreach_sent', actor_type='broker',
+            to_value=campaign.name,
+            meta=json.dumps({'campaign_id': campaign.id, 'message_id': message.id}),
+        ),
+    ])
+    session.commit()
+
+    response = client.get(
+        f'/api/v1/experiments/{experiment.id}', headers=auth_header(owner.email),
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body['total_leads'] == 2
+    assert body['outreached_leads'] == 1
+    assert body['outreach_conversations'] == 1
+    assert body['not_contacted'] == [{
+        'lead_id': unknown.id,
+        'owner_name': 'Unknown Line',
+        'property_address': '2 Lookup Ave',
+        'variant': 'Variant A',
+        'reason': 'Phone type could not be verified as mobile by Telnyx. No message was sent.',
+    }]
 
 
 def test_experiment_skips_unavailable_leads_and_uses_accepted_totals(
@@ -473,7 +568,7 @@ def test_analysis_and_experiment_reads_use_versioned_redis_cache(
     assert [item[0] for item in calls] == [
         'campaign-audience-analysis-v1',
         'experiments-list-v3',
-        'experiment-detail-v3',
+        'experiment-detail-v4',
     ]
     assert all('experiments' in item[1] for item in calls)
     assert all(item[2]['user'] == owner.id for item in calls)

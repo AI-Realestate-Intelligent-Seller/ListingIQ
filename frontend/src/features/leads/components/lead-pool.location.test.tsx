@@ -49,6 +49,7 @@ const emptyPool = {
   leads: [],
   map: { mappable_count: 0, pending_count: 0, failed_count: 0 },
   facets: { total: 0, signals: {}, stages: {} },
+  unreachable: { total: 0, stages: {} },
   locations: { states: [], cities: [], zips: [] },
   signal_catalog: [],
   stage_catalog: [],
@@ -520,5 +521,42 @@ describe("LeadPool dependent location filters", () => {
       )).toBe(true);
     });
     expect(resolveLocation).not.toHaveBeenCalledWith("Greenleaf", undefined);
+  });
+  it("switches to the Unreachable filters and drops the campaign action", async () => {
+    vi.mocked(fetchLeadPool).mockResolvedValue({
+      ...emptyPool,
+      leads: [leadRow(1)],
+      facets: { total: 1, signals: {}, stages: { ready: 1 } },
+      unreachable: { total: 5, stages: { not_mobile: 3, no_address: 2 } },
+      stage_catalog: [
+        { key: "ready", label: "Ready for Outreach" },
+        { key: "not_mobile", label: "No mobile line" },
+        { key: "no_address", label: "Missing address" },
+      ],
+    });
+
+    render(<LeadPool />);
+
+    // Every count is shown up front, including the two nobody can work.
+    const landline = await screen.findByRole("tab", { name: /No mobile line 3/ });
+    expect(screen.getByRole("tab", { name: /Pool 1/ })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: /Missing address 2/ })).toBeTruthy();
+
+    // A selection in the pool offers a campaign; the same selection must not
+    // be offered one in a list every campaign would refuse.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select Owner 1" }));
+    expect(screen.getByRole("button", { name: /Create campaign/ })).toBeTruthy();
+
+    fireEvent.click(landline);
+
+    await waitFor(() => {
+      const queries = vi.mocked(fetchLeadPool).mock.calls.map(([query]) => query);
+      expect(queries.some((query) => query.stage === "not_mobile")).toBe(true);
+    });
+    expect(landline.getAttribute("aria-selected")).toBe("true");
+    // The pool selection does not carry into the other list.
+    expect(screen.queryByText("1 lead selected")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Create campaign/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Filter by stage" })).toBeNull();
   });
 });

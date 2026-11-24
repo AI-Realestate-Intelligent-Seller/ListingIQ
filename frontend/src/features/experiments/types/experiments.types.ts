@@ -31,6 +31,14 @@ export type ExperimentVariant = Omit<ExperimentVariantInput, "lead_ids"> & {
   followup_scheduled_at?: string | null;
 };
 
+export type ExperimentNotContacted = {
+  lead_id: number;
+  owner_name: string | null;
+  property_address: string | null;
+  variant: string;
+  reason: string;
+};
+
 export type ExperimentFollowupUpdate = Pick<ExperimentVariantInput,
   "followup_enabled" | "followup_template" | "followup_delay_hours"
 >;
@@ -43,6 +51,10 @@ export type Experiment = Omit<ExperimentCreateInput, "variants" | "launch_now" |
   campaign_ids: number[];
   total_leads: number;
   outreach_conversations: number;
+  /** Populated by the experiment detail endpoint. */
+  outreached_leads?: number;
+  /** Populated by the experiment detail endpoint. */
+  not_contacted?: ExperimentNotContacted[];
   /** True once every variant campaign has finished sending its queued outreach. */
   outreach_complete: boolean;
   expected_max_cost: number;
